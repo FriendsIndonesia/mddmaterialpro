@@ -805,7 +805,28 @@
         data.cashAccounts.forEach((account) => {
           if (account.name === ["Bank", "BSI"].join(" ")) account.name = "Rek. Bank";
         });
+        data.products = (data.products || []).map((product) => {
+          ["buy", "price", "price2", "stockIn", "stockOut", "stock", "stockAkhir", "min"].forEach((field) => {
+            product[field] = toNumber(product[field]);
+          });
+          product.stockIn = product.stockIn || product.stock || product.stockAkhir || 0;
+          product.stockOut = product.stockOut || 0;
+          product.stock = Math.max(0, product.stockIn - product.stockOut);
+          product.stockAkhir = product.stock;
+          product.active = product.active !== false && String(product.active).toLowerCase() !== "false";
+          return product;
+        });
         return data;
+      }
+      function toNumber(value) {
+        if (value === undefined || value === null || value === "") return 0;
+        if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+        const text = String(value).trim();
+        if (!text) return 0;
+        if (/^\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}:\d{2})?$/.test(text)) return 0;
+        const cleaned = text.replace(/Rp/gi, "").replace(/\s/g, "").replace(/\.(?=\d{3}(?:\D|$))/g, "").replace(",", ".");
+        const numberValue = Number(cleaned);
+        return Number.isFinite(numberValue) ? numberValue : 0;
       }
       function saveState(action, options = {}) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -964,8 +985,8 @@
       function renderProducts() {
         const activeProducts = state.products.filter((p) => p.active);
         const stockQty = activeProducts.reduce((sum, p) => sum + stockAkhirProduk(p), 0);
-        const stockValue = activeProducts.reduce((sum, p) => sum + (stockAkhirProduk(p) * Number(p.buy || 0)), 0);
-        const critical = activeProducts.filter((p) => stockAkhirProduk(p) <= Number(p.min || 0));
+        const stockValue = activeProducts.reduce((sum, p) => sum + (stockAkhirProduk(p) * toNumber(p.buy)), 0);
+        const critical = activeProducts.filter((p) => stockAkhirProduk(p) <= toNumber(p.min));
         document.getElementById("productsView").innerHTML = `
           <div class="page-header">
             <div><p class="eyebrow">Produk</p><h2>Database Produk Material</h2><div class="text-secondary fw-semibold mt-1">Bersumber dari form input Master Barang.</div></div>
@@ -1010,9 +1031,9 @@
       function stockAkhirProduk(product) {
         if (!product) return 0;
         if (product.stockIn !== undefined || product.stockOut !== undefined) {
-          return Math.max(0, Number(product.stockIn || 0) - Number(product.stockOut || 0));
+          return Math.max(0, toNumber(product.stockIn) - toNumber(product.stockOut));
         }
-        return Number(product.stock ?? product.stockAkhir ?? 0);
+        return toNumber(product.stock ?? product.stockAkhir ?? 0);
       }
       function findProduct(idOrCode) {
         const q = String(idOrCode || "").toLowerCase();
@@ -1153,12 +1174,12 @@
         const todayPaymentsReceivable = state.payments.filter((x) => isToday(x.date) && x.type === "Piutang").reduce((sum, x) => sum + x.amount, 0);
         const todayPaymentsDebt = state.payments.filter((x) => isToday(x.date) && x.type === "Hutang").reduce((sum, x) => sum + x.amount, 0);
         const todayPettyCash = state.cashTx.filter((x) => isToday(x.date) && x.category === "Biaya Operasional").reduce((sum, x) => sum + (x.type === "Masuk" ? x.amount : -x.amount), 0);
-        const stockValue = state.products.reduce((s, p) => s + (p.stock * p.buy), 0);
+        const stockValue = state.products.reduce((s, p) => s + (stockAkhirProduk(p) * toNumber(p.buy)), 0);
         const receivable = state.sales.filter((s) => s.status === "Piutang").reduce((sum, s) => sum + s.due, 0);
         const payable = state.purchases.filter((p) => p.status === "Hutang").reduce((sum, p) => sum + p.due, 0);
         const cashBalance = state.cashAccounts.reduce((s, a) => s + a.balance, 0);
         const assetValue = cashBalance + stockValue + receivable - payable;
-        const low = state.products.filter((p) => p.active && p.stock <= p.min);
+        const low = state.products.filter((p) => p.active && stockAkhirProduk(p) <= toNumber(p.min));
         const stockDifference = state.stockMoves.filter((m) => m.type === "Opname").reduce((sum, m) => sum + Number(m.difference ?? m.qty ?? 0), 0);
         document.getElementById("metricGrid").innerHTML = [
           ["bi-box-seam", "Total Produk Terjual", number.format(todaySales.reduce((sum, sale) => sum + sale.items.reduce((qty, item) => qty + item.qty, 0), 0)), "bg-blue"],
@@ -1183,7 +1204,7 @@
           ].map(([label, value]) => `<div class="owner-report-item"><span>${label}</span><strong>${value}</strong></div>`).join("");
         }
         document.getElementById("lowStockCount").textContent = `${low.length} item`;
-        document.getElementById("dashboardStockRows").innerHTML = low.map((p) => `<tr><td>${p.name}</td><td class="text-end">${number.format(p.stock)} ${p.unit}</td><td><span class="status-dot ${p.stock === 0 ? "danger" : "warn"}"></span> ${p.stock === 0 ? "Out of stock" : "Limit stok"}</td></tr>`).join("") || `<tr><td colspan="3" class="text-center text-secondary">Stok aman.</td></tr>`;
+        document.getElementById("dashboardStockRows").innerHTML = low.map((p) => { const stock = stockAkhirProduk(p); return `<tr><td>${p.name}</td><td class="text-end">${number.format(stock)} ${p.unit}</td><td><span class="status-dot ${stock === 0 ? "danger" : "warn"}"></span> ${stock === 0 ? "Out of stock" : "Limit stok"}</td></tr>`; }).join("") || `<tr><td colspan="3" class="text-center text-secondary">Stok aman.</td></tr>`;
         const fast = low.length ? `Prioritaskan restock ${low[0].name}; item ini sudah menyentuh batas minimum.` : "Stok sehat. Pertimbangkan paket promo dari produk dengan margin terbaik.";
         const margin = salesTotal - state.sales.reduce((sum, sale) => sum + sale.items.reduce((x, item) => x + ((findProduct(item.productId)?.buy || 0) * item.qty), 0), 0);
         const advice = document.getElementById("businessAdvice");
@@ -1406,8 +1427,8 @@
         sale.items.forEach((item) => {
           const p = findProduct(item.productId);
           if (p) {
-            p.stockIn = Number(p.stockIn ?? p.stock ?? 0);
-            p.stockOut = Number(p.stockOut || 0) + item.qty;
+            p.stockIn = toNumber(p.stockIn ?? p.stock ?? 0);
+            p.stockOut = toNumber(p.stockOut) + item.qty;
             p.stock = stockAkhirProduk(p);
             p.stockAkhir = p.stock;
           }
@@ -1457,7 +1478,7 @@
           </div>
           <div class="module-grid mt-3">
             ${smallModule("Laporan Pembelian", "Rekap transaksi pembelian dan retur.", "exportPurchasePdf", "bi-filetype-pdf")}
-            ${smallModule("Warning Stok", `${state.products.filter((p) => p.stock <= p.min).length} produk perlu restock.`, "jumpStockReport", "bi-exclamation-triangle")}
+            ${smallModule("Warning Stok", `${state.products.filter((p) => stockAkhirProduk(p) <= toNumber(p.min)).length} produk perlu restock.`, "jumpStockReport", "bi-exclamation-triangle")}
             ${smallModule("Cetak Price Tag", "Cetak label harga dan barcode produk.", "printPriceTags", "bi-tags")}
             ${smallModule("Produksi Paket", "Gabungkan barang menjadi paket penjualan.", "producePackage", "bi-boxes")}
           </div>
@@ -1568,8 +1589,8 @@
         purchase.items.forEach((item) => {
           const p = findProduct(item.productId);
           if (p) {
-            p.stockIn = Number(p.stockIn ?? p.stock ?? 0) + item.qty;
-            p.stockOut = Number(p.stockOut || 0);
+            p.stockIn = toNumber(p.stockIn ?? p.stock ?? 0) + item.qty;
+            p.stockOut = toNumber(p.stockOut);
             p.stock = stockAkhirProduk(p);
             p.stockAkhir = p.stock;
             p.buy = item.buy || item.price;
@@ -1833,8 +1854,8 @@
         const purchaseReturn = state.returns.filter((r) => r.module === "Pembelian");
         const debtRows = state.purchases.filter((p) => p.due > 0);
         const receivableRows = state.sales.filter((s) => s.due > 0);
-        const stockValue = state.products.reduce((s, p) => s + (p.stock * p.buy), 0);
-        const stockQty = state.products.reduce((s, p) => s + Number(p.stock || 0), 0);
+        const stockValue = state.products.reduce((s, p) => s + (stockAkhirProduk(p) * toNumber(p.buy)), 0);
+        const stockQty = state.products.reduce((s, p) => s + stockAkhirProduk(p), 0);
         const stockRevision = state.stockMoves.filter((m) => ["Opname", "Penyesuaian"].includes(m.type));
         const masterRows = [...state.customers, ...state.suppliers, ...state.products, ...state.discounts];
         const cashNet = state.cashTx.reduce((s, x) => s + (x.type === "Masuk" ? x.amount : -x.amount), 0);
@@ -1901,7 +1922,7 @@
         if (canAccessMaster("Master Paket")) sections.push(masterDatabasePanel("Master Paket", "packages", state.packages.map((p) => ({ id: p.id, nama_paket: p.name, isi_paket: p.items, harga: Number(p.price || 0) })), ["nama_paket", "isi_paket", "harga"]));
         if (canAccessMaster("Stok Opname")) sections.push(masterDatabasePanel("Stok Opname", "stockMoves", state.stockMoves.filter((m) => m.type === "Opname").map((m) => ({ id: m.id, nomor: m.number || m.id, tanggal: m.date, kode_barang: m.sku || findProduct(m.productId)?.code || "-", nama_barang: m.productName || findProduct(m.productId)?.name || "-", satuan: normalizeUnit(m.unit || findProduct(m.productId)?.unit), stock_sistem: String(Number(m.systemStock || 0)), stock_fisik: String(Number(m.physicalStock || 0)), selisih: String(Number(m.difference || 0)), keterangan: m.note || "-" })), ["nomor", "tanggal", "kode_barang", "nama_barang", "satuan", "stock_sistem", "stock_fisik", "selisih", "keterangan"]));
         if (canAccessMaster("Master Cetak Barcode")) sections.push(masterDatabasePanel("Master Cetak Barcode", "products", productRows(state.products).map((p, index) => ({ id: state.products[index]?.id, kode: p.kode, nama: p.nama, kategori: p.kategori, satuan: p.satuan, stock_akhir: String(p.stock_akhir) })), ["kode", "nama", "kategori", "satuan", "stock_akhir"]));
-        if (canAccessMaster("Master Edit Harga")) sections.push(masterDatabasePanel("Master Edit Harga", "products", state.products.map((p) => ({ id: p.id, kode: p.code, nama: p.name, harga_beli: Number(p.buy || 0), harga_jual_1: Number(p.price || 0), harga_jual_2: Number(p.price2 || 0) })), ["kode", "nama", "harga_beli", "harga_jual_1", "harga_jual_2"]));
+        if (canAccessMaster("Master Edit Harga")) sections.push(masterDatabasePanel("Master Edit Harga", "products", state.products.map((p) => ({ id: p.id, kode: p.code, nama: p.name, harga_beli: toNumber(p.buy), harga_jual_1: toNumber(p.price), harga_jual_2: toNumber(p.price2) })), ["kode", "nama", "harga_beli", "harga_jual_1", "harga_jual_2"]));
         if (canAccessMaster("Master Kas")) sections.push(masterDatabasePanel("Master Kas", "cashAccounts", state.cashAccounts.map((a) => ({ id: a.id, nama_kas: a.name, saldo: Number(a.balance || 0) })), ["nama_kas", "saldo"]));
         if (!sections.length) return "";
         return `<section class="panel mt-3"><div class="panel-header"><h3>Database Master Dokumen</h3><span class="chip">Edit dan hapus data</span></div><div class="master-database-stack">${sections.join("")}</div></section>`;
@@ -2060,8 +2081,8 @@
       }
       function openProductModal(productId = "") {
         const editing = state.products.find((p) => p.id === productId);
-        const stockInValue = Number(editing?.stockIn ?? editing?.stock ?? 0);
-        const stockOutValue = Number(editing?.stockOut || 0);
+        const stockInValue = toNumber(editing?.stockIn ?? editing?.stock ?? 0);
+        const stockOutValue = toNumber(editing?.stockOut);
         const stockAkhirValue = stockAkhirProduk(editing) || Math.max(0, stockInValue - stockOutValue);
         openModal(editing ? "Edit Master Barang" : "Master Barang", `
           <div class="row g-3">
@@ -2172,7 +2193,7 @@
             const old = stockAkhirProduk(product);
             const physical = Number(fd.get("physicalStock"));
             const diff = physical - old;
-            product.stockIn = Number(product.stockIn ?? product.stock ?? physical);
+            product.stockIn = toNumber(product.stockIn ?? product.stock ?? physical);
             product.stockOut = Math.max(0, product.stockIn - physical);
             product.stock = stockAkhirProduk(product);
             product.stockAkhir = product.stock;
@@ -2228,7 +2249,7 @@
           const systemStock = stockAkhirProduk(product);
           const physical = Number(fd.get("physicalStock"));
           Object.assign(editing, { number: fd.get("number"), date: fd.get("date"), productId: product.id, sku: product.code, productName: product.name, unit: fd.get("unit") || product.unit, type: "Opname", systemStock, physicalStock: physical, difference: physical - systemStock, qty: physical - systemStock, note: fd.get("note") });
-          product.stockIn = Number(product.stockIn ?? product.stock ?? physical);
+          product.stockIn = toNumber(product.stockIn ?? product.stock ?? physical);
           product.stockOut = Math.max(0, product.stockIn - physical);
           product.stock = stockAkhirProduk(product);
           product.stockAkhir = product.stock;

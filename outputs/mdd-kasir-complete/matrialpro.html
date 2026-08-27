@@ -860,7 +860,7 @@
         return true;
       }
 
-      function loadGoogleWorkspaceState() {
+      function loadGoogleWorkspaceJsonp() {
         return new Promise((resolve) => {
           if (!state.profile?.onlineMode || !state.profile?.googleEndpoint) return resolve(false);
           const callbackName = `mddBackendState${Date.now()}${Math.random().toString(36).slice(2)}`;
@@ -888,6 +888,23 @@
           script.src = `${state.profile.googleEndpoint}${separator}action=state&callback=${callbackName}&_=${Date.now()}`;
           document.head.appendChild(script);
         });
+      }
+
+      async function loadGoogleWorkspaceState() {
+        if (!state.profile?.onlineMode || !state.profile?.googleEndpoint) return false;
+        const separator = state.profile.googleEndpoint.includes("?") ? "&" : "?";
+        const stateUrl = `${state.profile.googleEndpoint}${separator}action=state&_=${Date.now()}`;
+        try {
+          const response = await fetch(stateUrl, { cache: "no-store", redirect: "follow" });
+          if (response.ok) {
+            const payload = await response.json();
+            const changed = mergeStateFromBackend(payload?.data);
+            if (changed) return true;
+          }
+        } catch (error) {
+          console.warn("Google Workspace fetch fallback to JSONP", error);
+        }
+        return loadGoogleWorkspaceJsonp();
       }
 
       function init() {

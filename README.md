@@ -34,6 +34,10 @@ Backend mendukung:
 - `POST` sinkronisasi database dari aplikasi.
 - Auto-sync dari aplikasi setelah `URL Web App Apps Script` dan `Mode Online Google Workspace` diaktifkan di `Setting > Profile Aplikasi`.
 
+Web App URL aktif:
+
+`https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec`
+
 ## GitHub
 
 Repository:

@@ -37,6 +37,10 @@ Endpoint backend juga bisa dicek langsung dengan:
 - Status: `WEB_APP_URL`
 - Ambil database terakhir: `WEB_APP_URL?action=state`
 
+Web App URL aktif untuk build ini:
+
+`https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec`
+
 ## Sheet yang Dibuat
 
 Backend akan membuat dan memperbarui sheet:

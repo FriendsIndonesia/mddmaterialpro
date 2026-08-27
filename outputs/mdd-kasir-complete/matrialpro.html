@@ -827,6 +827,48 @@
         syncTimer = setTimeout(syncGoogleWorkspace, 1800);
       }
 
+      function mergeStateFromBackend(remoteData) {
+        if (!remoteData || typeof remoteData !== "object") return false;
+        const remoteProducts = Array.isArray(remoteData.products) ? remoteData.products : [];
+        const shouldLoadProducts = remoteProducts.length && (!state.products.length || remoteProducts.length > state.products.length);
+        if (!shouldLoadProducts) return false;
+        const merged = normalizeState(Object.assign(defaultState(), remoteData));
+        Object.keys(state).forEach((key) => delete state[key]);
+        Object.assign(state, merged);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        return true;
+      }
+
+      function loadGoogleWorkspaceState() {
+        return new Promise((resolve) => {
+          if (!state.profile?.onlineMode || !state.profile?.googleEndpoint) return resolve(false);
+          const callbackName = `mddBackendState${Date.now()}${Math.random().toString(36).slice(2)}`;
+          const script = document.createElement("script");
+          const separator = state.profile.googleEndpoint.includes("?") ? "&" : "?";
+          const cleanup = () => {
+            delete window[callbackName];
+            script.remove();
+          };
+          const timer = setTimeout(() => {
+            cleanup();
+            resolve(false);
+          }, 12000);
+          window[callbackName] = (response) => {
+            clearTimeout(timer);
+            const changed = mergeStateFromBackend(response?.data);
+            cleanup();
+            resolve(changed);
+          };
+          script.onerror = () => {
+            clearTimeout(timer);
+            cleanup();
+            resolve(false);
+          };
+          script.src = `${state.profile.googleEndpoint}${separator}action=state&callback=${callbackName}&_=${Date.now()}`;
+          document.head.appendChild(script);
+        });
+      }
+
       function init() {
         renderNav();
         bind();
@@ -869,12 +911,14 @@
         icon.className = `bi ${visible ? "bi-eye" : "bi-eye-slash"}`;
         document.getElementById("togglePasswordBtn").setAttribute("aria-label", visible ? "Lihat password" : "Sembunyikan password");
       }
-      function showApp() {
+      async function showApp() {
         document.getElementById("loginScreen").classList.add("d-none");
         document.getElementById("appShell").classList.remove("d-none");
         document.getElementById("sessionName").textContent = session.name;
         document.getElementById("sessionRole").textContent = session.role;
         document.querySelectorAll(".owner-only").forEach((el) => el.classList.toggle("d-none", session.role !== "Owner"));
+        const loaded = await loadGoogleWorkspaceState();
+        if (loaded) toast("Database produk berhasil dimuat dari Google Workspace.");
         renderNav();
         const active = document.querySelector(".view-section.active")?.id || "dashboardView";
         if (!canAccessView(active)) setView(firstAllowedView(), true);

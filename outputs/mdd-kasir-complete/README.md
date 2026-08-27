@@ -45,6 +45,7 @@ Build ini disiapkan sebagai aplikasi baru untuk ditawarkan/dijual: data produk, 
 Integrasi:
 - Google Workspace: `friendsindonesia28@gmail.com`
 - Apps Script: `https://script.google.com/u/0/home/projects/1SPjZ7FXhsxqR2uUayTXkGxZoMfgIkmRlap6KWKeBpMGykwbOqBfgPcrE/edit`
+- Web App URL: `https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec`
 - GitHub: `https://github.com/FriendsIndonesia/mddmaterialpro`
 - Backend Apps Script: lihat `../../google-workspace-backend/Code.gs`
 - Panduan setup: lihat `../../GOOGLE_WORKSPACE_SETUP.md`

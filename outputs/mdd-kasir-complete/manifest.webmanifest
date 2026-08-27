@@ -1,0 +1,25 @@
+{
+  "name": "MDD Material Pro",
+  "short_name": "MDD Material",
+  "description": "Aplikasi kasir offline-first untuk penjualan, pembelian, stok, keuangan, dan laporan.",
+  "start_url": "./matrialpro.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef3f8",
+  "theme_color": "#17212b",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "mdd-material-pro-logo.png",
+      "sizes": "1254x1254",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -81,7 +81,7 @@ function statusPayload_(ss) {
 
 function readState_(ss) {
   const latestRaw = readLatestRawState_(ss);
-  if (latestRaw && latestRaw.data) {
+  if (latestRaw && latestRaw.data && latestRaw.storageMode !== "tables") {
     return {
       ok: true,
       app: APP_NAME,
@@ -210,10 +210,26 @@ function readTable_(ss, sheetName) {
 
 function writeRawState_(ss, payload) {
   const sheet = ensureSheet_(ss, "RawState", ["syncedAt", "payloadJson"]);
-  sheet.appendRow([new Date().toISOString(), JSON.stringify(payload)]);
+  const json = JSON.stringify(payload);
+  const compactPayload = json.length > 45000 ? {
+    app: payload.app || APP_NAME,
+    account: payload.account || OWNER_EMAIL,
+    githubRepo: payload.githubRepo || GITHUB_REPO,
+    sentAt: payload.sentAt || new Date().toISOString(),
+    storageMode: "tables",
+    message: "Payload besar disimpan di sheet tabel terstruktur, bukan di satu cell RawState.",
+    counts: tableCounts_(payload.data || {})
+  } : payload;
+  sheet.appendRow([new Date().toISOString(), JSON.stringify(compactPayload)]);
   const maxRows = 100;
   const extraRows = sheet.getLastRow() - maxRows - 1;
   if (extraRows > 0) sheet.deleteRows(2, extraRows);
+}
+
+function tableCounts_(data) {
+  const counts = {};
+  TABLES.forEach((table) => counts[table.key] = Array.isArray(data[table.key]) ? data[table.key].length : 0);
+  return counts;
 }
 
 function readLatestRawState_(ss) {

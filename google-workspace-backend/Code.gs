@@ -41,7 +41,14 @@ function doPost(e) {
 
     writeMetadata_(ss, payload, data);
     writeProfile_(ss, data);
-    TABLES.forEach((table) => writeTable_(ss, table.sheet, table.fields, data[table.key] || []));
+    // New clients send row-level changes. This preserves records entered or
+    // edited directly in Google Sheets instead of replacing every table.
+    if (payload.changes && payload.changes.tables) {
+      TABLES.forEach((table) => applyTableChanges_(ss, table, payload.changes.tables[table.key]));
+    } else {
+      // Backward-compatible import: merge rows and never delete sheet-only data.
+      TABLES.forEach((table) => mergeTable_(ss, table, data[table.key] || []));
+    }
     writeRawState_(ss, payload);
 
     return output_({
@@ -80,20 +87,6 @@ function statusPayload_(ss) {
 }
 
 function readState_(ss) {
-  const latestRaw = readLatestRawState_(ss);
-  if (latestRaw && latestRaw.data && latestRaw.storageMode !== "tables") {
-    return {
-      ok: true,
-      app: APP_NAME,
-      owner: OWNER_EMAIL,
-      source: "RawState",
-      syncedAt: latestRaw.sentAt || latestRaw.syncedAt || "",
-      data: latestRaw.data,
-      spreadsheetId: ss.getId(),
-      spreadsheetUrl: ss.getUrl()
-    };
-  }
-
   const data = {};
   TABLES.forEach((table) => data[table.key] = readTable_(ss, table.sheet));
   Object.assign(data, readProfile_(ss));
@@ -102,6 +95,7 @@ function readState_(ss) {
     app: APP_NAME,
     owner: OWNER_EMAIL,
     source: "Sheets",
+    syncedAt: new Date().toISOString(),
     data,
     spreadsheetId: ss.getId(),
     spreadsheetUrl: ss.getUrl()
@@ -141,6 +135,12 @@ function ensureSheet_(ss, name, headers) {
     sheet.setFrozenRows(1);
     sheet.autoResizeColumns(1, headers.length);
   }
+  const plainNumberFields = ["stockIn", "stockOut", "stock", "stockAkhir", "min", "qty", "systemStock", "physicalStock", "difference"];
+  const textFields = ["id", "code", "invoiceNo", "number", "sku", "phone", "whatsapp"];
+  headers.forEach((header, index) => {
+    if (plainNumberFields.indexOf(header) >= 0) sheet.getRange(2, index + 1, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat("0.###");
+    if (textFields.indexOf(header) >= 0) sheet.getRange(2, index + 1, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat("@");
+  });
   return sheet;
 }
 
@@ -195,14 +195,89 @@ function writeTable_(ss, sheetName, fields, rows) {
   sheet.getRange(2, 1, values.length, fields.length).setValues(values);
 }
 
+function mergeTable_(ss, table, incomingRows) {
+  if (!Array.isArray(incomingRows) || incomingRows.length === 0) return;
+  const current = readTable_(ss, table.sheet);
+  const keyField = table.fields.indexOf("id") >= 0 ? "id" : table.fields[0];
+  const merged = {};
+  current.forEach((row) => {
+    const key = String(row[keyField] || "").trim();
+    if (key) merged[key] = row;
+  });
+  incomingRows.forEach((row) => {
+    const key = String(row && row[keyField] || "").trim();
+    if (key) merged[key] = row;
+  });
+  writeTable_(ss, table.sheet, table.fields, Object.keys(merged).map((key) => merged[key]));
+}
+
+function applyTableChanges_(ss, table, change) {
+  if (!change) return;
+  const current = readTable_(ss, table.sheet);
+  const keyField = table.fields.indexOf("id") >= 0 ? "id" : table.fields[0];
+  const rowsById = {};
+  current.forEach((row) => {
+    const key = String(row[keyField] || "").trim();
+    if (key) rowsById[key] = row;
+  });
+  (change.deletes || []).forEach((id) => delete rowsById[String(id)]);
+  (change.upserts || []).forEach((row) => {
+    const key = String(row && row[keyField] || "").trim();
+    if (key) rowsById[key] = row;
+  });
+  writeTable_(ss, table.sheet, table.fields, Object.keys(rowsById).map((key) => rowsById[key]));
+}
+
+// Installable edit trigger: validates manual rows and gives missing records a
+// stable ID so they can safely participate in two-way synchronization.
+function onSpreadsheetEdit(e) {
+  if (!e || !e.range) return;
+  const sheet = e.range.getSheet();
+  const table = TABLES.find((item) => item.sheet === sheet.getName());
+  if (!table || e.range.getRow() <= 1) return;
+  const idColumn = table.fields.indexOf("id") + 1;
+  if (idColumn <= 0) return;
+  const row = e.range.getRow();
+  const idCell = sheet.getRange(row, idColumn);
+  if (!String(idCell.getValue() || "").trim()) {
+    const prefix = table.sheet.replace(/[^A-Za-z]/g, "").slice(0, 3).toUpperCase() || "ROW";
+    idCell.setValue(prefix + "-" + Utilities.getUuid().slice(0, 12).toUpperCase());
+  }
+}
+
+function installTwoWaySyncTrigger() {
+  const ss = getSpreadsheet_();
+  ScriptApp.getProjectTriggers()
+    .filter((trigger) => trigger.getHandlerFunction() === "onSpreadsheetEdit")
+    .forEach((trigger) => ScriptApp.deleteTrigger(trigger));
+  ScriptApp.newTrigger("onSpreadsheetEdit").forSpreadsheet(ss).onEdit().create();
+  return statusPayload_(ss);
+}
+
 function readTable_(ss, sheetName) {
   const sheet = ss.getSheetByName(sheetName);
   if (!sheet || sheet.getLastRow() < 2) return [];
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  return sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues().map((row) => {
+  const range = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn());
+  const values = range.getValues();
+  const idIndex = headers.indexOf("id");
+  let idsAdded = false;
+  if (idIndex >= 0) {
+    const prefix = sheetName.replace(/[^A-Za-z]/g, "").slice(0, 3).toUpperCase() || "ROW";
+    values.forEach((row) => {
+      const hasData = row.some((value, index) => index !== idIndex && String(value || "").trim());
+      if (hasData && !String(row[idIndex] || "").trim()) {
+        row[idIndex] = prefix + "-" + Utilities.getUuid().slice(0, 12).toUpperCase();
+        idsAdded = true;
+      }
+    });
+    if (idsAdded) range.setValues(values);
+  }
+  const textFields = ["id", "code", "invoiceNo", "number", "sku", "phone", "whatsapp"];
+  return values.map((row) => {
     const item = {};
     headers.forEach((header, index) => {
-      if (header) item[header] = parseValue_(row[index]);
+      if (header) item[header] = textFields.indexOf(header) >= 0 ? String(row[index] ?? "").trim() : parseValue_(row[index]);
     });
     return item;
   });

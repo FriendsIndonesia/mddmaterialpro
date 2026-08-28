@@ -5,8 +5,10 @@ const GITHUB_REPO = "https://github.com/FriendsIndonesia/mddmaterialpro";
 const TABLES = [
   { key: "products", sheet: "Products", fields: ["id", "code", "name", "category", "unit", "buy", "price", "price2", "stockIn", "stockOut", "stock", "stockAkhir", "min", "active"] },
   { key: "customers", sheet: "Customers", fields: ["id", "name", "phone", "type", "address", "deposit"] },
-  { key: "suppliers", sheet: "Suppliers", fields: ["id", "company", "name", "phone", "address"] },
+  { key: "suppliers", sheet: "Suppliers", aliases: ["Supliers"], fields: ["id", "company", "name", "phone", "address"] },
   { key: "employees", sheet: "Employees", fields: ["id", "name", "position", "startDate", "salary", "phone"] },
+  { key: "categories", sheet: "Categories", fields: ["id", "name"] },
+  { key: "discounts", sheet: "Discounts", fields: ["id", "name", "amount", "type", "active"] },
   { key: "cashAccounts", sheet: "CashAccounts", fields: ["id", "name", "balance"] },
   { key: "packages", sheet: "Packages", fields: ["id", "name", "items", "price"] },
   { key: "sales", sheet: "Sales", fields: ["id", "invoiceNo", "date", "dueDate", "customerId", "customerName", "customerType", "customerAddress", "customerWhatsapp", "customerDeposit", "items", "method", "ongkir", "bankCharge", "status", "total", "due", "paid", "returnAmount", "depositRemaining", "note"] },
@@ -23,10 +25,17 @@ const TABLES = [
 
 function doGet(e) {
   const ss = getSpreadsheet_();
-  ensureWorkbook_(ss);
   const action = String((e && e.parameter && e.parameter.action) || "status").toLowerCase();
   const callback = e && e.parameter && e.parameter.callback;
-  const payload = action === "state" ? readState_(ss) : statusPayload_(ss);
+  let payload;
+  if (action === "state") payload = readState_(ss);
+  else if (action === "finance") payload = readSubsetState_(ss, ["purchases", "sales", "payments", "cashAccounts", "cashTx", "returns"]);
+  else if (action === "master") payload = readSubsetState_(ss, ["products", "customers", "suppliers", "employees", "categories", "discounts", "cashAccounts", "packages", "stockMoves"]);
+  else if (action === "products") payload = readSubsetState_(ss, ["products", "categories", "discounts"]);
+  else {
+    ensureWorkbook_(ss);
+    payload = statusPayload_(ss);
+  }
   return output_(payload, callback);
 }
 
@@ -88,13 +97,31 @@ function statusPayload_(ss) {
 
 function readState_(ss) {
   const data = {};
-  TABLES.forEach((table) => data[table.key] = readTable_(ss, table.sheet));
+  TABLES.forEach((table) => data[table.key] = readTableDefinition_(ss, table));
   Object.assign(data, readProfile_(ss));
   return {
     ok: true,
     app: APP_NAME,
     owner: OWNER_EMAIL,
     source: "Sheets",
+    syncedAt: new Date().toISOString(),
+    data,
+    spreadsheetId: ss.getId(),
+    spreadsheetUrl: ss.getUrl()
+  };
+}
+
+function readSubsetState_(ss, keys) {
+  const wanted = {};
+  (keys || []).forEach((key) => wanted[key] = true);
+  const data = {};
+  TABLES.filter((table) => wanted[table.key]).forEach((table) => data[table.key] = readTableDefinition_(ss, table));
+  return {
+    ok: true,
+    app: APP_NAME,
+    owner: OWNER_EMAIL,
+    source: "Sheets",
+    scope: (keys || []).join(","),
     syncedAt: new Date().toISOString(),
     data,
     spreadsheetId: ss.getId(),
@@ -197,7 +224,7 @@ function writeTable_(ss, sheetName, fields, rows) {
 
 function mergeTable_(ss, table, incomingRows) {
   if (!Array.isArray(incomingRows) || incomingRows.length === 0) return;
-  const current = readTable_(ss, table.sheet);
+  const current = readTableDefinition_(ss, table);
   const keyField = table.fields.indexOf("id") >= 0 ? "id" : table.fields[0];
   const merged = {};
   current.forEach((row) => {
@@ -213,7 +240,7 @@ function mergeTable_(ss, table, incomingRows) {
 
 function applyTableChanges_(ss, table, change) {
   if (!change) return;
-  const current = readTable_(ss, table.sheet);
+  const current = readTableDefinition_(ss, table);
   const keyField = table.fields.indexOf("id") >= 0 ? "id" : table.fields[0];
   const rowsById = {};
   current.forEach((row) => {
@@ -233,7 +260,7 @@ function applyTableChanges_(ss, table, change) {
 function onSpreadsheetEdit(e) {
   if (!e || !e.range) return;
   const sheet = e.range.getSheet();
-  const table = TABLES.find((item) => item.sheet === sheet.getName());
+  const table = TABLES.find((item) => item.sheet === sheet.getName() || (item.aliases || []).indexOf(sheet.getName()) >= 0);
   if (!table || e.range.getRow() <= 1) return;
   const idColumn = table.fields.indexOf("id") + 1;
   if (idColumn <= 0) return;
@@ -252,6 +279,19 @@ function installTwoWaySyncTrigger() {
     .forEach((trigger) => ScriptApp.deleteTrigger(trigger));
   ScriptApp.newTrigger("onSpreadsheetEdit").forSpreadsheet(ss).onEdit().create();
   return statusPayload_(ss);
+}
+
+function readTableDefinition_(ss, table) {
+  const names = [table.sheet].concat(table.aliases || []);
+  const rowsById = {};
+  names.forEach((sheetName) => {
+    readTable_(ss, sheetName).forEach((row) => {
+      const keyField = table.fields.indexOf("id") >= 0 ? "id" : table.fields[0];
+      const key = String(row && row[keyField] || "").trim();
+      if (key) rowsById[key] = row;
+    });
+  });
+  return Object.keys(rowsById).map((key) => rowsById[key]);
 }
 
 function readTable_(ss, sheetName) {

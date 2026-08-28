@@ -871,6 +871,17 @@
         return true;
       }
 
+      function mergeFinanceFromBackend(remoteData) {
+        if (!remoteData || typeof remoteData !== "object") return false;
+        ["purchases", "sales", "payments"].forEach((key) => {
+          if (Array.isArray(remoteData[key])) state[key] = remoteData[key];
+        });
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        if (!lastSyncedSnapshot) lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
+        else ["purchases", "sales", "payments"].forEach((key) => { lastSyncedSnapshot[key] = JSON.parse(JSON.stringify(state[key] || [])); });
+        return true;
+      }
+
       function rowIdentity(key, row) {
         if (!row || typeof row !== "object") return "";
         return String(row.id || (key === "syncQueue" ? row.type : "") || "").trim();
@@ -899,7 +910,7 @@
         return Object.keys(buildSyncChanges().tables).length > 0;
       }
 
-      function loadGoogleWorkspaceJsonp() {
+      function loadGoogleWorkspaceJsonp(action = "state") {
         return new Promise((resolve) => {
           if (!state.profile?.onlineMode || !state.profile?.googleEndpoint) return resolve(false);
           const callbackName = `mddBackendState${Date.now()}${Math.random().toString(36).slice(2)}`;
@@ -912,10 +923,10 @@
           const timer = setTimeout(() => {
             cleanup();
             resolve(false);
-          }, 12000);
+          }, action === "finance" ? 7000 : 15000);
           window[callbackName] = (response) => {
             clearTimeout(timer);
-            const changed = mergeStateFromBackend(response?.data);
+            const changed = action === "finance" ? mergeFinanceFromBackend(response?.data) : mergeStateFromBackend(response?.data);
             cleanup();
             resolve(changed);
           };
@@ -924,31 +935,31 @@
             cleanup();
             resolve(false);
           };
-          script.src = `${state.profile.googleEndpoint}${separator}action=state&callback=${callbackName}&_=${Date.now()}`;
+          script.src = `${state.profile.googleEndpoint}${separator}action=${action}&callback=${callbackName}&_=${Date.now()}`;
           document.head.appendChild(script);
         });
       }
 
-      async function loadGoogleWorkspaceState() {
+      async function loadGoogleWorkspaceState(action = "state") {
         if (!state.profile?.onlineMode || !state.profile?.googleEndpoint) return false;
         const separator = state.profile.googleEndpoint.includes("?") ? "&" : "?";
-        const stateUrl = `${state.profile.googleEndpoint}${separator}action=state&_=${Date.now()}`;
+        const stateUrl = `${state.profile.googleEndpoint}${separator}action=${action}&_=${Date.now()}`;
         try {
           const response = await fetch(stateUrl, { cache: "no-store", redirect: "follow" });
           if (response.ok) {
             const payload = await response.json();
-            const changed = mergeStateFromBackend(payload?.data);
+            const changed = action === "finance" ? mergeFinanceFromBackend(payload?.data) : mergeStateFromBackend(payload?.data);
             if (changed) return true;
           }
         } catch (error) {
           console.warn("Google Workspace fetch fallback to JSONP", error);
         }
-        return loadGoogleWorkspaceJsonp();
+        return loadGoogleWorkspaceJsonp(action);
       }
 
       async function refreshGoogleWorkspaceState() {
         if (isSyncing || document.hidden || hasLocalSyncChanges()) return;
-        const changed = await loadGoogleWorkspaceState();
+        const changed = await loadGoogleWorkspaceState("finance");
         if (changed) renderAll();
       }
 
@@ -1000,14 +1011,23 @@
         document.getElementById("sessionName").textContent = session.name;
         document.getElementById("sessionRole").textContent = session.role;
         document.querySelectorAll(".owner-only").forEach((el) => el.classList.toggle("d-none", session.role !== "Owner"));
-        const loaded = await loadGoogleWorkspaceState();
-        if (loaded) toast("Database berhasil dimuat dari Google Workspace.");
-        clearInterval(autoPullTimer);
-        autoPullTimer = setInterval(refreshGoogleWorkspaceState, 30000);
         renderNav();
         const active = document.querySelector(".view-section.active")?.id || "dashboardView";
         if (!canAccessView(active)) setView(firstAllowedView(), true);
         renderAll();
+        // Dashboard tampil dari cache lokal lebih dahulu; jaringan berjalan di
+        // latar belakang agar login tidak menunggu database produk yang besar.
+        loadGoogleWorkspaceState("finance").then((loaded) => {
+          if (loaded) {
+            renderAll();
+            toast("Data hutang dan piutang terbaru sudah dimuat.");
+          }
+        });
+        setTimeout(() => {
+          if (!hasLocalSyncChanges()) loadGoogleWorkspaceState("state").then((loaded) => { if (loaded) renderAll(); });
+        }, 300);
+        clearInterval(autoPullTimer);
+        autoPullTimer = setInterval(refreshGoogleWorkspaceState, 15000);
       }
       function renderNav() {
         document.getElementById("mainNav").innerHTML = navItems.filter(([view]) => canAccessView(view)).map(([view, icon, label]) => `<button class="nav-link ${document.querySelector(".view-section.active")?.id === view ? "active" : ""}" data-view="${view}" type="button"><i class="bi ${icon}"></i>${label}</button>`).join("");

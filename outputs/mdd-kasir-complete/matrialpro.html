@@ -277,6 +277,9 @@
     }
     .metric-card span { display: block; color: var(--muted); font-size: .82rem; font-weight: 750; }
     .metric-card strong { display: block; font-size: 1.2rem; line-height: 1.2; }
+    .metric-source { display:block; margin-top:6px; color:var(--muted); font-size:.7rem; line-height:1.35; }
+    .audit-box { border:1px solid #d8e2ef; border-left:4px solid #2563eb; border-radius:12px; background:#f8fbff; padding:12px 14px; color:#44536a; font-size:.82rem; }
+    .audit-box strong { color:#172033; }
     .metric-icon {
       width: 54px;
       height: 54px;
@@ -705,6 +708,9 @@
 
       const STORAGE_KEY = "mdd_material_pro_clean_v1";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
+      const STORE_PRINT_NAME = "MUTIARA JAYA";
+      const STORE_PRINT_ADDRESS = "JL. RAYA KARAKAL RT.03 / RW. 03, CIAWI, BOGOR";
+      const STORE_PRINT_PHONE = "082312233247";
       const today = () => new Date().toISOString().slice(0, 10);
       const displayDate = (value) => {
         if (!value) return "-";
@@ -768,7 +774,7 @@
 
       function defaultState() {
         return {
-          profile: { name: "Nama Toko Material", address: "Alamat toko belum diisi", phone: "Telp toko belum diisi", tax: "", googleEndpoint: "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec", googleAccount: "friendsindonesia28@gmail.com", githubRepo: "https://github.com/FriendsIndonesia/mddmaterialpro", onlineMode: true },
+          profile: { name: STORE_PRINT_NAME, address: STORE_PRINT_ADDRESS, phone: STORE_PRINT_PHONE, tax: "", googleEndpoint: "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec", googleAccount: "friendsindonesia28@gmail.com", githubRepo: "https://github.com/FriendsIndonesia/mddmaterialpro", onlineMode: true },
           hardware: { receipt: "Thermal 58/80mm", invoice: "Printer Faktur", barcode: "USB/HID Barcode Scanner", drawer: "RJ11 Cash Drawer", tag: "Printer Barcode" },
           accessCodes: { owner: "060361", admin: "123456", kasir: "111111" },
           categories: [],
@@ -986,7 +992,8 @@
         event.preventDefault();
         const username = document.getElementById("username").value.trim().toLowerCase();
         const password = document.getElementById("password").value;
-        const user = users.find((item) => item.username === username && item.password === password);
+        const configuredPassword = { owner: state.accessCodes.owner, kasir: state.accessCodes.kasir, gudang: state.accessCodes.admin };
+        const user = users.find((item) => item.username === username && password === String(configuredPassword[item.username] || item.password));
         if (!user) {
           document.getElementById("loginAlert").textContent = "Username atau password salah.";
           document.getElementById("loginAlert").classList.remove("d-none");
@@ -1055,19 +1062,24 @@
         return navItems.find(([view]) => canAccessView(view))?.[0] || "cashierView";
       }
       function renderAll() {
-        renderDashboard();
-        renderProducts();
-        renderCashier();
-        renderPurchase();
-        renderFinance();
-        renderReports();
-        renderMaster();
-        renderSettings();
-        renderHistory();
+        const active = document.querySelector(".view-section.active")?.id || "dashboardView";
+        const renderers = {
+          dashboardView: renderDashboard,
+          productsView: renderProducts,
+          cashierView: renderCashier,
+          purchaseView: renderPurchase,
+          financeView: renderFinance,
+          reportsView: renderReports,
+          masterView: renderMaster,
+          settingsView: renderSettings,
+          historyView: renderHistory
+        };
+        (renderers[active] || renderDashboard)();
       }
 
       function renderProducts() {
         const activeProducts = state.products.filter((p) => p.active);
+        const visibleProducts = activeProducts.slice(0, 200);
         const stockQty = activeProducts.reduce((sum, p) => sum + stockAkhirProduk(p), 0);
         const stockValue = activeProducts.reduce((sum, p) => sum + (stockAkhirProduk(p) * toNumber(p.buy)), 0);
         const critical = activeProducts.filter((p) => stockAkhirProduk(p) <= toNumber(p.min));
@@ -1080,12 +1092,12 @@
             </div>
           </div>
           <div class="metrics-grid">
-            <div class="metric-card"><div class="metric-icon bg-blue"><i class="bi bi-box-seam"></i></div><div><span>Total Produk</span><strong>${number.format(activeProducts.length)}</strong></div></div>
-            <div class="metric-card"><div class="metric-icon bg-green"><i class="bi bi-boxes"></i></div><div><span>Total Stock Akhir</span><strong>${number.format(stockQty)}</strong></div></div>
-            <div class="metric-card"><div class="metric-icon bg-cyan"><i class="bi bi-wallet2"></i></div><div><span>Nilai Stock</span><strong>${idr.format(stockValue)}</strong></div></div>
-            <div class="metric-card"><div class="metric-icon bg-amber"><i class="bi bi-exclamation-triangle"></i></div><div><span>Stock Kritis</span><strong>${number.format(critical.length)}</strong></div></div>
+            <div class="metric-card"><div class="metric-icon bg-blue"><i class="bi bi-box-seam"></i></div><div><span>Total Produk Aktif</span><strong>${number.format(activeProducts.length)}</strong><small class="metric-source">Jumlah baris Master Barang berstatus aktif</small></div></div>
+            <div class="metric-card"><div class="metric-icon bg-green"><i class="bi bi-boxes"></i></div><div><span>Total Stok Akhir</span><strong>${number.format(stockQty)}</strong><small class="metric-source">Σ stok masuk − stok keluar produk aktif</small></div></div>
+            <div class="metric-card"><div class="metric-icon bg-cyan"><i class="bi bi-wallet2"></i></div><div><span>Nilai Stok</span><strong>${idr.format(stockValue)}</strong><small class="metric-source">Σ stok akhir × harga beli</small></div></div>
+            <div class="metric-card"><div class="metric-icon bg-amber"><i class="bi bi-exclamation-triangle"></i></div><div><span>Stok Kritis</span><strong>${number.format(critical.length)}</strong><small class="metric-source">Stok akhir ≤ stok minimum</small></div></div>
           </div>
-          <section class="panel"><div class="panel-header"><h3>Daftar Produk Material</h3><span class="chip">${number.format(activeProducts.length)} data</span></div>${productsTable(activeProducts, { actions: canAccessMaster("Master Barang") })}</section>`;
+          <section class="panel"><div class="panel-header"><div><h3>Daftar Produk Material</h3>${activeProducts.length > visibleProducts.length ? `<p class="small text-secondary mb-0">Menampilkan 200 data pertama agar halaman tetap cepat. Seluruh data tetap tersedia untuk kasir, pencarian, dan PDF.</p>` : ""}</div><span class="chip">${number.format(activeProducts.length)} data</span></div>${productsTable(visibleProducts, { actions: canAccessMaster("Master Barang") })}</section>`;
         document.getElementById("exportProductsBtn").onclick = () => exportReportPdf("Database Produk Material", productRows(activeProducts));
         const addBtn = document.getElementById("addProductFromProductsBtn");
         if (addBtn) addBtn.onclick = openProductModal;
@@ -1250,31 +1262,31 @@
         const storeNameEl = document.getElementById("dashboardStoreName");
         const storeContactEl = document.getElementById("dashboardStoreContact");
         if (storeNameEl) storeNameEl.textContent = state.profile.name || "Nama Toko Material";
-        if (storeContactEl) storeContactEl.textContent = `${state.profile.address || "Alamat toko belum diisi"} | Telp: ${state.profile.phone || "Telp toko belum diisi"}`;
-        const salesTotal = state.sales.reduce((s, x) => s + x.total, 0);
-        const purchaseTotal = state.purchases.reduce((s, x) => s + x.total, 0);
+        if (storeContactEl) storeContactEl.textContent = `${state.profile.address || "Alamat toko belum diisi"} | Telp & WhatsApp : ${state.profile.phone || "Nomor belum diisi"}`;
+        const salesTotal = state.sales.reduce((s, x) => s + toNumber(x.total), 0);
         const todaySales = state.sales.filter((x) => isToday(x.date));
         const todayPurchases = state.purchases.filter((x) => isToday(x.date));
-        const todayPaymentsReceivable = state.payments.filter((x) => isToday(x.date) && x.type === "Piutang").reduce((sum, x) => sum + x.amount, 0);
-        const todayPaymentsDebt = state.payments.filter((x) => isToday(x.date) && x.type === "Hutang").reduce((sum, x) => sum + x.amount, 0);
-        const todayPettyCash = state.cashTx.filter((x) => isToday(x.date) && x.category === "Biaya Operasional").reduce((sum, x) => sum + (x.type === "Masuk" ? x.amount : -x.amount), 0);
-        const stockValue = state.products.reduce((s, p) => s + (stockAkhirProduk(p) * toNumber(p.buy)), 0);
-        const receivable = state.sales.filter((s) => s.status === "Piutang").reduce((sum, s) => sum + s.due, 0);
-        const payable = state.purchases.filter((p) => p.status === "Hutang").reduce((sum, p) => sum + p.due, 0);
-        const cashBalance = state.cashAccounts.reduce((s, a) => s + a.balance, 0);
-        const assetValue = cashBalance + stockValue + receivable - payable;
-        const low = state.products.filter((p) => p.active && stockAkhirProduk(p) <= toNumber(p.min));
+        const todayPaymentsReceivable = state.payments.filter((x) => isToday(x.date) && x.type === "Piutang").reduce((sum, x) => sum + toNumber(x.amount), 0);
+        const todayPaymentsDebt = state.payments.filter((x) => isToday(x.date) && x.type === "Hutang").reduce((sum, x) => sum + toNumber(x.amount), 0);
+        const todayPettyCash = state.cashTx.filter((x) => isToday(x.date) && x.category === "Petty Cash").reduce((sum, x) => sum + (x.type === "Masuk" ? toNumber(x.amount) : -toNumber(x.amount)), 0);
+        const activeProducts = state.products.filter((p) => p.active !== false);
+        const stockValue = activeProducts.reduce((s, p) => s + (stockAkhirProduk(p) * toNumber(p.buy)), 0);
+        const receivable = state.sales.filter((s) => toNumber(s.due) > 0).reduce((sum, s) => sum + toNumber(s.due), 0);
+        const payable = state.purchases.filter((p) => toNumber(p.due) > 0).reduce((sum, p) => sum + toNumber(p.due), 0);
+        const cashBalance = state.cashAccounts.reduce((s, a) => s + toNumber(a.balance), 0);
+        const netAssetValue = cashBalance + stockValue + receivable - payable;
+        const low = activeProducts.filter((p) => stockAkhirProduk(p) <= toNumber(p.min));
         const stockDifference = state.stockMoves.filter((m) => m.type === "Opname").reduce((sum, m) => sum + Number(m.difference ?? m.qty ?? 0), 0);
         document.getElementById("metricGrid").innerHTML = [
-          ["bi-box-seam", "Total Produk Terjual", number.format(todaySales.reduce((sum, sale) => sum + sale.items.reduce((qty, item) => qty + item.qty, 0), 0)), "bg-blue"],
-          ["bi-cash-stack", "Omzet Hari Ini", idr.format(todaySales.reduce((s, x) => s + x.total, 0)), "bg-green"],
-          ["bi-truck", "Pembelian Hari Ini", idr.format(todayPurchases.reduce((s, x) => s + x.total, 0)), "bg-cyan"],
-          ["bi-exclamation-triangle", "Stock Kritis Per Hari Ini", number.format(low.length), "bg-amber"],
-          ["bi-arrow-left-right", "Pembayaran Piutang Hari Ini", idr.format(todayPaymentsReceivable), "bg-rose"],
-          ["bi-wallet2", "Pembayaran Hutang Hari Ini", idr.format(todayPaymentsDebt), "bg-blue"],
-          ["bi-bank", "Saldo Kas Per Hari Ini", idr.format(cashBalance), "bg-green"],
-          ["bi-box2-heart", "Nilai Stock Per Hari Ini", idr.format(stockValue), "bg-cyan"]
-        ].map(([icon, label, value, cls]) => `<div class="metric-card"><div class="metric-icon ${cls}"><i class="bi ${icon}"></i></div><div><span>${label}</span><strong>${value}</strong></div></div>`).join("");
+          ["bi-box-seam", "Total Produk Terjual", number.format(todaySales.reduce((sum, sale) => sum + (sale.items || []).reduce((qty, item) => qty + toNumber(item.qty), 0), 0)), "bg-blue", `${todaySales.length} invoice tanggal hari ini`],
+          ["bi-cash-stack", "Omzet Hari Ini", idr.format(todaySales.reduce((s, x) => s + toNumber(x.total), 0)), "bg-green", "Jumlah total invoice penjualan hari ini"],
+          ["bi-truck", "Pembelian Hari Ini", idr.format(todayPurchases.reduce((s, x) => s + toNumber(x.total), 0)), "bg-cyan", "Jumlah total faktur pembelian hari ini"],
+          ["bi-exclamation-triangle", "Stock Kritis Per Hari Ini", number.format(low.length), "bg-amber", "Produk aktif dengan stok akhir ≤ stok minimum"],
+          ["bi-arrow-left-right", "Pembayaran Piutang Hari Ini", idr.format(todayPaymentsReceivable), "bg-rose", "Pembayaran bertipe Piutang tanggal hari ini"],
+          ["bi-wallet2", "Pembayaran Hutang Hari Ini", idr.format(todayPaymentsDebt), "bg-blue", "Pembayaran bertipe Hutang tanggal hari ini"],
+          ["bi-bank", "Saldo Kas Per Hari Ini", idr.format(cashBalance), "bg-green", `${state.cashAccounts.length} akun pada Master Kas`],
+          ["bi-box2-heart", "Nilai Stok Per Hari Ini", idr.format(stockValue), "bg-cyan", "Σ stok akhir × harga beli produk aktif"]
+        ].map(([icon, label, value, cls, source]) => `<div class="metric-card"><div class="metric-icon ${cls}"><i class="bi ${icon}"></i></div><div><span>${label}</span><strong>${value}</strong><small class="metric-source">Sumber: ${source}</small></div></div>`).join("");
         const reportBox = document.getElementById("ownerReportRows");
         if (reportBox) {
           reportBox.innerHTML = [
@@ -1282,10 +1294,10 @@
             ["Jumlah Hutang Tersisa", idr.format(payable)],
             ["Petty Cash Hari Ini", idr.format(todayPettyCash)],
             ["Selisih Stock", number.format(stockDifference)],
-            ["Nilai Aset Keseluruhan", idr.format(assetValue)],
+            ["Nilai Aset Bersih", idr.format(netAssetValue)],
             ["Total Transaksi Kasir Hari Ini", number.format(todaySales.length)],
             ["Total Invoice Pending", number.format(state.pendingSales.length)]
-          ].map(([label, value]) => `<div class="owner-report-item"><span>${label}</span><strong>${value}</strong></div>`).join("");
+          ].map(([label, value]) => `<div class="owner-report-item"><span>${label}</span><strong>${value}</strong></div>`).join("") + `<div class="audit-box"><strong>Rumus Aset Bersih:</strong> saldo kas + nilai stok + sisa piutang − sisa hutang.</div>`;
         }
         document.getElementById("lowStockCount").textContent = `${low.length} item`;
         document.getElementById("dashboardStockRows").innerHTML = low.map((p) => { const stock = stockAkhirProduk(p); return `<tr><td>${p.name}</td><td class="text-end">${number.format(stock)} ${p.unit}</td><td><span class="status-dot ${stock === 0 ? "danger" : "warn"}"></span> ${stock === 0 ? "Out of stock" : "Limit stok"}</td></tr>`; }).join("") || `<tr><td colspan="3" class="text-center text-secondary">Stok aman.</td></tr>`;
@@ -1300,11 +1312,11 @@
         const labels = Array.from({ length: 14 }, (_, i) => {
           const d = new Date();
           d.setDate(d.getDate() - (13 - i));
-          return d.toISOString().slice(5, 10);
+          return d.toISOString().slice(0, 10);
         });
-        const values = labels.map((label) => state.sales.filter((s) => s.date.slice(5, 10) === label).reduce((sum, s) => sum + s.total, 0));
+        const values = labels.map((label) => state.sales.filter((s) => String(s.date || "").slice(0, 10) === label).reduce((sum, s) => sum + toNumber(s.total), 0));
         if (salesChart) salesChart.destroy();
-        salesChart = new Chart(document.getElementById("salesChart"), { type: "bar", data: { labels, datasets: [{ label: "Omzet", data: values, backgroundColor: "#2563eb" }] }, options: { responsive: true, plugins: { legend: { display: false } } } });
+        salesChart = new Chart(document.getElementById("salesChart"), { type: "bar", data: { labels: labels.map(displayDate), datasets: [{ label: "Omzet", data: values, backgroundColor: "#2563eb" }] }, options: { responsive: true, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `Omzet: ${idr.format(context.raw || 0)}` } } } } });
       }
 
       function renderCashier() {
@@ -1320,8 +1332,9 @@
                 <div class="col-md-4"><label class="form-label">Tipe Pelanggan</label><input id="saleCustomerType" class="form-control" value="${esc(saleDraft.customerType)}" placeholder="Retail/Tempo/Lainnya"></div>
                 <div class="col-md-8"><label class="form-label">Alamat Pelanggan</label><input id="saleCustomerAddress" class="form-control" value="${esc(saleDraft.customerAddress)}"></div>
                 <div class="col-md-4"><label class="form-label">Whatsapp</label><input id="saleCustomerWhatsapp" class="form-control" value="${esc(saleDraft.customerWhatsapp)}"></div>
-                <div class="col-md-4"><label class="form-label">Satuan Produk</label><select id="saleUnit" class="form-select">${unitOptions.map((u) => `<option>${u}</option>`).join("")}</select></div>
-                <div class="col-md-8"><label class="form-label">Produk</label><input id="saleSearch" class="form-control" autocomplete="off" placeholder="Ketik nama produk, kode, kategori, atau scan barcode"></div>
+                <div class="col-md-4"><label class="form-label">Barcode/SKU</label><input id="saleSku" class="form-control" inputmode="numeric" autocomplete="off" placeholder="Ketik atau scan Code dari Products"></div>
+                <div class="col-md-4"><label class="form-label">Satuan Produk</label><input id="saleUnit" class="form-control" readonly placeholder="Otomatis dari Products.unit"></div>
+                <div class="col-md-4"><label class="form-label">Produk</label><input id="saleSearch" class="form-control" autocomplete="off" placeholder="Cari nama, kode, kategori, atau satuan"></div>
                 <div class="col-md-4"><label class="form-label">Qty</label><input id="saleQty" type="number" value="1" min="1" class="form-control"></div>
                 <div class="col-12"><div id="saleSearchResults" class="search-results"></div></div>
                 <div class="col-md-3"><label class="form-label">Harga HPP</label><input id="saleHpp" type="number" min="0" class="form-control"></div>
@@ -1351,7 +1364,10 @@
           <section class="panel mt-3"><div class="panel-header"><h3>Invoice Pending</h3><span class="chip">${state.pendingSales.length} pending</span></div>${pendingSalesTable()}</section>
           <section class="panel mt-3"><div class="panel-header"><h3>Laporan Pendapatan Kasir</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="sales"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${salesTable(state.sales.slice(0, 12))}</section>`;
         document.getElementById("saleAddBtn").onclick = addSaleFromSearch;
-        document.getElementById("saleSearch").oninput = renderSaleSearchResults;
+        document.getElementById("saleSku").oninput = selectSaleProductBySku;
+        document.getElementById("saleSku").onchange = selectSaleProductBySku;
+        document.getElementById("saleSku").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); selectSaleProductBySku(e); } };
+        document.getElementById("saleSearch").oninput = () => { selectedSaleProductId = ""; renderSaleSearchResults(); };
         document.getElementById("saleSearch").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); addSaleFromSearch(); } };
         document.getElementById("saleCustomerName").oninput = updateSaleCustomerDraft;
         document.getElementById("saleCustomerType").oninput = (e) => { saleDraft.customerType = e.target.value; };
@@ -1375,6 +1391,22 @@
         const rows = searchProducts(query);
         document.getElementById("saleSearchResults").innerHTML = rows.map((p) => `<button class="search-result" type="button" data-product-id="${p.id}"><strong>${p.name}</strong><br><span class="text-secondary">${p.code} | ${p.category} | Stok ${number.format(p.stock)} ${p.unit} | HPP ${idr.format(p.buy)} | Jual ${idr.format(p.price)}</span></button>`).join("");
         document.querySelectorAll("[data-product-id]").forEach((btn) => btn.onclick = () => selectSaleProduct(btn.dataset.productId));
+      }
+      function findProductBySku(value) {
+        const sku = String(value || "").trim().toLowerCase();
+        if (!sku) return null;
+        return state.products.find((product) => product.active !== false && String(product.code || "").trim().toLowerCase() === sku) || null;
+      }
+      function selectSaleProductBySku(event) {
+        const skuInput = document.getElementById("saleSku");
+        const product = findProductBySku(skuInput.value);
+        if (!product) {
+          selectedSaleProductId = "";
+          if (event?.type === "change" || event?.key === "Enter") toast("Barcode/SKU tidak ditemukan pada sheet Products kolom Code.");
+          return;
+        }
+        selectSaleProduct(product.id);
+        if (event?.key === "Enter") document.getElementById("saleQty").focus();
       }
       function updateSaleCustomerDraft() {
         const name = document.getElementById("saleCustomerName").value;
@@ -1420,11 +1452,12 @@
         const product = findProduct(productId);
         if (!product) return;
         selectedSaleProductId = product.id;
-        document.getElementById("saleSearch").value = `${product.code} - ${product.name}`;
-        document.getElementById("saleUnit").value = normalizeUnit(product.unit);
-        document.getElementById("saleHpp").value = product.buy;
-        document.getElementById("salePrice1").value = product.price;
-        document.getElementById("salePrice2").value = product.price2 || Math.round(product.price * 1.05);
+        document.getElementById("saleSku").value = product.code || "";
+        document.getElementById("saleSearch").value = product.name || "";
+        document.getElementById("saleUnit").value = product.unit || "";
+        document.getElementById("saleHpp").value = toNumber(product.buy);
+        document.getElementById("salePrice1").value = toNumber(product.price);
+        document.getElementById("salePrice2").value = toNumber(product.price2);
         document.getElementById("saleManualPrice").value = "";
         document.getElementById("saleSearchResults").innerHTML = "";
       }
@@ -1444,7 +1477,7 @@
         }
         const priceMode = document.getElementById("salePriceMode").value;
         const price1 = Number(document.getElementById("salePrice1").value || product.price);
-        const price2 = Number(document.getElementById("salePrice2").value || product.price2 || Math.round(product.price * 1.05));
+        const price2 = Number(document.getElementById("salePrice2").value || product.price2 || 0);
         const manual = Number(document.getElementById("saleManualPrice").value || 0);
         const selectedPrice = priceMode === "price2" ? price2 : priceMode === "manual" ? (manual || price1) : price1;
         addCartLine(activeCart, product, Number(document.getElementById("saleQty").value || 1), "sale", {
@@ -1694,18 +1727,23 @@
       function renderFinance() {
         const debts = state.purchases.filter((p) => p.due > 0);
         const receivables = state.sales.filter((s) => s.due > 0);
-        const pettyCashStart = state.cashTx.filter((x) => x.category === "Petty Cash" && x.type === "Masuk").reduce((sum, x) => sum + x.amount, 0);
-        const pettyCashUse = state.cashTx.filter((x) => x.category === "Petty Cash" && x.type === "Keluar").reduce((sum, x) => sum + x.amount, 0);
+        const pettyCashStart = state.cashTx.filter((x) => x.category === "Petty Cash" && x.type === "Masuk").reduce((sum, x) => sum + toNumber(x.amount), 0);
+        const pettyCashUse = state.cashTx.filter((x) => x.category === "Petty Cash" && x.type === "Keluar").reduce((sum, x) => sum + toNumber(x.amount), 0);
         const pettyCashBalance = pettyCashStart - pettyCashUse;
+        const flow = cashflowBreakdown();
+        const totalDebt = debts.reduce((s, p) => s + toNumber(p.due), 0);
+        const totalReceivable = receivables.reduce((s, p) => s + toNumber(p.due), 0);
+        const totalCash = state.cashAccounts.reduce((s, a) => s + toNumber(a.balance), 0);
         document.getElementById("financeView").innerHTML = `
           <div class="page-header"><div><p class="eyebrow">Keuangan</p><h2>Hutang, Piutang, Kas, dan Cashflow</h2></div><button id="addCashTxBtn" class="btn btn-primary"><i class="bi bi-plus-lg"></i> Transaksi Kas</button></div>
           <div class="metrics-grid">
-            <div class="metric-card"><div class="metric-icon bg-rose"><i class="bi bi-arrow-up-right"></i></div><div><span>Hutang</span><strong>${idr.format(debts.reduce((s, p) => s + p.due, 0))}</strong></div></div>
-            <div class="metric-card"><div class="metric-icon bg-green"><i class="bi bi-arrow-down-left"></i></div><div><span>Piutang</span><strong>${idr.format(receivables.reduce((s, p) => s + p.due, 0))}</strong></div></div>
-            <div class="metric-card"><div class="metric-icon bg-amber"><i class="bi bi-cash-coin"></i></div><div><span>Petty Cash</span><strong>${idr.format(pettyCashBalance)}</strong></div></div>
-            <div class="metric-card"><div class="metric-icon bg-blue"><i class="bi bi-bank"></i></div><div><span>Total Kas</span><strong>${idr.format(state.cashAccounts.reduce((s, a) => s + a.balance, 0))}</strong></div></div>
-            <div class="metric-card"><div class="metric-icon bg-cyan"><i class="bi bi-graph-up"></i></div><div><span>Cashflow Bersih</span><strong>${idr.format(cashflowTotal())}</strong></div></div>
+            <div class="metric-card"><div class="metric-icon bg-rose"><i class="bi bi-arrow-up-right"></i></div><div><span>Sisa Hutang</span><strong>${idr.format(totalDebt)}</strong><small class="metric-source">Sumber: ${debts.length} faktur pembelian dengan sisa tagihan</small></div></div>
+            <div class="metric-card"><div class="metric-icon bg-green"><i class="bi bi-arrow-down-left"></i></div><div><span>Sisa Piutang</span><strong>${idr.format(totalReceivable)}</strong><small class="metric-source">Sumber: ${receivables.length} invoice penjualan dengan sisa tagihan</small></div></div>
+            <div class="metric-card"><div class="metric-icon bg-amber"><i class="bi bi-cash-coin"></i></div><div><span>Saldo Petty Cash</span><strong>${idr.format(pettyCashBalance)}</strong><small class="metric-source">Kas kecil masuk − kas kecil keluar</small></div></div>
+            <div class="metric-card"><div class="metric-icon bg-blue"><i class="bi bi-bank"></i></div><div><span>Total Saldo Kas</span><strong>${idr.format(totalCash)}</strong><small class="metric-source">Sumber: ${state.cashAccounts.length} akun pada Master Kas</small></div></div>
+            <div class="metric-card"><div class="metric-icon bg-cyan"><i class="bi bi-graph-up"></i></div><div><span>Arus Kas Operasional Bersih</span><strong>${idr.format(flow.total)}</strong><small class="metric-source">Penerimaan penjualan − pembayaran pembelian + transaksi kas bersih</small></div></div>
           </div>
+          <div class="audit-box mb-3"><strong>Rincian arus kas:</strong> penerimaan penjualan ${idr.format(flow.salesReceived)} − pembayaran pembelian ${idr.format(flow.purchasesPaid)} + kas masuk ${idr.format(flow.cashIn)} − kas keluar ${idr.format(flow.cashOut)} = <strong>${idr.format(flow.total)}</strong>. Saldo awal/Master Kas tidak dihitung dalam arus kas.</div>
           <section class="panel"><div class="panel-header"><h3>Pembayaran Hutang</h3><button id="inputDebtDataBtn" class="btn btn-outline-primary btn-sm" type="button"><i class="bi bi-plus-lg"></i> Input Data</button></div>${paymentDueTable(debts, "debt")}</section>
           <section class="panel mt-3"><div class="panel-header"><h3>Pembayaran Piutang</h3><button id="inputReceivableDataBtn" class="btn btn-outline-primary btn-sm" type="button"><i class="bi bi-plus-lg"></i> Input Data</button></div>${paymentDueTable(receivables, "receivable")}</section>
           <section class="panel mt-3"><div class="panel-header"><h3>Laporan Petty Cash</h3><span class="chip">Ringkasan kas kecil</span></div>
@@ -1728,10 +1766,14 @@
         bindTableExports();
       }
       function cashflowTotal() {
-        const sales = state.sales.reduce((s, x) => s + (x.total - x.due), 0);
-        const purchases = state.purchases.reduce((s, x) => s + (x.total - x.due), 0);
-        const cash = state.cashTx.reduce((s, x) => s + (x.type === "Masuk" ? x.amount : -x.amount), 0);
-        return sales - purchases + cash;
+        return cashflowBreakdown().total;
+      }
+      function cashflowBreakdown() {
+        const salesReceived = state.sales.reduce((s, x) => s + Math.max(0, toNumber(x.total) - toNumber(x.due) - receivableReturnAmount(x)), 0);
+        const purchasesPaid = state.purchases.reduce((s, x) => s + Math.max(0, toNumber(x.total) - toNumber(x.due) - debtReturnAmount(x)), 0);
+        const cashIn = state.cashTx.filter((x) => x.type === "Masuk").reduce((s, x) => s + toNumber(x.amount), 0);
+        const cashOut = state.cashTx.filter((x) => x.type === "Keluar").reduce((s, x) => s + toNumber(x.amount), 0);
+        return { salesReceived, purchasesPaid, cashIn, cashOut, total: salesReceived - purchasesPaid + cashIn - cashOut };
       }
       function paymentDueTable(items, type) {
         if (type === "debt") {
@@ -1932,17 +1974,22 @@
       }
 
       function renderReports() {
-        const profit = state.sales.reduce((sum, sale) => sum + sale.items.reduce((x, item) => x + ((item.price - (findProduct(item.productId)?.buy || 0)) * item.qty - (item.discount || 0)), 0), 0);
-        const expenses = state.cashTx.filter((x) => x.type === "Keluar").reduce((s, x) => s + x.amount, 0);
+        const salesRevenue = state.sales.reduce((sum, sale) => sum + (sale.items || []).reduce((x, item) => x + (toNumber(item.price) * toNumber(item.qty) - toNumber(item.discount)), 0), 0);
+        const cogs = state.sales.reduce((sum, sale) => sum + (sale.items || []).reduce((x, item) => x + (toNumber(findProduct(item.productId)?.buy) * toNumber(item.qty)), 0), 0);
+        const grossProfit = salesRevenue - cogs;
+        const expenseCategories = ["Biaya Operasional", "Gaji Karyawan", "Lainnya"];
+        const expenses = state.cashTx.filter((x) => x.type === "Keluar" && expenseCategories.includes(x.category)).reduce((s, x) => s + toNumber(x.amount), 0);
         const salesReturn = state.returns.filter((r) => r.module === "Penjualan");
         const purchaseReturn = state.returns.filter((r) => r.module === "Pembelian");
         const debtRows = state.purchases.filter((p) => p.due > 0);
         const receivableRows = state.sales.filter((s) => s.due > 0);
-        const stockValue = state.products.reduce((s, p) => s + (stockAkhirProduk(p) * toNumber(p.buy)), 0);
-        const stockQty = state.products.reduce((s, p) => s + stockAkhirProduk(p), 0);
+        const reportProducts = state.products.filter((p) => p.active !== false);
+        const stockValue = reportProducts.reduce((s, p) => s + (stockAkhirProduk(p) * toNumber(p.buy)), 0);
+        const stockQty = reportProducts.reduce((s, p) => s + stockAkhirProduk(p), 0);
         const stockRevision = state.stockMoves.filter((m) => ["Opname", "Penyesuaian"].includes(m.type));
         const masterRows = [...state.customers, ...state.suppliers, ...state.products, ...state.discounts];
-        const cashNet = state.cashTx.reduce((s, x) => s + (x.type === "Masuk" ? x.amount : -x.amount), 0);
+        const flow = cashflowBreakdown();
+        const cashNet = flow.cashIn - flow.cashOut;
         const debtReport = debtRows.map((x) => ({
           tanggal: displayDate(x.date), jatuh_tempo: displayDate(x.dueDate), no_faktur: x.invoiceNo || "-",
           supplier: x.salesName || personName(state.suppliers, x.supplierId), hutang_aktif: Number(x.total || 0),
@@ -1953,28 +2000,29 @@
           pelanggan: x.customerName || personName(state.customers, x.customerId), piutang_aktif: Number(x.total || 0),
           bayar: receivablePaidAmount(x), retur: receivableReturnAmount(x), sisa_piutang: Number(x.due || 0)
         }));
-        const netProfit = profit - expenses;
+        const netProfit = grossProfit - expenses;
         const reports = [
           { title: "Laporan Penjualan", rows: state.sales, value: idr.format(state.sales.reduce((s, x) => s + x.total, 0)), note: `${state.sales.length} invoice. Nilai mencakup ongkir dan bank charge bila ada.` },
           { title: "Laporan Retur Penjualan", rows: salesReturn, value: `${number.format(salesReturn.reduce((s, x) => s + Number(x.qty || 0), 0))} item`, note: `${salesReturn.length} transaksi retur penjualan tercatat.` },
           { title: "Laporan Pembelian", rows: state.purchases, value: idr.format(state.purchases.reduce((s, x) => s + x.total, 0)), note: `${state.purchases.length} transaksi pembelian supplier.` },
           { title: "Laporan Retur Pembelian", rows: purchaseReturn, value: `${number.format(purchaseReturn.reduce((s, x) => s + Number(x.qty || 0), 0))} item`, note: `${purchaseReturn.length} transaksi retur pembelian tercatat.` },
-          { title: "Laporan Transaksi Kas", rows: state.cashTx, value: idr.format(cashNet), note: `${state.cashTx.length} transaksi kas. Positif berarti kas bersih masuk.` },
+          { title: "Laporan Transaksi Kas", rows: state.cashTx, value: idr.format(cashNet), note: `${state.cashTx.length} transaksi. Rumus: kas masuk ${idr.format(flow.cashIn)} − kas keluar ${idr.format(flow.cashOut)}.` },
           { title: "Laporan Hutang", rows: debtReport, value: idr.format(debtRows.reduce((s, x) => s + x.due, 0)), note: `${debtRows.length} hutang aktif. Kolom disamakan dengan form Pembayaran Hutang.` },
           { title: "Laporan Piutang", rows: receivableReport, value: idr.format(receivableRows.reduce((s, x) => s + x.due, 0)), note: `${receivableRows.length} piutang aktif. Kolom disamakan dengan form Pembayaran Piutang.` },
-          { title: "Laporan Stok", rows: state.products, value: idr.format(stockValue), note: `${number.format(stockQty)} total qty dari ${state.products.length} produk.` },
+          { title: "Laporan Stok", rows: reportProducts, value: idr.format(stockValue), note: `${number.format(stockQty)} total qty dari ${reportProducts.length} produk aktif; nilai = stok akhir × harga beli.` },
           { title: "Laporan Revisi Stok", rows: stockRevision, value: `${number.format(stockRevision.reduce((s, x) => s + Math.abs(Number(x.qty || 0)), 0))} qty`, note: `${stockRevision.length} opname atau penyesuaian stok.` },
           { title: "Laporan Master", rows: masterRows, value: `${number.format(masterRows.length)} data`, note: `Gabungan data barang, diskon, pelanggan, dan supplier.` },
-          { title: "Laporan Rugi Laba", rows: [{ omzet: state.sales.reduce((s, x) => s + x.total, 0), pembelian: state.purchases.reduce((s, x) => s + x.total, 0), biaya: expenses, labaKotor: profit, labaBersih: netProfit }], value: idr.format(netProfit), note: `Laba bersih = laba kotor ${idr.format(profit)} dikurangi biaya ${idr.format(expenses)}.` }
+          { title: "Laporan Rugi Laba", rows: [{ penjualanBarang: salesRevenue, hargaPokokPenjualan: cogs, biayaOperasional: expenses, labaKotor: grossProfit, labaBersih: netProfit }], value: idr.format(netProfit), note: `Laba bersih = penjualan barang ${idr.format(salesRevenue)} − HPP ${idr.format(cogs)} − biaya operasional ${idr.format(expenses)}. Modal, transfer antar-kas, dan pengisian petty cash bukan biaya.` }
         ];
         document.getElementById("reportsView").innerHTML = `
           <div class="page-header"><div><p class="eyebrow">Laporan</p><h2>Semua Laporan dan Export PDF</h2></div><div class="header-actions"><button id="printReportsBtn" class="btn btn-outline-secondary"><i class="bi bi-printer"></i> Print</button><button id="exportAllReportsBtn" class="btn btn-primary"><i class="bi bi-filetype-pdf"></i> Export Semua PDF</button></div></div>
           <div class="metrics-grid">
-            <div class="metric-card"><div class="metric-icon bg-green"><i class="bi bi-receipt"></i></div><div><span>Total Penjualan</span><strong>${idr.format(state.sales.reduce((s, x) => s + x.total, 0))}</strong></div></div>
-            <div class="metric-card"><div class="metric-icon bg-cyan"><i class="bi bi-box-arrow-in-down"></i></div><div><span>Total Pembelian</span><strong>${idr.format(state.purchases.reduce((s, x) => s + x.total, 0))}</strong></div></div>
-            <div class="metric-card"><div class="metric-icon bg-blue"><i class="bi bi-graph-up"></i></div><div><span>Laba Kotor</span><strong>${idr.format(profit)}</strong></div></div>
-            <div class="metric-card"><div class="metric-icon bg-amber"><i class="bi bi-currency-exchange"></i></div><div><span>Laba Bersih</span><strong>${idr.format(netProfit)}</strong></div></div>
+            <div class="metric-card"><div class="metric-icon bg-green"><i class="bi bi-receipt"></i></div><div><span>Total Penjualan</span><strong>${idr.format(state.sales.reduce((s, x) => s + toNumber(x.total), 0))}</strong><small class="metric-source">Σ total seluruh invoice penjualan</small></div></div>
+            <div class="metric-card"><div class="metric-icon bg-cyan"><i class="bi bi-box-arrow-in-down"></i></div><div><span>Total Pembelian</span><strong>${idr.format(state.purchases.reduce((s, x) => s + toNumber(x.total), 0))}</strong><small class="metric-source">Σ total seluruh faktur pembelian</small></div></div>
+            <div class="metric-card"><div class="metric-icon bg-blue"><i class="bi bi-graph-up"></i></div><div><span>Laba Kotor Barang</span><strong>${idr.format(grossProfit)}</strong><small class="metric-source">Penjualan item − HPP item terjual</small></div></div>
+            <div class="metric-card"><div class="metric-icon bg-amber"><i class="bi bi-currency-exchange"></i></div><div><span>Laba Bersih Operasional</span><strong>${idr.format(netProfit)}</strong><small class="metric-source">Laba kotor barang − biaya operasional</small></div></div>
           </div>
+          <div class="audit-box mb-3"><strong>Rincian laba:</strong> penjualan barang ${idr.format(salesRevenue)} − HPP barang terjual ${idr.format(cogs)} = laba kotor ${idr.format(grossProfit)}; dikurangi biaya operasional ${idr.format(expenses)} = <strong>${idr.format(netProfit)}</strong>.</div>
           <div class="module-grid">${reports.map((report, i) => `<div class="module-card"><h4>${report.title}</h4><strong class="report-value">${report.value}</strong><p class="report-note">${report.note}</p><p class="small text-secondary mb-2">${report.rows.length} baris data siap diterima dan diexport.</p><button class="btn btn-outline-primary btn-sm" data-report-index="${i}"><i class="bi bi-filetype-pdf"></i> Export PDF</button></div>`).join("")}</div>
           <section class="panel mt-3" id="reportPrintable"><div class="panel-header"><h3>Preview Laporan Penjualan</h3><span class="chip">Penerimaan laporan</span></div>${salesTable(state.sales)}</section>`;
         document.querySelectorAll("[data-report-index]").forEach((btn) => btn.onclick = () => exportReportPdf(reports[btn.dataset.reportIndex].title, reports[btn.dataset.reportIndex].rows));
@@ -2080,7 +2128,7 @@
           <div class="page-header"><div><p class="eyebrow">Setting</p><h2>Hak Akses, Kode, Profile, dan Hardware</h2></div></div>
           <div class="module-grid">
             ${smallModule("Hak Akses", "Owner, kasir, dan gudang dengan pembatasan tombol owner.", "settingAccess", "bi-shield-lock")}
-            ${smallModule("Kode Akses", `Owner ${state.accessCodes.owner}, Admin ${state.accessCodes.admin}, Kasir ${state.accessCodes.kasir}`, "settingCodes", "bi-key")}
+            ${smallModule("Kode Akses", "Atur kode login Owner, Admin Gudang, dan Kasir.", "settingCodes", "bi-key")}
             ${smallModule("Profile Aplikasi", state.profile.name, "settingProfile", "bi-shop")}
             ${smallModule("Setting Hardware", "Printer struk, faktur, cash drawer RJ11, scanner, barcode.", "settingHardware", "bi-printer")}
           </div>`;
@@ -2390,11 +2438,15 @@
         });
       }
       function openAccessCodeModal() {
-        openModal("Kode Akses", `<div class="row g-3"><div class="col-md-4"><label class="form-label">Owner</label><input name="owner" value="${state.accessCodes.owner}" class="form-control"></div><div class="col-md-4"><label class="form-label">Admin</label><input name="admin" value="${state.accessCodes.admin}" class="form-control"></div><div class="col-md-4"><label class="form-label">Kasir</label><input name="kasir" value="${state.accessCodes.kasir}" class="form-control"></div></div>`, (fd) => { state.accessCodes = { owner: fd.get("owner"), admin: fd.get("admin"), kasir: fd.get("kasir") }; saveState("Kode akses diperbarui"); closeModal(); renderAll(); });
+        if (session.role !== "Owner") return toast("Hanya Owner yang dapat mengubah kode akses.");
+        openModal("Kode Akses", `<div class="row g-3"><div class="col-md-4"><label class="form-label">Owner</label><input name="owner" type="password" value="${esc(state.accessCodes.owner)}" minlength="4" class="form-control" required></div><div class="col-md-4"><label class="form-label">Admin Gudang</label><input name="admin" type="password" value="${esc(state.accessCodes.admin)}" minlength="4" class="form-control" required></div><div class="col-md-4"><label class="form-label">Kasir</label><input name="kasir" type="password" value="${esc(state.accessCodes.kasir)}" minlength="4" class="form-control" required></div><div class="col-12"><p class="small text-secondary mb-0">Kode ini langsung digunakan sebagai password login username owner, gudang, dan kasir.</p></div></div>`, (fd) => {
+          state.accessCodes = { owner: String(fd.get("owner")).trim(), admin: String(fd.get("admin")).trim(), kasir: String(fd.get("kasir")).trim() };
+          saveState("Kode akses login diperbarui"); closeModal(); renderAll(); toast("Kode akses tersimpan dan berlaku pada login berikutnya.");
+        });
       }
       function openAccessControlModal() {
         if (session.role !== "Owner") return toast("Hanya Owner yang dapat mengatur hak akses.");
-        const viewChoices = navItems.filter(([view]) => view !== "dashboardView" && view !== "settingsView" && view !== "historyView" && view !== "financeView");
+        const viewChoices = navItems.filter(([view]) => !["dashboardView", "settingsView", "historyView"].includes(view));
         const roleBlock = (role) => {
           const rules = state.accessRules[role] || defaultAccessRules[role];
           return `<section class="panel mb-3"><div class="panel-header"><h3>${role}</h3><span class="chip">Hak Akses</span></div>
@@ -2421,10 +2473,17 @@
         });
       }
       function openProfileModal() {
-        openModal("Profile Aplikasi", `<div class="row g-3"><div class="col-md-6"><label class="form-label">Nama Toko</label><input name="name" value="${state.profile.name}" class="form-control"></div><div class="col-md-6"><label class="form-label">Whatsapp</label><input name="phone" value="${state.profile.phone}" class="form-control"></div><div class="col-12"><label class="form-label">Alamat</label><input name="address" value="${state.profile.address}" class="form-control"></div></div>`, (fd) => { state.profile.name = fd.get("name"); state.profile.phone = fd.get("phone"); state.profile.address = fd.get("address"); state.profile.onlineMode = true; saveState("Profile aplikasi diperbarui"); closeModal(); renderAll(); });
+        if (session.role !== "Owner") return toast("Hanya Owner yang dapat mengubah profil aplikasi.");
+        openModal("Profile Aplikasi", `<div class="row g-3"><div class="col-md-6"><label class="form-label">Nama Toko</label><input name="name" value="${esc(state.profile.name)}" class="form-control" required></div><div class="col-md-6"><label class="form-label">Telp & WhatsApp</label><input name="phone" value="${esc(state.profile.phone)}" class="form-control" required></div><div class="col-12"><label class="form-label">Alamat</label><input name="address" value="${esc(state.profile.address)}" class="form-control" required></div><div class="col-12"><p class="small text-secondary mb-0">Profil digunakan pada Dashboard Owner. Headline resmi dokumen cetak tetap menggunakan identitas MUTIARA JAYA.</p></div></div>`, (fd) => { state.profile.name = String(fd.get("name")).trim(); state.profile.phone = String(fd.get("phone")).trim(); state.profile.address = String(fd.get("address")).trim(); state.profile.onlineMode = true; saveState("Profile aplikasi diperbarui"); closeModal(); renderAll(); toast("Profil aplikasi berhasil diperbarui."); });
       }
       function openHardwareModal() {
-        openModal("Setting Hardware", `<div class="row g-3">${Object.entries(state.hardware).map(([k, v]) => `<div class="col-md-6"><label class="form-label">${k}</label><input name="${k}" value="${v}" class="form-control"></div>`).join("")}</div>`, (fd) => { Object.keys(state.hardware).forEach((k) => state.hardware[k] = fd.get(k)); saveState("Setting hardware diperbarui"); closeModal(); renderAll(); });
+        if (session.role !== "Owner") return toast("Hanya Owner yang dapat mengubah setting hardware.");
+        const labels = { receipt: "Printer Struk", invoice: "Printer Faktur", barcode: "Scanner Barcode/SKU", drawer: "Cash Drawer", tag: "Printer Label Barcode" };
+        openModal("Setting Hardware", `<div class="row g-3">${Object.entries(state.hardware).map(([key, value]) => `<div class="col-md-6"><label class="form-label">${labels[key] || key}</label><input name="${key}" value="${esc(value)}" class="form-control" required></div>`).join("")}<div class="col-12"><p class="small text-secondary mb-0">Nama/perangkat ini disimpan sebagai konfigurasi operasional. Pemilihan printer fisik tetap dilakukan melalui dialog Print sistem operasi/browser.</p></div></div>`, (fd) => { Object.keys(state.hardware).forEach((key) => state.hardware[key] = String(fd.get(key)).trim()); saveState("Setting hardware diperbarui"); closeModal(); renderAll(); toast("Konfigurasi hardware berhasil disimpan."); });
+      }
+
+      function officialPrintHeader(documentTitle) {
+        return `<div style="text-align:center;margin-bottom:14px"><h2 style="margin:0 0 6px">${STORE_PRINT_NAME}</h2><p style="margin:0">${STORE_PRINT_ADDRESS} | Telp &amp; WhatsApp : ${STORE_PRINT_PHONE}</p></div><hr><h3>${documentTitle}</h3>`;
       }
 
       function printDoc(title, doc, type) {
@@ -2433,7 +2492,7 @@
         const relation = isSale ? (doc.customerName || relationName(doc.customerId)) : (doc.salesName || personName(state.suppliers, doc.supplierId));
         const relationAddress = isSale ? (doc.customerAddress || "-") : (doc.company || "-");
         const relationWhatsapp = isSale ? (doc.customerWhatsapp || "-") : (doc.whatsapp || "-");
-        document.getElementById("printArea").innerHTML = `<h2>${title}</h2><p><strong>${state.profile.name}</strong><br>${state.profile.address}<br>Whatsapp: ${state.profile.phone}</p><hr><p><strong>${isSale ? "Nomor Invoice" : "No. PO"}:</strong> ${doc.invoiceNo || doc.id}<br><strong>Tanggal:</strong> ${doc.date}<br><strong>${isSale ? "Nama Pelanggan" : "Nama Sales"}:</strong> ${relation}<br><strong>${isSale ? "Alamat Pelanggan" : "Nama Perusahaan"}:</strong> ${relationAddress}<br><strong>Whatsapp:</strong> ${relationWhatsapp}<br><strong>Metode Bayar:</strong> ${doc.method}</p><table class="table"><thead><tr><th>Nama Barang</th><th class="text-end">Harga Satuan</th><th class="text-end">Qty</th><th class="text-end">Subtotal</th></tr></thead><tbody>${rows}</tbody></table><p class="text-end">Biaya Ongkir: ${idr.format(doc.ongkir || 0)}<br>Bank Charge: ${idr.format(doc.bankCharge || 0)}</p><h3 class="text-end">Jumlah Total ${idr.format(doc.total)}</h3><p><strong>Catatan:</strong> ${doc.note || "-"}</p>`;
+        document.getElementById("printArea").innerHTML = `${officialPrintHeader(title)}<p><strong>${isSale ? "Nomor Invoice" : "No. PO"}:</strong> ${doc.invoiceNo || doc.id}<br><strong>Tanggal:</strong> ${displayDate(doc.date)}<br><strong>${isSale ? "Nama Pelanggan" : "Nama Sales"}:</strong> ${relation}<br><strong>${isSale ? "Alamat Pelanggan" : "Nama Perusahaan"}:</strong> ${relationAddress}<br><strong>WhatsApp:</strong> ${relationWhatsapp}<br><strong>Metode Bayar:</strong> ${doc.method}</p><table class="table"><thead><tr><th>Nama Barang</th><th class="text-end">Harga Satuan</th><th class="text-end">Qty</th><th class="text-end">Subtotal</th></tr></thead><tbody>${rows}</tbody></table><p class="text-end">Biaya Ongkir: ${idr.format(doc.ongkir || 0)}<br>Bank Charge: ${idr.format(doc.bankCharge || 0)}</p><h3 class="text-end">Jumlah Total ${idr.format(doc.total)}</h3><p><strong>Catatan:</strong> ${doc.note || "-"}</p>`;
         document.getElementById("printArea").classList.remove("d-none");
         window.print();
         document.getElementById("printArea").classList.add("d-none");
@@ -2442,9 +2501,7 @@
       function printDebtPaymentReceipt(debt, payment, retur = 0) {
         const supplier = debt.salesName || personName(state.suppliers, debt.supplierId);
         document.getElementById("printArea").innerHTML = `
-          <h2>Bukti Pembayaran Hutang</h2>
-          <p><strong>${state.profile.name}</strong><br>${state.profile.address}<br>Whatsapp: ${state.profile.phone}</p>
-          <hr>
+          ${officialPrintHeader("Bukti Pembayaran Hutang")}
           <table class="table">
             <tbody>
               <tr><th>Tanggal Bayar</th><td>${displayDate(payment.date)}</td></tr>
@@ -2470,9 +2527,7 @@
       function printReceivablePaymentReceipt(receivable, payment, retur = 0) {
         const customer = receivable.customerName || personName(state.customers, receivable.customerId);
         document.getElementById("printArea").innerHTML = `
-          <h2>Bukti Pembayaran Piutang</h2>
-          <p><strong>${state.profile.name}</strong><br>${state.profile.address}<br>Whatsapp: ${state.profile.phone}</p>
-          <hr>
+          ${officialPrintHeader("Bukti Pembayaran Piutang")}
           <table class="table">
             <tbody>
               <tr><th>Tanggal Bayar</th><td>${displayDate(payment.date)}</td></tr>
@@ -2498,7 +2553,7 @@
       function printBarcodes() { printSimple("Barcode Produk", state.products.map((p) => `<div style="display:inline-block;border:1px solid #ddd;padding:12px;margin:6px"><strong>${p.name}</strong><br><span style="font-family:monospace">|||| ${p.code} ||||</span><br>${idr.format(p.price)}</div>`).join("")); }
       function printPriceTags() { printSimple("Price Tag", state.products.map((p) => `<div style="display:inline-block;border:1px solid #ddd;padding:14px;margin:6px;width:180px"><strong>${p.name}</strong><br><span>${p.code}</span><h3>${idr.format(p.price)}</h3></div>`).join("")); }
       function printSimple(title, html) {
-        document.getElementById("printArea").innerHTML = `<h2>${title}</h2>${html}<p>Developed by : Markaz Dakwah Digital</p>`;
+        document.getElementById("printArea").innerHTML = `${officialPrintHeader(title)}${html}<p>Developed by : Markaz Dakwah Digital</p>`;
         document.getElementById("printArea").classList.remove("d-none");
         window.print();
         document.getElementById("printArea").classList.add("d-none");

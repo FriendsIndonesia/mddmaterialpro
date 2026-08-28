@@ -1,6 +1,7 @@
 const APP_NAME = "MDD Material Pro";
 const OWNER_EMAIL = "friendsindonesia28@gmail.com";
 const GITHUB_REPO = "https://github.com/FriendsIndonesia/mddmaterialpro";
+const SCHEMA_VERSION = "6";
 
 const TABLES = [
   { key: "products", sheet: "Products", fields: ["id", "code", "name", "category", "unit", "buy", "price", "price2", "stockIn", "stockOut", "stock", "stockAkhir", "min", "active"] },
@@ -36,10 +37,10 @@ const FINANCE_SHEETS = {
 
 function doGet(e) {
   const ss = getSpreadsheet_();
-  ensureWorkbook_(ss);
+  ensureWorkbookIfNeeded_(ss);
   const action = String((e && e.parameter && e.parameter.action) || "status").toLowerCase();
   const callback = e && e.parameter && e.parameter.callback;
-  const payload = action === "state" ? readState_(ss) : statusPayload_(ss);
+  const payload = action === "state" ? readState_(ss) : action === "finance" ? readFinanceState_(ss) : statusPayload_(ss);
   return output_(payload, callback);
 }
 
@@ -50,7 +51,7 @@ function doPost(e) {
     const payload = JSON.parse((e && e.postData && e.postData.contents) || "{}");
     const data = payload.data || {};
     const ss = getSpreadsheet_();
-    ensureWorkbook_(ss);
+    ensureWorkbookIfNeeded_(ss);
     importFinanceSheets_(ss);
 
     writeMetadata_(ss, payload, data);
@@ -87,6 +88,13 @@ function doPost(e) {
 function setupMddMaterialPro() {
   const ss = getSpreadsheet_();
   ensureWorkbook_(ss);
+  importFinanceSheets_(ss);
+  const financeData = {};
+  ["purchases", "sales", "payments"].forEach((key) => {
+    const table = TABLES.find((item) => item.key === key);
+    financeData[key] = readTable_(ss, table.sheet);
+  });
+  writeFinanceSheets_(ss, financeData);
   writeMetadata_(ss, { app: APP_NAME, account: OWNER_EMAIL, githubRepo: GITHUB_REPO, queue: [] }, {});
   return statusPayload_(ss);
 }
@@ -108,7 +116,6 @@ function readState_(ss) {
   const data = {};
   TABLES.forEach((table) => data[table.key] = readTable_(ss, table.sheet));
   Object.assign(data, readProfile_(ss));
-  writeFinanceSheets_(ss, data);
   return {
     ok: true,
     app: APP_NAME,
@@ -118,6 +125,23 @@ function readState_(ss) {
     data,
     spreadsheetId: ss.getId(),
     spreadsheetUrl: ss.getUrl()
+  };
+}
+
+function readFinanceState_(ss) {
+  importFinanceSheets_(ss);
+  const keys = ["purchases", "sales", "payments"];
+  const data = {};
+  keys.forEach((key) => {
+    const table = TABLES.find((item) => item.key === key);
+    data[key] = readTable_(ss, table.sheet);
+  });
+  return {
+    ok: true,
+    app: APP_NAME,
+    source: "Sheets-Finance",
+    syncedAt: new Date().toISOString(),
+    data
   };
 }
 
@@ -144,6 +168,13 @@ function ensureWorkbook_(ss) {
   TABLES.forEach((table) => ensureSheet_(ss, table.sheet, table.fields));
   ensureFinanceSheet_(ss, FINANCE_SHEETS.debt);
   ensureFinanceSheet_(ss, FINANCE_SHEETS.receivable);
+  PropertiesService.getScriptProperties().setProperty("WORKBOOK_SCHEMA_VERSION", SCHEMA_VERSION);
+}
+
+function ensureWorkbookIfNeeded_(ss) {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty("WORKBOOK_SCHEMA_VERSION") === SCHEMA_VERSION && ss.getSheetByName("Hutang") && ss.getSheetByName("Piutang")) return;
+  ensureWorkbook_(ss);
 }
 
 function ensureFinanceSheet_(ss, config) {
@@ -277,6 +308,11 @@ function applyTableChanges_(ss, table, change) {
 function onSpreadsheetEdit(e) {
   if (!e || !e.range) return;
   const sheet = e.range.getSheet();
+  const financeConfig = Object.keys(FINANCE_SHEETS).map((key) => FINANCE_SHEETS[key]).find((item) => item.sheet === sheet.getName());
+  if (financeConfig && e.range.getRow() > 1) {
+    normalizeFinanceInput_(sheet, e.range.getRow(), e.range.getNumRows());
+    return;
+  }
   const table = TABLES.find((item) => item.sheet === sheet.getName());
   if (!table || e.range.getRow() <= 1) return;
   const idColumn = table.fields.indexOf("id") + 1;
@@ -286,6 +322,22 @@ function onSpreadsheetEdit(e) {
   if (!String(idCell.getValue() || "").trim()) {
     const prefix = table.sheet.replace(/[^A-Za-z]/g, "").slice(0, 3).toUpperCase() || "ROW";
     idCell.setValue(prefix + "-" + Utilities.getUuid().slice(0, 12).toUpperCase());
+  }
+}
+
+function normalizeFinanceInput_(sheet, startRow, rowCount) {
+  for (let row = startRow; row < startRow + rowCount; row += 1) {
+    for (let column = 1; column <= 2; column += 1) {
+      const cell = sheet.getRange(row, column);
+      const value = cell.getValue();
+      if (typeof value === "string") {
+        const match = value.trim().match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+        if (match) cell.setValue(new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1])));
+      }
+      cell.setNumberFormat("dd/MM/yyyy");
+    }
+    sheet.getRange(row, 8).setFormula("=MAX(0,E" + row + "-F" + row + "-G" + row + ")");
+    sheet.getRange(row, 5, 1, 4).setNumberFormat('"Rp" #,##0');
   }
 }
 
@@ -436,7 +488,11 @@ function writeFinanceTable_(ss, config, values) {
   const sheet = ensureFinanceSheet_(ss, config);
   if (sheet.getFilter()) sheet.getFilter().remove();
   if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow() - 1, config.headers.length).clearContent();
-  if (values.length) sheet.getRange(2, 1, values.length, config.headers.length).setValues(values);
+  if (values.length) {
+    sheet.getRange(2, 1, values.length, config.headers.length).setValues(values);
+    const formulas = values.map((_row, index) => ["=MAX(0,E" + (index + 2) + "-F" + (index + 2) + "-G" + (index + 2) + ")"]);
+    sheet.getRange(2, 8, formulas.length, 1).setFormulas(formulas);
+  }
   ensureFinanceSheet_(ss, config);
 }
 

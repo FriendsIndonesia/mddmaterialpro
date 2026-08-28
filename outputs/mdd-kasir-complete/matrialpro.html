@@ -761,14 +761,17 @@
       let saleDraft = { invoiceNo: "", ongkir: 0, bankCharge: 0, note: "", method: "Cash", customerId: "", customerName: "", customerType: "", customerAddress: "", customerWhatsapp: "" };
       let purchaseDraft = { invoiceNo: "", dueDate: "", ongkir: 0, bankCharge: 0, note: "", method: "Cash", supplierId: "", salesName: "", company: "", whatsapp: "" };
       let selectedSaleProductId = "";
+      let saleProductDraft = { sku: "", search: "", unit: "", qty: 1, hpp: "", price1: "", price2: "", manualPrice: "", priceMode: "price1" };
       let selectedPurchaseProductId = "";
       let modalSubmit = null;
       let salesChart = null;
       let syncTimer = null;
       let autoPullTimer = null;
+      let refreshPullCount = 0;
       let isSyncing = false;
       let lastSyncedSnapshot = null;
-      const SYNC_TABLE_KEYS = ["products", "customers", "suppliers", "employees", "cashAccounts", "packages", "sales", "purchases", "cashTx", "payments", "stockMoves", "returns", "pendingSales", "pendingPurchases", "history"];
+      const SYNC_TABLE_KEYS = ["products", "customers", "suppliers", "employees", "categories", "discounts", "cashAccounts", "packages", "sales", "purchases", "cashTx", "payments", "stockMoves", "returns", "pendingSales", "pendingPurchases", "history"];
+      const SYNC_SETTING_KEYS = ["profile", "hardware", "accessCodes", "accessRules"];
 
       document.addEventListener("DOMContentLoaded", init);
 
@@ -877,15 +880,20 @@
         return true;
       }
 
-      function mergeFinanceFromBackend(remoteData) {
+      function mergeSubsetFromBackend(remoteData) {
         if (!remoteData || typeof remoteData !== "object") return false;
-        ["purchases", "sales", "payments"].forEach((key) => {
-          if (Array.isArray(remoteData[key])) state[key] = remoteData[key];
+        const changedKeys = [];
+        Object.keys(remoteData).forEach((key) => {
+          if (Array.isArray(remoteData[key])) {
+            if (JSON.stringify(state[key] || []) !== JSON.stringify(remoteData[key])) changedKeys.push(key);
+            state[key] = remoteData[key];
+          }
         });
+        normalizeState(state);
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         if (!lastSyncedSnapshot) lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
-        else ["purchases", "sales", "payments"].forEach((key) => { lastSyncedSnapshot[key] = JSON.parse(JSON.stringify(state[key] || [])); });
-        return true;
+        else Object.keys(remoteData).forEach((key) => { lastSyncedSnapshot[key] = JSON.parse(JSON.stringify(state[key] || [])); });
+        return changedKeys.length > 0;
       }
 
       function rowIdentity(key, row) {
@@ -913,7 +921,9 @@
       }
 
       function hasLocalSyncChanges() {
-        return Object.keys(buildSyncChanges().tables).length > 0;
+        if (Object.keys(buildSyncChanges().tables).length > 0) return true;
+        if (!lastSyncedSnapshot) return false;
+        return SYNC_SETTING_KEYS.some((key) => JSON.stringify(state[key]) !== JSON.stringify(lastSyncedSnapshot[key]));
       }
 
       function loadGoogleWorkspaceJsonp(action = "state") {
@@ -929,10 +939,10 @@
           const timer = setTimeout(() => {
             cleanup();
             resolve(false);
-          }, action === "finance" ? 7000 : 15000);
+          }, action === "finance" ? 7000 : action === "master" ? 12000 : 15000);
           window[callbackName] = (response) => {
             clearTimeout(timer);
-            const changed = action === "finance" ? mergeFinanceFromBackend(response?.data) : mergeStateFromBackend(response?.data);
+            const changed = action === "state" ? mergeStateFromBackend(response?.data) : mergeSubsetFromBackend(response?.data);
             cleanup();
             resolve(changed);
           };
@@ -954,7 +964,7 @@
           const response = await fetch(stateUrl, { cache: "no-store", redirect: "follow" });
           if (response.ok) {
             const payload = await response.json();
-            const changed = action === "finance" ? mergeFinanceFromBackend(payload?.data) : mergeStateFromBackend(payload?.data);
+            const changed = action === "state" ? mergeStateFromBackend(payload?.data) : mergeSubsetFromBackend(payload?.data);
             if (changed) return true;
           }
         } catch (error) {
@@ -965,8 +975,27 @@
 
       async function refreshGoogleWorkspaceState() {
         if (isSyncing || document.hidden || hasLocalSyncChanges()) return;
-        const changed = await loadGoogleWorkspaceState("finance");
-        if (changed) renderAll();
+        refreshPullCount += 1;
+        const action = refreshPullCount % 2 === 0 ? "master" : "finance";
+        const changed = await loadGoogleWorkspaceState(action);
+        if (changed) renderSyncedState();
+      }
+
+      function renderSyncedState() {
+        const activeView = document.querySelector(".view-section.active")?.id;
+        const cashierEditing = activeView === "cashierView" && (
+          selectedSaleProductId || saleProductDraft.sku || saleProductDraft.search ||
+          document.activeElement?.closest?.("#cashierView")
+        );
+        if (!cashierEditing) renderAll();
+      }
+
+      async function manualRefreshBackend(action, label) {
+        if (isSyncing) return toast("Sinkronisasi masih berjalan. Tunggu sebentar lalu coba lagi.");
+        if (hasLocalSyncChanges()) await syncGoogleWorkspace();
+        const loaded = await loadGoogleWorkspaceState(action);
+        renderAll();
+        toast(loaded ? `Data ${label} terbaru berhasil dimuat dari backend.` : `Data ${label} sudah sama dengan backend.`);
       }
 
       function init() {
@@ -1026,12 +1055,12 @@
         // latar belakang agar login tidak menunggu database produk yang besar.
         loadGoogleWorkspaceState("finance").then((loaded) => {
           if (loaded) {
-            renderAll();
+            renderSyncedState();
             toast("Data hutang dan piutang terbaru sudah dimuat.");
           }
         });
         setTimeout(() => {
-          if (!hasLocalSyncChanges()) loadGoogleWorkspaceState("state").then((loaded) => { if (loaded) renderAll(); });
+          if (!hasLocalSyncChanges()) loadGoogleWorkspaceState("state").then((loaded) => { if (loaded) renderSyncedState(); });
         }, 300);
         clearInterval(autoPullTimer);
         autoPullTimer = setInterval(refreshGoogleWorkspaceState, 15000);
@@ -1182,9 +1211,25 @@
         if (!saleDraft.invoiceNo) saleDraft.invoiceNo = nextInvoiceNo();
         return saleDraft;
       }
+      const SALE_PRODUCT_DRAFT_KEY = "mdd_sale_product_draft";
+      function persistSaleProductDraft() {
+        sessionStorage.setItem(SALE_PRODUCT_DRAFT_KEY, JSON.stringify(saleProductDraft));
+      }
+      function restoreSaleProductDraft() {
+        if (saleProductDraft.sku || saleProductDraft.search) return;
+        try {
+          const saved = JSON.parse(sessionStorage.getItem(SALE_PRODUCT_DRAFT_KEY) || "null");
+          if (saved && (saved.sku || saved.search)) {
+            saleProductDraft = Object.assign({ sku: "", search: "", unit: "", qty: 1, hpp: "", price1: "", price2: "", manualPrice: "", priceMode: "price1" }, saved);
+            selectedSaleProductId = findProductBySku(saleProductDraft.sku)?.id || "";
+          }
+        } catch {}
+      }
       function resetSaleDraft() {
         saleDraft = { invoiceNo: nextInvoiceNo(), ongkir: 0, bankCharge: 0, note: "", method: "Cash", customerId: "", customerName: "", customerType: "", customerAddress: "", customerWhatsapp: "" };
         selectedSaleProductId = "";
+        saleProductDraft = { sku: "", search: "", unit: "", qty: 1, hpp: "", price1: "", price2: "", manualPrice: "", priceMode: "price1" };
+        sessionStorage.removeItem(SALE_PRODUCT_DRAFT_KEY);
       }
       function nextPurchaseNo() {
         const stamp = today().split("-").reverse().join("");
@@ -1320,9 +1365,10 @@
       }
 
       function renderCashier() {
+        restoreSaleProductDraft();
         ensureSaleDraft();
         document.getElementById("cashierView").innerHTML = `
-          <div class="page-header"><div><p class="eyebrow">Kasir</p><h2>Penjualan dan Retur</h2></div><div class="header-actions"><button class="btn btn-outline-secondary" id="saleCancelBtn"><i class="bi bi-x-circle"></i> Batal</button><button class="btn btn-outline-secondary" id="salePendingBtn"><i class="bi bi-pause-circle"></i> Pending</button><button class="btn btn-primary" id="salePayBtn"><i class="bi bi-cash-coin"></i> Simpan & Bayar</button></div></div>
+          <div class="page-header"><div><p class="eyebrow">Kasir</p><h2>Penjualan dan Retur</h2></div><div class="header-actions"><button class="btn btn-outline-primary" id="refreshCashierProductsBtn"><i class="bi bi-arrow-repeat"></i> Sinkron Produk</button><button class="btn btn-outline-secondary" id="saleCancelBtn"><i class="bi bi-x-circle"></i> Batal</button><button class="btn btn-outline-secondary" id="salePendingBtn"><i class="bi bi-pause-circle"></i> Pending</button><button class="btn btn-primary" id="salePayBtn"><i class="bi bi-cash-coin"></i> Simpan & Bayar</button></div></div>
           <div class="content-grid">
             <section class="panel">
               <div class="panel-header"><h3>Cari Barang</h3><span class="chip"><i class="bi bi-upc-scan"></i> Scan/Kode/Nama</span></div>
@@ -1332,16 +1378,16 @@
                 <div class="col-md-4"><label class="form-label">Tipe Pelanggan</label><input id="saleCustomerType" class="form-control" value="${esc(saleDraft.customerType)}" placeholder="Retail/Tempo/Lainnya"></div>
                 <div class="col-md-8"><label class="form-label">Alamat Pelanggan</label><input id="saleCustomerAddress" class="form-control" value="${esc(saleDraft.customerAddress)}"></div>
                 <div class="col-md-4"><label class="form-label">Whatsapp</label><input id="saleCustomerWhatsapp" class="form-control" value="${esc(saleDraft.customerWhatsapp)}"></div>
-                <div class="col-md-4"><label class="form-label">Barcode/SKU</label><input id="saleSku" class="form-control" inputmode="numeric" autocomplete="off" placeholder="Ketik atau scan Code dari Products"></div>
-                <div class="col-md-4"><label class="form-label">Satuan Produk</label><input id="saleUnit" class="form-control" readonly placeholder="Otomatis dari Products.unit"></div>
-                <div class="col-md-4"><label class="form-label">Produk</label><input id="saleSearch" class="form-control" autocomplete="off" placeholder="Cari nama, kode, kategori, atau satuan"></div>
-                <div class="col-md-4"><label class="form-label">Qty</label><input id="saleQty" type="number" value="1" min="1" class="form-control"></div>
+                <div class="col-md-4"><label class="form-label">Barcode/SKU</label><input id="saleSku" value="${esc(saleProductDraft.sku)}" class="form-control" inputmode="numeric" autocomplete="off" placeholder="Ketik atau scan Code dari Products"></div>
+                <div class="col-md-4"><label class="form-label">Satuan Produk</label><input id="saleUnit" value="${esc(saleProductDraft.unit)}" class="form-control" readonly placeholder="Otomatis dari Products.unit"></div>
+                <div class="col-md-4"><label class="form-label">Produk</label><input id="saleSearch" value="${esc(saleProductDraft.search)}" class="form-control" autocomplete="off" placeholder="Cari nama, kode, kategori, atau satuan"></div>
+                <div class="col-md-4"><label class="form-label">Qty</label><input id="saleQty" type="number" value="${saleProductDraft.qty || 1}" min="1" class="form-control"></div>
                 <div class="col-12"><div id="saleSearchResults" class="search-results"></div></div>
-                <div class="col-md-3"><label class="form-label">Harga HPP</label><input id="saleHpp" type="number" min="0" class="form-control"></div>
-                <div class="col-md-3"><label class="form-label">Harga Jual 1</label><input id="salePrice1" type="number" min="0" class="form-control"></div>
-                <div class="col-md-3"><label class="form-label">Harga Jual 2</label><input id="salePrice2" type="number" min="0" class="form-control"></div>
-                <div class="col-md-3"><label class="form-label">Harga Lainnya</label><input id="saleManualPrice" type="number" min="0" class="form-control" placeholder="Harga negosiasi"></div>
-                <div class="col-md-4"><label class="form-label">Gunakan Harga</label><select id="salePriceMode" class="form-select"><option value="price1">Harga Jual 1</option><option value="price2">Harga Jual 2</option><option value="manual">Harga Lainnya</option></select></div>
+                <div class="col-md-3"><label class="form-label">Harga HPP</label><input id="saleHpp" value="${saleProductDraft.hpp}" type="number" min="0" class="form-control"></div>
+                <div class="col-md-3"><label class="form-label">Harga Jual 1</label><input id="salePrice1" value="${saleProductDraft.price1}" type="number" min="0" class="form-control"></div>
+                <div class="col-md-3"><label class="form-label">Harga Jual 2</label><input id="salePrice2" value="${saleProductDraft.price2}" type="number" min="0" class="form-control"></div>
+                <div class="col-md-3"><label class="form-label">Harga Lainnya</label><input id="saleManualPrice" value="${saleProductDraft.manualPrice}" type="number" min="0" class="form-control" placeholder="Harga negosiasi"></div>
+                <div class="col-md-4"><label class="form-label">Gunakan Harga</label><select id="salePriceMode" class="form-select"><option value="price1" ${saleProductDraft.priceMode === "price1" ? "selected" : ""}>Harga Jual 1</option><option value="price2" ${saleProductDraft.priceMode === "price2" ? "selected" : ""}>Harga Jual 2</option><option value="manual" ${saleProductDraft.priceMode === "manual" ? "selected" : ""}>Harga Lainnya</option></select></div>
                 <div class="col-md-6"><button id="saleAddBtn" class="btn btn-outline-primary w-100"><i class="bi bi-plus-lg"></i> Tambah</button></div>
                 <div class="col-md-6"><button id="saleReturnBtn" class="btn btn-outline-danger w-100"><i class="bi bi-arrow-return-left"></i> Retur</button></div>
               </div>
@@ -1364,11 +1410,18 @@
           <section class="panel mt-3"><div class="panel-header"><h3>Invoice Pending</h3><span class="chip">${state.pendingSales.length} pending</span></div>${pendingSalesTable()}</section>
           <section class="panel mt-3"><div class="panel-header"><h3>Laporan Pendapatan Kasir</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="sales"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${salesTable(state.sales.slice(0, 12))}</section>`;
         document.getElementById("saleAddBtn").onclick = addSaleFromSearch;
+        document.getElementById("refreshCashierProductsBtn").onclick = () => manualRefreshBackend("products", "produk");
         document.getElementById("saleSku").oninput = selectSaleProductBySku;
         document.getElementById("saleSku").onchange = selectSaleProductBySku;
         document.getElementById("saleSku").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); selectSaleProductBySku(e); } };
-        document.getElementById("saleSearch").oninput = () => { selectedSaleProductId = ""; renderSaleSearchResults(); };
+        document.getElementById("saleSearch").oninput = (event) => { selectedSaleProductId = ""; saleProductDraft.search = event.target.value; persistSaleProductDraft(); renderSaleSearchResults(); };
         document.getElementById("saleSearch").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); addSaleFromSearch(); } };
+        document.getElementById("saleQty").oninput = (event) => { saleProductDraft.qty = Math.max(1, Number(event.target.value || 1)); persistSaleProductDraft(); };
+        document.getElementById("saleHpp").oninput = (event) => { saleProductDraft.hpp = event.target.value; persistSaleProductDraft(); };
+        document.getElementById("salePrice1").oninput = (event) => { saleProductDraft.price1 = event.target.value; persistSaleProductDraft(); };
+        document.getElementById("salePrice2").oninput = (event) => { saleProductDraft.price2 = event.target.value; persistSaleProductDraft(); };
+        document.getElementById("saleManualPrice").oninput = (event) => { saleProductDraft.manualPrice = event.target.value; persistSaleProductDraft(); };
+        document.getElementById("salePriceMode").onchange = (event) => { saleProductDraft.priceMode = event.target.value; persistSaleProductDraft(); };
         document.getElementById("saleCustomerName").oninput = updateSaleCustomerDraft;
         document.getElementById("saleCustomerType").oninput = (e) => { saleDraft.customerType = e.target.value; };
         document.getElementById("saleCustomerAddress").oninput = (e) => { saleDraft.customerAddress = e.target.value; };
@@ -1399,6 +1452,8 @@
       }
       function selectSaleProductBySku(event) {
         const skuInput = document.getElementById("saleSku");
+        saleProductDraft.sku = skuInput.value;
+        persistSaleProductDraft();
         const product = findProductBySku(skuInput.value);
         if (!product) {
           selectedSaleProductId = "";
@@ -1452,6 +1507,8 @@
         const product = findProduct(productId);
         if (!product) return;
         selectedSaleProductId = product.id;
+        saleProductDraft = { sku: product.code || "", search: product.name || "", unit: product.unit || "", qty: saleProductDraft.qty || 1, hpp: String(toNumber(product.buy)), price1: String(toNumber(product.price)), price2: String(toNumber(product.price2)), manualPrice: "", priceMode: saleProductDraft.priceMode || "price1" };
+        persistSaleProductDraft();
         document.getElementById("saleSku").value = product.code || "";
         document.getElementById("saleSearch").value = product.name || "";
         document.getElementById("saleUnit").value = product.unit || "";
@@ -1480,14 +1537,20 @@
         const price2 = Number(document.getElementById("salePrice2").value || product.price2 || 0);
         const manual = Number(document.getElementById("saleManualPrice").value || 0);
         const selectedPrice = priceMode === "price2" ? price2 : priceMode === "manual" ? (manual || price1) : price1;
-        addCartLine(activeCart, product, Number(document.getElementById("saleQty").value || 1), "sale", {
+        const qty = Number(document.getElementById("saleQty").value || 1);
+        if (toNumber(product.stock) < qty) return toast("Stok tidak cukup.");
+        const overrides = {
           unit: document.getElementById("saleUnit").value,
           buy: Number(document.getElementById("saleHpp").value || product.buy),
           price1,
           price2,
           priceMode,
           price: selectedPrice
-        });
+        };
+        selectedSaleProductId = "";
+        saleProductDraft = { sku: "", search: "", unit: "", qty: 1, hpp: "", price1: "", price2: "", manualPrice: "", priceMode: "price1" };
+        sessionStorage.removeItem(SALE_PRODUCT_DRAFT_KEY);
+        addCartLine(activeCart, product, qty, "sale", overrides);
       }
       function updateSaleDraftTotals() {
         saleDraft.ongkir = Number(document.getElementById("saleOngkir").value || 0);
@@ -2045,11 +2108,12 @@
         ];
         const modules = allModules.filter(([title]) => canAccessMaster(title));
         document.getElementById("masterView").innerHTML = `
-          <div class="page-header"><div><p class="eyebrow">Master Dokumen</p><h2>Data Barang, Relasi, Kas, dan Stok</h2></div><button id="exportMasterBtn" class="btn btn-primary"><i class="bi bi-filetype-pdf"></i> PDF Master</button></div>
+          <div class="page-header"><div><p class="eyebrow">Master Dokumen</p><h2>Data Barang, Relasi, Kas, dan Stok</h2></div><div class="header-actions"><button id="refreshMasterBtn" class="btn btn-outline-primary"><i class="bi bi-arrow-repeat"></i> Sinkron Backend</button><button id="exportMasterBtn" class="btn btn-primary"><i class="bi bi-filetype-pdf"></i> PDF Master</button></div></div>
           <div class="module-grid">${modules.map(([title, key, icon], i) => smallModule(title, `${state[key]?.length || 0} data`, `masterAction${i}`, icon)).join("") || `<div class="module-card"><h4>Akses belum tersedia</h4><p>Hubungi Owner untuk membuka akses master dokumen.</p></div>`}</div>
           ${masterDatabaseDashboard()}`;
         modules.forEach((m, i) => document.getElementById(`masterAction${i}`).onclick = m[3]);
         bindMasterDatabaseActions();
+        document.getElementById("refreshMasterBtn").onclick = () => manualRefreshBackend("master", "master dokumen");
         document.getElementById("exportMasterBtn").onclick = () => exportReportPdf("Laporan Master", masterExportRows());
       }
 

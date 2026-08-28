@@ -706,6 +706,12 @@
       const STORAGE_KEY = "mdd_material_pro_clean_v1";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
       const today = () => new Date().toISOString().slice(0, 10);
+      const displayDate = (value) => {
+        if (!value) return "-";
+        const text = String(value).slice(0, 10);
+        const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        return match ? `${match[3]}/${match[2]}/${match[1]}` : value;
+      };
       const idr = new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 });
       const number = new Intl.NumberFormat("id-ID");
       const uid = (prefix) => prefix + "-" + Math.random().toString(36).slice(2, 7).toUpperCase();
@@ -1712,13 +1718,13 @@
           return `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Tanggal</th><th>Jatuh Tempo</th><th>No. Faktur</th><th>Supplier</th><th class="text-end">Hutang Aktif</th><th class="text-end">Bayar</th><th class="text-end">Retur</th><th class="text-end">Sisa Hutang</th><th></th></tr></thead><tbody>${items.map((x) => {
             const paid = debtPaidAmount(x);
             const returns = debtReturnAmount(x);
-            return `<tr><td>${x.date || "-"}</td><td>${x.dueDate || "-"}</td><td>${x.invoiceNo || x.id}</td><td>${x.salesName || personName(state.suppliers, x.supplierId)}</td><td class="text-end">${idr.format(x.total || 0)}</td><td class="text-end">${idr.format(paid)}</td><td class="text-end">${idr.format(returns)}</td><td class="text-end fw-bold">${idr.format(x.due || 0)}</td><td class="text-end"><div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-primary" data-pay-debt="${x.id}"><i class="bi bi-cash-coin"></i> Bayar</button><button class="btn btn-sm btn-outline-secondary" data-edit-debt="${x.id}"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-danger" data-delete-debt="${x.id}"><i class="bi bi-trash"></i> Hapus</button></div></td></tr>`;
+            return `<tr><td>${displayDate(x.date)}</td><td>${displayDate(x.dueDate)}</td><td>${x.invoiceNo || "-"}</td><td>${x.salesName || personName(state.suppliers, x.supplierId)}</td><td class="text-end">${idr.format(x.total || 0)}</td><td class="text-end">${idr.format(paid)}</td><td class="text-end">${idr.format(returns)}</td><td class="text-end fw-bold">${idr.format(x.due || 0)}</td><td class="text-end"><div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-primary" data-pay-debt="${x.id}"><i class="bi bi-cash-coin"></i> Bayar</button><button class="btn btn-sm btn-outline-secondary" data-edit-debt="${x.id}"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-danger" data-delete-debt="${x.id}"><i class="bi bi-trash"></i> Hapus</button></div></td></tr>`;
           }).join("") || `<tr><td colspan="9" class="text-center text-secondary">Tidak ada hutang aktif.</td></tr>`}</tbody></table></div>`;
         }
         return `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Tanggal</th><th>Jatuh Tempo</th><th>No. Faktur</th><th>Pelanggan</th><th class="text-end">Piutang Aktif</th><th class="text-end">Bayar</th><th class="text-end">Retur</th><th class="text-end">Sisa Piutang</th><th></th></tr></thead><tbody>${items.map((x) => {
           const paid = receivablePaidAmount(x);
           const returns = receivableReturnAmount(x);
-          return `<tr><td>${x.date || "-"}</td><td>${x.dueDate || "-"}</td><td>${x.invoiceNo || x.id}</td><td>${x.customerName || personName(state.customers, x.customerId)}</td><td class="text-end">${idr.format(x.total || 0)}</td><td class="text-end">${idr.format(paid)}</td><td class="text-end">${idr.format(returns)}</td><td class="text-end fw-bold">${idr.format(x.due || 0)}</td><td class="text-end"><div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-primary" data-pay-receivable="${x.id}"><i class="bi bi-cash-coin"></i> Bayar</button><button class="btn btn-sm btn-outline-secondary" data-edit-receivable="${x.id}"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-danger" data-delete-receivable="${x.id}"><i class="bi bi-trash"></i> Hapus</button></div></td></tr>`;
+          return `<tr><td>${displayDate(x.date)}</td><td>${displayDate(x.dueDate)}</td><td>${x.invoiceNo || "-"}</td><td>${x.customerName || personName(state.customers, x.customerId)}</td><td class="text-end">${idr.format(x.total || 0)}</td><td class="text-end">${idr.format(paid)}</td><td class="text-end">${idr.format(returns)}</td><td class="text-end fw-bold">${idr.format(x.due || 0)}</td><td class="text-end"><div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-primary" data-pay-receivable="${x.id}"><i class="bi bi-cash-coin"></i> Bayar</button><button class="btn btn-sm btn-outline-secondary" data-edit-receivable="${x.id}"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-danger" data-delete-receivable="${x.id}"><i class="bi bi-trash"></i> Hapus</button></div></td></tr>`;
         }).join("") || `<tr><td colspan="9" class="text-center text-secondary">Tidak ada piutang aktif.</td></tr>`}</tbody></table></div>`;
       }
       function debtPaidAmount(purchase) {
@@ -1917,7 +1923,16 @@
         const stockRevision = state.stockMoves.filter((m) => ["Opname", "Penyesuaian"].includes(m.type));
         const masterRows = [...state.customers, ...state.suppliers, ...state.products, ...state.discounts];
         const cashNet = state.cashTx.reduce((s, x) => s + (x.type === "Masuk" ? x.amount : -x.amount), 0);
-        const paymentTotal = state.payments.reduce((s, x) => s + x.amount, 0);
+        const debtReport = debtRows.map((x) => ({
+          tanggal: displayDate(x.date), jatuh_tempo: displayDate(x.dueDate), no_faktur: x.invoiceNo || "-",
+          supplier: x.salesName || personName(state.suppliers, x.supplierId), hutang_aktif: Number(x.total || 0),
+          bayar: debtPaidAmount(x), retur: debtReturnAmount(x), sisa_hutang: Number(x.due || 0)
+        }));
+        const receivableReport = receivableRows.map((x) => ({
+          tanggal: displayDate(x.date), jatuh_tempo: displayDate(x.dueDate), no_invoice: x.invoiceNo || "-",
+          pelanggan: x.customerName || personName(state.customers, x.customerId), piutang_aktif: Number(x.total || 0),
+          bayar: receivablePaidAmount(x), retur: receivableReturnAmount(x), sisa_piutang: Number(x.due || 0)
+        }));
         const netProfit = profit - expenses;
         const reports = [
           { title: "Laporan Penjualan", rows: state.sales, value: idr.format(state.sales.reduce((s, x) => s + x.total, 0)), note: `${state.sales.length} invoice. Nilai mencakup ongkir dan bank charge bila ada.` },
@@ -1925,9 +1940,8 @@
           { title: "Laporan Pembelian", rows: state.purchases, value: idr.format(state.purchases.reduce((s, x) => s + x.total, 0)), note: `${state.purchases.length} transaksi pembelian supplier.` },
           { title: "Laporan Retur Pembelian", rows: purchaseReturn, value: `${number.format(purchaseReturn.reduce((s, x) => s + Number(x.qty || 0), 0))} item`, note: `${purchaseReturn.length} transaksi retur pembelian tercatat.` },
           { title: "Laporan Transaksi Kas", rows: state.cashTx, value: idr.format(cashNet), note: `${state.cashTx.length} transaksi kas. Positif berarti kas bersih masuk.` },
-          { title: "Laporan Hutang", rows: debtRows, value: idr.format(debtRows.reduce((s, x) => s + x.due, 0)), note: `${debtRows.length} pembelian masih memiliki hutang tersisa.` },
-          { title: "Laporan Piutang", rows: receivableRows, value: idr.format(receivableRows.reduce((s, x) => s + x.due, 0)), note: `${receivableRows.length} penjualan masih memiliki piutang tersisa.` },
-          { title: "Laporan Pembayaran Hutang Piutang", rows: state.payments, value: idr.format(paymentTotal), note: `${state.payments.length} pembayaran cicilan/lunas tercatat.` },
+          { title: "Laporan Hutang", rows: debtReport, value: idr.format(debtRows.reduce((s, x) => s + x.due, 0)), note: `${debtRows.length} hutang aktif. Kolom disamakan dengan form Pembayaran Hutang.` },
+          { title: "Laporan Piutang", rows: receivableReport, value: idr.format(receivableRows.reduce((s, x) => s + x.due, 0)), note: `${receivableRows.length} piutang aktif. Kolom disamakan dengan form Pembayaran Piutang.` },
           { title: "Laporan Stok", rows: state.products, value: idr.format(stockValue), note: `${number.format(stockQty)} total qty dari ${state.products.length} produk.` },
           { title: "Laporan Revisi Stok", rows: stockRevision, value: `${number.format(stockRevision.reduce((s, x) => s + Math.abs(Number(x.qty || 0)), 0))} qty`, note: `${stockRevision.length} opname atau penyesuaian stok.` },
           { title: "Laporan Master", rows: masterRows, value: `${number.format(masterRows.length)} data`, note: `Gabungan data barang, diskon, pelanggan, dan supplier.` },
@@ -2413,10 +2427,10 @@
           <hr>
           <table class="table">
             <tbody>
-              <tr><th>Tanggal Bayar</th><td>${payment.date}</td></tr>
+              <tr><th>Tanggal Bayar</th><td>${displayDate(payment.date)}</td></tr>
               <tr><th>No. Bukti</th><td>${payment.id}</td></tr>
               <tr><th>No. Faktur</th><td>${debt.invoiceNo || debt.id}</td></tr>
-              <tr><th>Jatuh Tempo</th><td>${debt.dueDate || "-"}</td></tr>
+              <tr><th>Jatuh Tempo</th><td>${displayDate(debt.dueDate)}</td></tr>
               <tr><th>Supplier</th><td>${supplier}</td></tr>
               <tr><th>Hutang Aktif</th><td>${idr.format(debt.total || 0)}</td></tr>
               <tr><th>Retur</th><td>${idr.format(retur)}</td></tr>
@@ -2441,10 +2455,10 @@
           <hr>
           <table class="table">
             <tbody>
-              <tr><th>Tanggal Bayar</th><td>${payment.date}</td></tr>
+              <tr><th>Tanggal Bayar</th><td>${displayDate(payment.date)}</td></tr>
               <tr><th>No. Bukti</th><td>${payment.id}</td></tr>
               <tr><th>No. Faktur</th><td>${receivable.invoiceNo || receivable.id}</td></tr>
-              <tr><th>Jatuh Tempo</th><td>${receivable.dueDate || "-"}</td></tr>
+              <tr><th>Jatuh Tempo</th><td>${displayDate(receivable.dueDate)}</td></tr>
               <tr><th>Pelanggan</th><td>${customer}</td></tr>
               <tr><th>Piutang Aktif</th><td>${idr.format(receivable.total || 0)}</td></tr>
               <tr><th>Retur</th><td>${idr.format(retur)}</td></tr>

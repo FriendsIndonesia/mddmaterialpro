@@ -1,10 +1,12 @@
-const CACHE_NAME = "mdd-material-pro-v34";
+const CACHE_NAME = "mdd-material-pro-v36";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
   "./manifest.webmanifest",
-  "./icon.svg",
-  "./mdd-material-pro-logo.png"
+  "./mdd-material-pro-logo.png",
+  "./mdd-material-pro-app-icon.png",
+  "./icon-192.png",
+  "./icon-512.png"
 ];
 
 self.addEventListener("install", (event) => {

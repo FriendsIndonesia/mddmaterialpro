@@ -49,3 +49,20 @@ Integrasi:
 - GitHub: `https://github.com/FriendsIndonesia/mddmaterialpro`
 - Backend Apps Script: lihat `../../google-workspace-backend/Code.gs`
 - Panduan setup: lihat `../../GOOGLE_WORKSPACE_SETUP.md`
+
+## Sinkronisasi dua arah (Versi 3)
+
+- Spreadsheet aktif: `https://docs.google.com/spreadsheets/d/1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ/edit`
+- Input dan edit langsung pada sheet tabel akan dibaca aplikasi saat login dan diperiksa ulang setiap 30 detik.
+- Aplikasi hanya mengirim record yang berubah; data yang dimasukkan langsung di spreadsheet tidak lagi dihapus oleh sinkronisasi aplikasi.
+- Baris baru yang diisi di spreadsheet tanpa `id` akan memperoleh ID unik otomatis ketika backend membacanya.
+- Jangan mengubah nama sheet atau header baris pertama. Isi data mulai dari baris kedua.
+- Untuk kolom `items` atau nilai berbentuk objek/daftar, gunakan JSON yang valid.
+
+## Revisi tampilan dan data (Versi 4)
+
+- Kolom `code`/Kode selalu dibaca sebagai teks agar tidak berubah menjadi mata uang dan tetap dapat dicari oleh aplikasi.
+- Kolom stok masuk, stok keluar, stok akhir, stok sistem, stok fisik, selisih, jumlah, dan minimum memakai format angka biasa tanpa `Rp`.
+- Headline dashboard memakai warna biru dengan garis/lapisan gold tipis.
+- Form Profile Aplikasi hanya menampilkan Nama Toko, Whatsapp, dan Alamat; konfigurasi backend tetap aktif secara internal.
+- Logo terlampir digunakan pada layar masuk, navigasi, manifest, dan ikon PWA 192/512 px.

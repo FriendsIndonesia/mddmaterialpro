@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v41-stable-two-way-sync";
+const CACHE_NAME = "mdd-material-pro-v42-layout-date-theme";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

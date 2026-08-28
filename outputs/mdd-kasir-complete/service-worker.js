@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v38";
+const CACHE_NAME = "mdd-material-pro-v40-cashier-settings";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

@@ -803,6 +803,7 @@
       let session = null;
       let activeCart = [];
       let purchaseCart = [];
+      let editingSaleId = "";
       let saleDraft = { invoiceNo: "", ongkir: 0, bankCharge: 0, note: "", method: "Cash", customerId: "", customerName: "", customerType: "", customerAddress: "", customerWhatsapp: "" };
       let purchaseDraft = { invoiceNo: "", dueDate: "", ongkir: 0, bankCharge: 0, note: "", method: "Cash", supplierId: "", salesName: "", company: "", whatsapp: "" };
       let selectedSaleProductId = "";
@@ -1223,6 +1224,14 @@
       function supplierOptions() {
         return state.suppliers.map((s) => `<option value="${s.id}">${s.name || s.salesName || "-"}</option>`).join("");
       }
+      function supplierCompanyOptions() {
+        return state.suppliers.map((s) => `<option value="${esc(s.company || s.name || "")}">${esc(s.name || s.salesName || "")}</option>`).join("");
+      }
+      function findSupplierByCompany(company) {
+        const q = String(company || "").trim().toLowerCase();
+        if (!q) return null;
+        return state.suppliers.find((s) => String(s.company || s.name || "").trim().toLowerCase() === q) || null;
+      }
       function categoryOptions(selected = "") {
         return [...new Set([...materialCategories, ...state.categories.map((c) => c.name).filter(Boolean)])]
           .map((name) => `<option ${name === selected ? "selected" : ""}>${name}</option>`)
@@ -1451,7 +1460,7 @@
             <section class="panel">
               <div class="panel-header"><h3>Cari Barang</h3><span class="chip"><i class="bi bi-upc-scan"></i> Scan/Kode/Nama</span></div>
               <div class="row g-3 align-items-end">
-                <div class="col-md-4"><label class="form-label">Tanggal</label><input id="saleDate" type="date" value="${today()}" class="form-control"></div>
+                <div class="col-md-4"><label class="form-label">Tanggal</label><input id="saleDate" type="date" value="${saleDraft.date || today()}" class="form-control"></div>
                 <div class="col-md-4"><label class="form-label">Nama Pelanggan</label><input id="saleCustomerName" list="saleCustomerList" class="form-control" value="${esc(saleDraft.customerName)}" placeholder="Pilih/ketik nama pelanggan"><datalist id="saleCustomerList">${customerNameOptions()}</datalist></div>
                 <div class="col-md-4"><label class="form-label">Tipe Pelanggan</label><input id="saleCustomerType" class="form-control" value="${esc(saleDraft.customerType)}" placeholder="Retail/Tempo/Lainnya"></div>
                 <div class="col-md-8"><label class="form-label">Alamat Pelanggan</label><input id="saleCustomerAddress" class="form-control" value="${esc(saleDraft.customerAddress)}"></div>
@@ -1509,11 +1518,12 @@
         document.getElementById("saleBankCharge").oninput = updateSaleDraftTotals;
         document.getElementById("saleNote").oninput = (e) => { saleDraft.note = e.target.value; };
         document.getElementById("refreshInvoiceBtn").onclick = () => { saleDraft.invoiceNo = nextInvoiceNo(); renderAll(); };
-        document.getElementById("saleCancelBtn").onclick = () => { activeCart = []; resetSaleDraft(); renderAll(); toast("Transaksi dibatalkan."); };
+        document.getElementById("saleCancelBtn").onclick = () => { activeCart = []; editingSaleId = ""; resetSaleDraft(); renderAll(); toast("Transaksi dibatalkan."); };
         document.getElementById("salePendingBtn").onclick = pendingSale;
         document.getElementById("salePayBtn").onclick = checkoutSale;
         document.getElementById("saleReturnBtn").onclick = () => openReturnModal("Penjualan");
         bindPendingSalesActions();
+        bindCompletedSalesActions();
         bindCartEvents(document.getElementById("saleCart"), activeCart, "sale");
         bindTableExports();
       }
@@ -1580,6 +1590,24 @@
         state.pendingSales = state.pendingSales.filter((p) => p.id !== id);
         saveState(`Invoice pending ${pending.invoiceNo || id} dihapus`);
         renderAll();
+      }
+      function bindCompletedSalesActions() {
+        document.querySelectorAll("[data-edit-sale]").forEach((btn) => btn.onclick = () => editCompletedSale(btn.dataset.editSale));
+        document.querySelectorAll("[data-print-sale]").forEach((btn) => btn.onclick = () => {
+          const sale = state.sales.find((item) => item.id === btn.dataset.printSale);
+          if (!sale) return toast("Transaksi tidak ditemukan.");
+          printDoc("Faktur Penjualan", sale, "sales");
+        });
+      }
+      function editCompletedSale(id) {
+        const sale = state.sales.find((item) => item.id === id);
+        if (!sale) return toast("Transaksi tidak ditemukan.");
+        editingSaleId = sale.id;
+        activeCart = structuredClone(sale.items || []);
+        saleDraft = { invoiceNo: sale.invoiceNo || sale.id, date: String(sale.date || today()).slice(0, 10), ongkir: sale.ongkir || 0, bankCharge: sale.bankCharge || 0, note: sale.note || "", method: sale.method || "Cash", customerId: sale.customerId || "", customerName: sale.customerName || "", customerType: sale.customerType || "", customerAddress: sale.customerAddress || "", customerWhatsapp: sale.customerWhatsapp || "" };
+        renderAll();
+        document.getElementById("saleDate")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        toast(`Invoice ${sale.invoiceNo || sale.id} siap diedit. Klik Simpan & Bayar untuk menyimpan perubahan.`);
       }
       function selectSaleProduct(productId) {
         const product = findProduct(productId);
@@ -1681,7 +1709,16 @@
         const customer = selectedSaleCustomerData();
         const method = saleDraft.method;
         const total = saleGrandTotal();
-        const sale = { id: uid("SAL"), invoiceNo: saleDraft.invoiceNo, date: document.getElementById("saleDate").value, customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, customerDeposit: customer.deposit, items: structuredClone(activeCart), method, ongkir: saleDraft.ongkir, bankCharge: saleDraft.bankCharge, note: saleDraft.note, status: method === "Piutang" ? "Piutang" : "Lunas", total, due: method === "Piutang" ? total : 0, depositRemaining: method === "Deposit" ? Math.max(0, customer.deposit - total) : customer.deposit };
+        const previousSale = editingSaleId ? state.sales.find((item) => item.id === editingSaleId) : null;
+        if (previousSale) {
+          (previousSale.items || []).forEach((item) => {
+            const product = findProduct(item.productId);
+            if (product) product.stockOut = Math.max(0, toNumber(product.stockOut) - toNumber(item.qty));
+          });
+          state.stockMoves = state.stockMoves.filter((move) => move.note !== `Penjualan ${previousSale.id}`);
+          state.sales = state.sales.filter((item) => item.id !== previousSale.id);
+        }
+        const sale = { id: previousSale?.id || uid("SAL"), invoiceNo: previousSale?.invoiceNo || saleDraft.invoiceNo, date: document.getElementById("saleDate").value, customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, customerDeposit: customer.deposit, items: structuredClone(activeCart), method, ongkir: saleDraft.ongkir, bankCharge: saleDraft.bankCharge, note: saleDraft.note, status: method === "Piutang" ? "Piutang" : "Lunas", total, due: method === "Piutang" ? total : 0, depositRemaining: method === "Deposit" ? Math.max(0, customer.deposit - total) : customer.deposit };
         sale.items.forEach((item) => {
           const p = findProduct(item.productId);
           if (p) {
@@ -1695,6 +1732,7 @@
         state.sales.unshift(sale);
         state.syncQueue.push({ type: "sale", id: sale.id });
         activeCart = [];
+        editingSaleId = "";
         resetSaleDraft();
         saveState(`Penjualan ${sale.id} disimpan`);
         renderAll();
@@ -1709,9 +1747,9 @@
             <section class="panel"><div class="panel-header"><h3>Cari Barang</h3><button id="quickNewProductBtn" class="btn btn-outline-primary btn-sm"><i class="bi bi-plus-lg"></i> Barang Baru</button></div>
               <div class="row g-3 align-items-end">
                 <div class="col-md-4"><label class="form-label">Tanggal</label><input id="purchaseDate" type="date" value="${today()}" class="form-control"></div>
-                <div class="col-md-4"><label class="form-label">Nama Sales</label><select id="purchaseSupplier" class="form-select">${supplierOptions()}</select></div>
-                <div class="col-md-4"><label class="form-label">Nama Perusahaan</label><input id="purchaseCompany" class="form-control" value="${esc(purchaseDraft.company)}"></div>
-                <div class="col-md-4"><label class="form-label">Whatsapp</label><input id="purchaseWhatsapp" class="form-control" value="${esc(purchaseDraft.whatsapp)}"></div>
+                <div class="col-md-4"><label class="form-label">Nama Perusahaan</label><input id="purchaseCompany" list="purchaseCompanyList" class="form-control" value="${esc(purchaseDraft.company)}" autocomplete="off" placeholder="Cari perusahaan supplier"><datalist id="purchaseCompanyList">${supplierCompanyOptions()}</datalist></div>
+                <div class="col-md-4"><label class="form-label">Nama Sales</label><input id="purchaseSalesName" class="form-control" value="${esc(purchaseDraft.salesName)}" readonly></div>
+                <div class="col-md-4"><label class="form-label">Whatsapp</label><input id="purchaseWhatsapp" class="form-control" value="${esc(purchaseDraft.whatsapp)}" readonly></div>
                 <div class="col-md-4"><label class="form-label">Jatuh Tempo</label><input id="purchaseDueDate" type="date" value="${esc(purchaseDraft.dueDate || "")}" class="form-control"></div>
                 <div class="col-md-4"><label class="form-label">Satuan Produk</label><select id="purchaseUnit" class="form-select">${unitOptions.map((u) => `<option>${u}</option>`).join("")}</select></div>
                 <div class="col-md-8"><label class="form-label">Produk</label><input id="purchaseSearch" class="form-control" autocomplete="off" placeholder="Ketik nama produk, kode, kategori, atau scan barcode"></div>
@@ -1741,14 +1779,12 @@
             ${smallModule("Produksi Paket", "Gabungkan barang menjadi paket penjualan.", "producePackage", "bi-boxes")}
           </div>
           <section class="panel mt-3"><div class="panel-header"><h3>Laporan Pembelian</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="purchases"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${purchaseTable(state.purchases.slice(0, 12))}</section>`;
-        document.getElementById("purchaseSupplier").value = purchaseDraft.supplierId || state.suppliers[0]?.id || "";
         updatePurchaseSupplierFields();
         document.getElementById("purchaseAddBtn").onclick = addPurchaseFromSearch;
         document.getElementById("purchaseSearch").oninput = renderPurchaseSearchResults;
         document.getElementById("purchaseSearch").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); addPurchaseFromSearch(); } };
-        document.getElementById("purchaseSupplier").onchange = (e) => { purchaseDraft.supplierId = e.target.value; updatePurchaseSupplierFields(); };
-        document.getElementById("purchaseCompany").oninput = (e) => { purchaseDraft.company = e.target.value; };
-        document.getElementById("purchaseWhatsapp").oninput = (e) => { purchaseDraft.whatsapp = e.target.value; };
+        document.getElementById("purchaseCompany").oninput = updatePurchaseSupplierFromCompany;
+        document.getElementById("purchaseCompany").onchange = updatePurchaseSupplierFromCompany;
         document.getElementById("purchaseDueDate").oninput = (e) => { purchaseDraft.dueDate = e.target.value; };
         document.getElementById("purchasePayMethod").onchange = (e) => { purchaseDraft.method = e.target.value; };
         document.getElementById("purchaseOngkir").oninput = updatePurchaseDraftTotals;
@@ -1788,13 +1824,24 @@
         return findProduct(selectedPurchaseProductId) || findProduct(document.getElementById("purchaseSearch").value);
       }
       function updatePurchaseSupplierFields() {
-        const supplier = selectedSupplierData(document.getElementById("purchaseSupplier").value);
+        const supplier = selectedSupplierData(purchaseDraft.supplierId);
         purchaseDraft.supplierId = supplier.id || "";
         purchaseDraft.salesName = supplier.name || "";
         purchaseDraft.company = supplier.company || purchaseDraft.company || "";
         purchaseDraft.whatsapp = supplier.phone || supplier.whatsapp || purchaseDraft.whatsapp || "";
         document.getElementById("purchaseCompany").value = purchaseDraft.company;
+        document.getElementById("purchaseSalesName").value = purchaseDraft.salesName;
         document.getElementById("purchaseWhatsapp").value = purchaseDraft.whatsapp;
+      }
+      function updatePurchaseSupplierFromCompany(event) {
+        purchaseDraft.company = event.target.value;
+        const supplier = findSupplierByCompany(event.target.value);
+        purchaseDraft.supplierId = supplier?.id || "";
+        purchaseDraft.salesName = supplier?.name || supplier?.salesName || "";
+        purchaseDraft.whatsapp = supplier?.phone || supplier?.whatsapp || "";
+        document.getElementById("purchaseSalesName").value = purchaseDraft.salesName;
+        document.getElementById("purchaseWhatsapp").value = purchaseDraft.whatsapp;
+        if (!supplier && event.type === "change") toast("Nama perusahaan belum ditemukan pada backend Suppliers.");
       }
       function addPurchaseFromSearch() {
         const product = currentPurchaseProduct();
@@ -1835,7 +1882,6 @@
         if (!purchaseCart.length) return toast("Keranjang pembelian kosong.");
         updatePurchaseDraftTotals();
         purchaseDraft.method = document.getElementById("purchasePayMethod").value;
-        purchaseDraft.supplierId = document.getElementById("purchaseSupplier").value;
         purchaseDraft.note = document.getElementById("purchaseNote").value;
         purchaseDraft.company = document.getElementById("purchaseCompany").value;
         purchaseDraft.whatsapp = document.getElementById("purchaseWhatsapp").value;
@@ -2169,6 +2215,7 @@
         document.querySelectorAll("[data-report-index]").forEach((btn) => btn.onclick = () => exportReportPdf(reports[btn.dataset.reportIndex].title, reports[btn.dataset.reportIndex].rows));
         document.getElementById("exportAllReportsBtn").onclick = () => exportReportPdf("Semua Laporan MDD", reports.flatMap((report) => report.rows.map((r) => ({ laporan: report.title, nilaiRingkasan: report.value, catatan: report.note, ...r }))));
         document.getElementById("printReportsBtn").onclick = () => window.print();
+        bindCompletedSalesActions();
       }
 
       function renderMaster() {
@@ -2322,13 +2369,13 @@
         return genericTable(productRows(rows, options), keys);
       }
       function salesReportRows(rows) {
-        return rows.map((s) => ({ tanggal: s.date, invoice: s.invoiceNo || s.id, nama_pelanggan: s.customerName || relationName(s.customerId), alamat_pelanggan: s.customerAddress || "-", whatsapp: s.customerWhatsapp || "-", item: s.items?.length || 0, ongkir: s.ongkir || 0, bank_charge: s.bankCharge || 0, metode: s.method, status: s.status, total: s.total, jumlah_piutang_tersisa: s.due || 0, jumlah_deposit_tersisa: s.depositRemaining || 0 }));
+        return rows.map((s) => ({ tanggal: s.date, invoice: s.invoiceNo || s.id, nama_pelanggan: s.customerName || relationName(s.customerId), alamat_pelanggan: s.customerAddress || "-", whatsapp: s.customerWhatsapp || "-", item: s.items?.length || 0, ongkir: s.ongkir || 0, bank_charge: s.bankCharge || 0, metode: s.method, status: s.status, total: s.total, jumlah_piutang_tersisa: s.due || 0, jumlah_deposit_tersisa: s.depositRemaining || 0, aksi: `<div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-outline-primary" type="button" data-edit-sale="${s.id}" title="Edit transaksi"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-secondary" type="button" data-print-sale="${s.id}" title="Print ulang"><i class="bi bi-printer"></i> Print</button></div>` }));
       }
       function purchaseReportRows(rows) {
         return rows.map((p) => ({ tanggal: p.date, no_po: p.invoiceNo || p.id, nama_sales: p.salesName || personName(state.suppliers, p.supplierId), nama_perusahaan: p.company || selectedSupplierData(p.supplierId).company || "-", whatsapp: p.whatsapp || selectedSupplierData(p.supplierId).phone || "-", nama_barang: (p.items || []).map((item) => item.name).join(", "), qty: (p.items || []).reduce((sum, item) => sum + Number(item.qty || 0), 0), metode_pembayaran: p.method, jumlah_total: p.total, jumlah_hutang_tersisa: p.due || 0 }));
       }
       function salesTable(rows) {
-        return genericTable(salesReportRows(rows), ["tanggal", "invoice", "nama_pelanggan", "alamat_pelanggan", "whatsapp", "item", "ongkir", "bank_charge", "metode", "status", "total", "jumlah_piutang_tersisa", "jumlah_deposit_tersisa"]);
+        return genericTable(salesReportRows(rows), ["tanggal", "invoice", "nama_pelanggan", "alamat_pelanggan", "whatsapp", "item", "ongkir", "bank_charge", "metode", "status", "total", "jumlah_piutang_tersisa", "jumlah_deposit_tersisa", "aksi"]);
       }
       function purchaseTable(rows) {
         return genericTable(purchaseReportRows(rows), ["tanggal", "no_po", "nama_sales", "nama_perusahaan", "whatsapp", "nama_barang", "qty", "metode_pembayaran", "jumlah_total", "jumlah_hutang_tersisa"]);

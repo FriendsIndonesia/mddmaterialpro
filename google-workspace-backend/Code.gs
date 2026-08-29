@@ -61,6 +61,7 @@ function doPost(e) {
       TABLES.forEach((table) => mergeTable_(ss, table, data[table.key] || []));
     }
     writeRawState_(ss, payload);
+    syncFinancialLedgerSheets_(ss);
 
     return output_({
       ok: true,
@@ -100,6 +101,7 @@ function statusPayload_(ss) {
 function readState_(ss) {
   const data = {};
   TABLES.forEach((table) => data[table.key] = readTableDefinition_(ss, table));
+  overlayFinancialLedgers_(ss, data);
   Object.assign(data, readProfile_(ss));
   return {
     ok: true,
@@ -118,6 +120,7 @@ function readSubsetState_(ss, keys) {
   (keys || []).forEach((key) => wanted[key] = true);
   const data = {};
   TABLES.filter((table) => wanted[table.key]).forEach((table) => data[table.key] = readTableDefinition_(ss, table));
+  overlayFinancialLedgers_(ss, data);
   return {
     ok: true,
     app: APP_NAME,
@@ -129,6 +132,114 @@ function readSubsetState_(ss, keys) {
     spreadsheetId: ss.getId(),
     spreadsheetUrl: ss.getUrl()
   };
+}
+
+function overlayFinancialLedgers_(ss, data) {
+  if (Array.isArray(data.purchases)) data.purchases = mergeLedgerRows_(data.purchases, readLedgerRows_(ss, "Hutang", "debt"));
+  if (Array.isArray(data.sales)) data.sales = mergeLedgerRows_(data.sales, readLedgerRows_(ss, "Piutang", "receivable"));
+}
+
+function mergeLedgerRows_(canonicalRows, ledgerRows) {
+  const rows = {};
+  (canonicalRows || []).forEach((row) => {
+    const key = String(row.invoiceNo || row.id || "").trim().toLowerCase();
+    if (key) rows[key] = row;
+  });
+  (ledgerRows || []).forEach((row) => {
+    const key = String(row.invoiceNo || row.id || "").trim().toLowerCase();
+    if (!key) return;
+    rows[key] = Object.assign({}, rows[key] || {}, row);
+  });
+  return Object.keys(rows).map((key) => rows[key]);
+}
+
+function readLedgerRows_(ss, sheetName, kind) {
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  const values = sheet.getDataRange().getValues();
+  const headers = values.shift().map((value) => normalizeLedgerHeader_(value));
+  const pick = (row, names) => {
+    for (let i = 0; i < names.length; i += 1) {
+      const index = headers.indexOf(names[i]);
+      if (index >= 0 && row[index] !== "" && row[index] !== null) return row[index];
+    }
+    return "";
+  };
+  return values.filter((row) => row.some((value) => String(value || "").trim())).map((row, index) => {
+    const invoiceNo = String(pick(row, ["nofaktur", "invoice", "invoiceno", "nomorfaktur"]) || "").trim();
+    const total = ledgerNumber_(pick(row, kind === "debt" ? ["hutangaktif", "totalhutang", "total"] : ["piutangaktif", "totalpiutang", "total"]));
+    const paid = ledgerNumber_(pick(row, ["bayar", "dibayar", "paid"]));
+    const returned = ledgerNumber_(pick(row, ["retur", "return", "returnamount"]));
+    const remaining = ledgerNumber_(pick(row, kind === "debt" ? ["sisahutang", "sisa"] : ["sisapiutang", "sisa"]));
+    const relation = String(pick(row, kind === "debt" ? ["supplier", "namasupplier", "relasi"] : ["pelanggan", "customer", "namapelanggan", "relasi"]) || "").trim();
+    const base = {
+      id: (kind === "debt" ? "HUT-" : "PIU-") + (invoiceNo || String(index + 2)).replace(/[^A-Za-z0-9]/g, ""),
+      invoiceNo: invoiceNo || (kind === "debt" ? "HUTANG-" : "PIUTANG-") + (index + 2),
+      date: ledgerDate_(pick(row, ["tanggal", "date"])),
+      dueDate: ledgerDate_(pick(row, ["jatuhtempo", "duedate"])),
+      total: total || paid + returned + remaining,
+      paid,
+      returnAmount: returned,
+      due: remaining || Math.max(0, total - paid - returned),
+      method: String(pick(row, ["metode", "method"]) || "Tempo"),
+      note: String(pick(row, ["catatan", "note"]) || ""),
+      status: (remaining || Math.max(0, total - paid - returned)) > 0 ? (kind === "debt" ? "Hutang" : "Piutang") : "Lunas"
+    };
+    if (kind === "debt") base.salesName = relation;
+    else base.customerName = relation;
+    return base;
+  });
+}
+
+function normalizeLedgerHeader_(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function ledgerNumber_(value) {
+  if (typeof value === "number") return isFinite(value) ? value : 0;
+  const text = String(value || "").replace(/Rp/gi, "").replace(/\s/g, "").replace(/\.(?=\d{3}(?:\D|$))/g, "").replace(",", ".");
+  const parsed = Number(text);
+  return isFinite(parsed) ? parsed : 0;
+}
+
+function ledgerDate_(value) {
+  if (!value) return "";
+  if (Object.prototype.toString.call(value) === "[object Date]" && !isNaN(value.getTime())) return Utilities.formatDate(value, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  const text = String(value).trim();
+  let match = text.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+  if (match) return match[3] + "-" + ("0" + match[2]).slice(-2) + "-" + ("0" + match[1]).slice(-2);
+  match = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? match[1] + "-" + match[2] + "-" + match[3] : text;
+}
+
+function syncFinancialLedgerSheets_(ss) {
+  const data = { purchases: readTableDefinition_(ss, TABLES.find((table) => table.key === "purchases")), sales: readTableDefinition_(ss, TABLES.find((table) => table.key === "sales")) };
+  overlayFinancialLedgers_(ss, data);
+  writeLedgerSheet_(ss, "Hutang", data.purchases, "debt");
+  writeLedgerSheet_(ss, "Piutang", data.sales, "receivable");
+}
+
+function writeLedgerSheet_(ss, sheetName, rows, kind) {
+  const headers = kind === "debt" ? ["Tanggal", "Jatuh Tempo", "No. Faktur", "Supplier", "Hutang Aktif", "Bayar", "Retur", "Sisa Hutang", "Metode", "Catatan"] : ["Tanggal", "Jatuh Tempo", "No. Faktur", "Pelanggan", "Piutang Aktif", "Bayar", "Retur", "Sisa Piutang", "Metode", "Catatan"];
+  const sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
+  sheet.clearContents();
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  const activeRows = (rows || []).filter((row) => Number(row.due || 0) > 0 || Number(row.total || 0) > 0);
+  if (activeRows.length) {
+    const values = activeRows.map((row) => [ledgerDateValue_(row.date), ledgerDateValue_(row.dueDate), row.invoiceNo || row.id, kind === "debt" ? (row.salesName || row.company || "-") : (row.customerName || "-"), Number(row.total || 0), Number(row.paid || 0), Number(row.returnAmount || 0), Number(row.due || 0), row.method || "Tempo", row.note || ""]);
+    sheet.getRange(2, 1, values.length, headers.length).setValues(values);
+    sheet.getRange(2, 1, values.length, 2).setNumberFormat("dd/MM/yyyy");
+    sheet.getRange(2, 5, values.length, 4).setNumberFormat("#,##0");
+  }
+  sheet.setFrozenRows(1);
+  sheet.autoResizeColumns(1, headers.length);
+}
+
+function ledgerDateValue_(value) {
+  const normalized = ledgerDate_(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return normalized || "";
+  const parts = normalized.split("-");
+  return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
 }
 
 function getSpreadsheet_() {

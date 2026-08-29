@@ -615,8 +615,9 @@
       #printArea.receipt-58 .thermal-totals { display: grid; grid-template-columns: minmax(0,1fr) 2mm 23mm; gap: .35mm; text-align: right; font-size: 10px; line-height: 1.3; font-weight: 800; }
       #printArea.receipt-58 .thermal-totals span { min-width: 0; white-space: nowrap; }
       #printArea.receipt-58 .thermal-thanks { margin-top: 3mm; font-size: 14px; font-weight: 700; text-align: center; }
-      #printArea.receipt-58 .thermal-bank-accounts { margin-top: 1.5mm; font-size: 9.5px; line-height: 1.35; font-weight: 700; text-align: center; }
-      #printArea.receipt-58 .thermal-bank-accounts .account-owner { margin: .4mm 0 1.2mm; font-size: 9px; }
+      #printArea.receipt-58 .thermal-bank-accounts { margin-top: 2mm; font-size: 11px; line-height: 1.45; font-weight: 800; letter-spacing: .15px; text-align: center; }
+      #printArea.receipt-58 .thermal-bank-accounts > div { white-space: nowrap; }
+      #printArea.receipt-58 .thermal-bank-accounts .account-owner { margin: .35mm 0 1.4mm; font-size: 10.5px; font-weight: 800; }
       #printArea.receipt-58.receipt-compact { font-size: 10px; line-height: 1.22; }
       #printArea.receipt-58.receipt-compact .thermal-store { font-size: 15px; }
       #printArea.receipt-58.receipt-compact .thermal-address, #printArea.receipt-58.receipt-compact .thermal-totals { font-size: 10px; }
@@ -807,6 +808,7 @@
       let activeCart = [];
       let purchaseCart = [];
       let editingSaleId = "";
+      const receiptPrintStages = new Map();
       let saleDraft = { invoiceNo: "", ongkir: 0, bankCharge: 0, note: "", method: "Cash", customerId: "", customerName: "", customerType: "", customerAddress: "", customerWhatsapp: "" };
       let purchaseDraft = { invoiceNo: "", dueDate: "", ongkir: 0, bankCharge: 0, note: "", method: "Cash", supplierId: "", salesName: "", company: "", whatsapp: "" };
       let selectedSaleProductId = "";
@@ -1600,6 +1602,8 @@
           const sale = state.sales.find((item) => item.id === btn.dataset.printSale);
           if (!sale) return toast("Transaksi tidak ditemukan.");
           printDoc("Faktur Penjualan", sale, "sales");
+          const nextStage = receiptPrintStages.get(`sales:${sale.id || sale.invoiceNo}`) || 1;
+          btn.innerHTML = `<i class="bi bi-printer"></i> Print Lembar ${nextStage}`;
         });
       }
       function editCompletedSale(id) {
@@ -1934,6 +1938,13 @@
             <div class="metric-card"><div class="metric-icon bg-cyan"><i class="bi bi-graph-up"></i></div><div><span>Arus Kas Operasional Bersih</span><strong>${idr.format(flow.total)}</strong><small class="metric-source">Penerimaan penjualan − pembayaran pembelian + transaksi kas bersih</small></div></div>
           </div>
           <div class="audit-box mb-3"><strong>Rincian arus kas:</strong> penerimaan penjualan ${idr.format(flow.salesReceived)} − pembayaran pembelian ${idr.format(flow.purchasesPaid)} + kas masuk ${idr.format(flow.cashIn)} − kas keluar ${idr.format(flow.cashOut)} = <strong>${idr.format(flow.total)}</strong>. Saldo awal/Master Kas tidak dihitung dalam arus kas.</div>
+          <section class="panel mb-3"><div class="panel-header"><h3>Pencarian Data Base Hutang-Piutang</h3><span class="chip"><i class="bi bi-search"></i> Cari dan bayar</span></div>
+            <div class="row g-3 align-items-end">
+              <div class="col-md-9"><label class="form-label">Nama Orang/Perusahaan atau Nomor Faktur</label><input id="financeDatabaseSearch" list="financeDatabaseNames" class="form-control" autocomplete="off" placeholder="Ketik nama supplier, perusahaan, pelanggan, atau nomor faktur"><datalist id="financeDatabaseNames">${[...new Set([...debts.flatMap((x) => { const supplier = selectedSupplierData(x.supplierId); return [x.company, x.salesName, supplier.company, supplier.name]; }), ...receivables.flatMap((x) => [x.customerName, personName(state.customers, x.customerId)])].filter(Boolean))].map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist></div>
+              <div class="col-md-3"><button id="clearFinanceDatabaseSearch" class="btn btn-outline-secondary w-100" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button></div>
+              <div class="col-12"><div id="financeDatabaseSearchResults" class="small text-secondary">Ketik nama atau nomor faktur untuk menampilkan hutang dan piutang aktif.</div></div>
+            </div>
+          </section>
           <section class="panel"><div class="panel-header"><h3>Pembayaran Hutang</h3><button id="inputDebtDataBtn" class="btn btn-outline-primary btn-sm" type="button"><i class="bi bi-plus-lg"></i> Input Data</button></div>${paymentDueTable(debts, "debt")}</section>
           <section class="panel mt-3"><div class="panel-header"><h3>Pembayaran Piutang</h3><button id="inputReceivableDataBtn" class="btn btn-outline-primary btn-sm" type="button"><i class="bi bi-plus-lg"></i> Input Data</button></div>${paymentDueTable(receivables, "receivable")}</section>
           <section class="panel mt-3"><div class="panel-header"><h3>Laporan Petty Cash</h3><span class="chip">Ringkasan kas kecil</span></div>
@@ -1945,6 +1956,8 @@
           </section>
           <section class="panel mt-3"><div class="panel-header"><h3>Laporan Transaksi Kas</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="cash"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${cashTable()}</section>`;
         document.getElementById("addCashTxBtn").onclick = openCashTxModal;
+        document.getElementById("financeDatabaseSearch").oninput = renderFinanceDatabaseSearch;
+        document.getElementById("clearFinanceDatabaseSearch").onclick = () => { document.getElementById("financeDatabaseSearch").value = ""; renderFinanceDatabaseSearch(); document.getElementById("financeDatabaseSearch").focus(); };
         document.getElementById("inputDebtDataBtn").onclick = openDebtInputModal;
         document.getElementById("inputReceivableDataBtn").onclick = openReceivableInputModal;
         document.querySelectorAll("[data-pay-debt]").forEach((btn) => btn.onclick = () => openPaymentModal("debt", btn.dataset.payDebt));
@@ -1954,6 +1967,29 @@
         document.querySelectorAll("[data-edit-receivable]").forEach((btn) => btn.onclick = () => openReceivableInputModal(btn.dataset.editReceivable));
         document.querySelectorAll("[data-delete-receivable]").forEach((btn) => btn.onclick = () => deleteReceivableRecord(btn.dataset.deleteReceivable));
         bindTableExports();
+      }
+      function renderFinanceDatabaseSearch() {
+        const input = document.getElementById("financeDatabaseSearch");
+        const target = document.getElementById("financeDatabaseSearchResults");
+        if (!input || !target) return;
+        const query = String(input.value || "").trim().toLowerCase();
+        if (!query) {
+          target.innerHTML = "Ketik nama atau nomor faktur untuk menampilkan hutang dan piutang aktif.";
+          return;
+        }
+        const debtMatches = state.purchases.filter((row) => {
+          if (toNumber(row.due) <= 0) return false;
+          const supplier = selectedSupplierData(row.supplierId);
+          return [row.invoiceNo, row.salesName, row.company, row.whatsapp, supplier.name, supplier.company, supplier.phone].some((value) => String(value || "").toLowerCase().includes(query));
+        }).map((row) => ({ type: "Hutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.company || selectedSupplierData(row.supplierId).company || row.salesName || selectedSupplierData(row.supplierId).name || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due }));
+        const receivableMatches = state.sales.filter((row) => {
+          if (toNumber(row.due) <= 0) return false;
+          const customer = state.customers.find((item) => item.id === row.customerId) || {};
+          return [row.invoiceNo, row.customerName, row.customerWhatsapp, customer.name, customer.phone, customer.address].some((value) => String(value || "").toLowerCase().includes(query));
+        }).map((row) => ({ type: "Piutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.customerName || personName(state.customers, row.customerId), date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due }));
+        const matches = [...debtMatches, ...receivableMatches];
+        target.innerHTML = matches.length ? `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Jenis</th><th>Nama/Perusahaan</th><th>No. Faktur</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="text-end">Total</th><th class="text-end">Sisa</th><th></th></tr></thead><tbody>${matches.map((row) => `<tr><td><span class="soft-tag">${row.type}</span></td><td><strong>${esc(row.name)}</strong></td><td>${esc(row.invoice)}</td><td>${displayDate(row.date)}</td><td>${displayDate(row.dueDate)}</td><td class="text-end">${idr.format(row.total || 0)}</td><td class="text-end fw-bold">${idr.format(row.remaining || 0)}</td><td class="text-end"><button class="btn btn-sm btn-primary" data-finance-search-pay="${row.type === "Hutang" ? "debt" : "receivable"}" data-finance-search-id="${row.id}"><i class="bi bi-cash-coin"></i> Bayar</button></td></tr>`).join("")}</tbody></table></div>` : `<div class="text-center text-secondary py-3">Data hutang/piutang aktif tidak ditemukan.</div>`;
+        document.querySelectorAll("[data-finance-search-pay]").forEach((button) => button.onclick = () => openPaymentModal(button.dataset.financeSearchPay, button.dataset.financeSearchId));
       }
       function cashflowTotal() {
         return cashflowBreakdown().total;
@@ -2680,6 +2716,8 @@
       }
 
       function printDoc(title, doc, type) {
+        const printKey = `${type}:${doc.id || doc.invoiceNo}`;
+        const copyStage = receiptPrintStages.get(printKey) || 1;
         const isSale = type === "sales";
         const relation = isSale ? (doc.customerName || relationName(doc.customerId)) : (doc.salesName || personName(state.suppliers, doc.supplierId));
         const relationAddress = isSale ? (doc.customerAddress || "-") : (doc.company || "-");
@@ -2694,7 +2732,9 @@
         const chargeRows = `${toNumber(doc.ongkir) ? `<span>ONGKIR</span><span>:</span><span>${number.format(doc.ongkir)}</span>` : ""}${toNumber(doc.bankCharge) ? `<span>BANK CHARGE</span><span>:</span><span>${number.format(doc.bankCharge)}</span>` : ""}`;
         const printArea = document.getElementById("printArea");
         const bankAccounts = `<div class="thermal-bank-accounts"><div>BCA : 7361049555</div><div>BSI : 7215480709</div><div class="account-owner">A/N : TABNA</div><div>BRI : 224501000715564</div><div class="account-owner">A/N : KHAIRIYATUN NISA</div></div>`;
-        printArea.innerHTML = `<section class="receipt-copy">${meta("LEMBAR 1 - LENGKAP") }<div class="thermal-items">${pricedItems}</div><div class="thermal-separator"></div><div class="thermal-totals">${chargeRows}<span>TOTAL TRANSAKSI</span><span>:</span><span>${number.format(doc.total)}</span><span>${String(doc.method || "TUNAI").toUpperCase()}</span><span>:</span><span>${number.format(doc.total)}</span></div><div class="thermal-separator"></div><div class="thermal-thanks">Terima Kasih</div>${bankAccounts}</section><section class="receipt-copy">${meta("LEMBAR 2 - TANPA HARGA") }<div class="thermal-items">${deliveryItems}</div><div class="thermal-separator"></div><div class="thermal-thanks">Terima Kasih</div>${bankAccounts}</section>`;
+        const completeCopy = `<section class="receipt-copy">${meta("LEMBAR 1 - LENGKAP") }<div class="thermal-items">${pricedItems}</div><div class="thermal-separator"></div><div class="thermal-totals">${chargeRows}<span>TOTAL TRANSAKSI</span><span>:</span><span>${number.format(doc.total)}</span><span>${String(doc.method || "TUNAI").toUpperCase()}</span><span>:</span><span>${number.format(doc.total)}</span></div><div class="thermal-separator"></div><div class="thermal-thanks">Terima Kasih</div>${bankAccounts}</section>`;
+        const deliveryCopy = `<section class="receipt-copy">${meta("LEMBAR 2 - TANPA HARGA") }<div class="thermal-items">${deliveryItems}</div><div class="thermal-separator"></div><div class="thermal-thanks">Terima Kasih</div>${bankAccounts}</section>`;
+        printArea.innerHTML = copyStage === 1 ? completeCopy : deliveryCopy;
         const densityClass = doc.items.length > 14 ? "receipt-dense" : doc.items.length > 8 ? "receipt-compact" : "";
         printArea.classList.add("receipt-58");
         if (densityClass) printArea.classList.add(densityClass);
@@ -2708,7 +2748,13 @@
         printArea.classList.remove("receipt-58");
         printArea.classList.remove("receipt-compact", "receipt-dense");
         receiptPageStyle.remove();
-        toast("Data tersimpan. Gunakan dialog print untuk cetak struk/faktur/surat jalan/reprint.");
+        if (copyStage === 1) {
+          receiptPrintStages.set(printKey, 2);
+          toast("Lembar 1 lengkap selesai. Klik tombol Print sekali lagi untuk mencetak lembar 2 tanpa harga dan total.");
+        } else {
+          receiptPrintStages.delete(printKey);
+          toast("Lembar 2 tanpa harga selesai. Proses cetak dua lembar telah ditutup.");
+        }
       }
       function printDebtPaymentReceipt(debt, payment, retur = 0) {
         const supplier = debt.salesName || personName(state.suppliers, debt.supplierId);

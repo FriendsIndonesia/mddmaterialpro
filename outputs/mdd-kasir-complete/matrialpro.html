@@ -955,7 +955,7 @@
           const timer = setTimeout(() => {
             cleanup();
             resolve(false);
-          }, action === "finance" || action === "auth" ? 7000 : action === "master" ? 12000 : 15000);
+          }, action === "products" || action === "master" ? 12000 : 7000);
           window[callbackName] = (response) => {
             clearTimeout(timer);
             const changed = action === "state" ? mergeStateFromBackend(response?.data) : mergeSubsetFromBackend(response?.data);
@@ -992,7 +992,7 @@
       async function refreshGoogleWorkspaceState() {
         if (isSyncing || document.hidden || hasLocalSyncChanges()) return;
         refreshPullCount += 1;
-        const action = refreshPullCount % 2 === 0 ? "master" : "finance";
+        const action = refreshPullCount % 6 === 0 ? "products" : refreshPullCount % 2 === 0 ? "masterlite" : "finance";
         const changed = await loadGoogleWorkspaceState(action);
         if (changed) renderSyncedState();
       }
@@ -1075,17 +1075,14 @@
         renderAll();
         // Dashboard tampil dari cache lokal lebih dahulu; jaringan berjalan di
         // latar belakang agar login tidak menunggu database produk yang besar.
-        loadGoogleWorkspaceState("finance").then((loaded) => {
-          if (loaded) {
-            renderSyncedState();
-            toast("Data hutang dan piutang terbaru sudah dimuat.");
-          }
+        Promise.all([loadGoogleWorkspaceState("finance"), loadGoogleWorkspaceState("masterlite")]).then((results) => {
+          if (results.some(Boolean)) renderSyncedState();
         });
         setTimeout(() => {
-          if (!hasLocalSyncChanges()) loadGoogleWorkspaceState("state").then((loaded) => { if (loaded) renderSyncedState(); });
-        }, 300);
+          if (!hasLocalSyncChanges()) loadGoogleWorkspaceState("products").then((loaded) => { if (loaded) renderSyncedState(); });
+        }, 250);
         clearInterval(autoPullTimer);
-        autoPullTimer = setInterval(refreshGoogleWorkspaceState, 15000);
+        autoPullTimer = setInterval(refreshGoogleWorkspaceState, 5000);
       }
       function renderNav() {
         document.getElementById("mainNav").innerHTML = navItems.filter(([view]) => canAccessView(view)).map(([view, icon, label]) => `<button class="nav-link ${document.querySelector(".view-section.active")?.id === view ? "active" : ""}" data-view="${view}" type="button"><i class="bi ${icon}"></i>${label}</button>`).join("");
@@ -2736,7 +2733,11 @@
           localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
           lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
           toast("Sinkron dua arah berhasil dikirim ke Google Workspace.");
-          setTimeout(refreshGoogleWorkspaceState, 3500);
+          setTimeout(() => {
+            Promise.all([loadGoogleWorkspaceState("finance"), loadGoogleWorkspaceState("masterlite")]).then((results) => {
+              if (results.some(Boolean)) renderSyncedState();
+            });
+          }, 800);
         } catch {
           toast("Gagal sinkron. Data tetap aman di mode offline.");
         } finally {

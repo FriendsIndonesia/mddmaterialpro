@@ -594,7 +594,9 @@
       #printArea, #printArea * { visibility: visible; }
       #printArea { position: absolute; top: 0; left: 0; right: 0; bottom: auto; width: 100%; height: auto; min-height: 0; margin: 0; padding: 8mm; overflow: visible; }
       #printArea > :last-child { margin-bottom: 0 !important; padding-bottom: 0 !important; }
-      #printArea.receipt-58 { page: receipt58; box-sizing: border-box; width: 58mm !important; max-width: 58mm !important; min-width: 58mm !important; min-height: 0 !important; margin: 0 auto !important; padding: 3mm 2.5mm !important; color: #000; font-size: 9px; line-height: 1.3; text-align: center; }
+      #printArea.receipt-58 { box-sizing: border-box; width: 58mm !important; max-width: 58mm !important; min-width: 58mm !important; min-height: 0 !important; margin: 0 auto !important; padding: 0 !important; color: #000; font-size: 9px; line-height: 1.3; text-align: center; }
+      #printArea.receipt-58 .receipt-copy { page: receipt58; box-sizing: border-box; width: 58mm; max-width: 58mm; min-height: 0; margin: 0 auto; padding: 3mm 2.5mm; break-after: page; page-break-after: always; }
+      #printArea.receipt-58 .receipt-copy:last-child { break-after: auto; page-break-after: auto; }
       #printArea.receipt-58 h2 { margin: 0 0 1.5mm !important; font-size: 14px; line-height: 1.15; text-align: center; }
       #printArea.receipt-58 h3 { margin: 2mm 0 1.5mm !important; font-size: 11px; line-height: 1.2; text-align: center !important; }
       #printArea.receipt-58 p { margin: 1.5mm 0; text-align: center !important; }
@@ -602,6 +604,7 @@
       #printArea.receipt-58 .table { width: 100% !important; margin: 1.5mm 0 !important; table-layout: fixed; border-collapse: collapse; font-size: 8px !important; }
       #printArea.receipt-58 .table th, #printArea.receipt-58 .table td { padding: 1mm .6mm !important; text-align: center !important; vertical-align: middle; white-space: normal; overflow-wrap: anywhere; border-bottom: .2mm solid #bbb; }
       #printArea.receipt-58 .table th:first-child, #printArea.receipt-58 .table td:first-child { width: 34%; }
+      #printArea.receipt-58 .no-price-table th:first-child, #printArea.receipt-58 .no-price-table td:first-child { width: 76%; }
     }
     /* Royal blue, white, and gold visual system. */
     :root { --sidebar:#071a44; --sidebar-2:#04102d; --bg:#eef4ff; --panel:#fff; --line:#c9d8f3; --text:#10234a; --muted:#607194; --blue:#164ec7; --green:#164ec7; --amber:#c99518; --cyan:#245fda; }
@@ -1357,7 +1360,7 @@
         container.querySelectorAll(`[data-edit="${prefix}"]`).forEach((btn) => btn.addEventListener("click", (e) => {
           const id = e.currentTarget.closest(".cart-row").dataset.id;
           const item = cart.find((line) => line.id === id);
-          openCartEditModal(item, cart);
+          openCartEditModal(item, cart, prefix);
         }));
       }
 
@@ -1441,10 +1444,10 @@
                 <div class="col-md-4"><label class="form-label">Produk</label><input id="saleSearch" value="${esc(saleProductDraft.search)}" class="form-control" autocomplete="off" placeholder="Cari nama, kode, kategori, atau satuan"></div>
                 <div class="col-md-4"><label class="form-label">Qty</label><input id="saleQty" type="number" value="${saleProductDraft.qty || 1}" min="1" class="form-control"></div>
                 <div class="col-12"><div id="saleSearchResults" class="search-results"></div></div>
-                <div class="col-md-3"><label class="form-label">Harga HPP</label><input id="saleHpp" value="${saleProductDraft.hpp}" type="number" min="0" class="form-control"></div>
-                <div class="col-md-3"><label class="form-label">Harga Jual 1</label><input id="salePrice1" value="${saleProductDraft.price1}" type="number" min="0" class="form-control"></div>
-                <div class="col-md-3"><label class="form-label">Harga Jual 2</label><input id="salePrice2" value="${saleProductDraft.price2}" type="number" min="0" class="form-control"></div>
-                <div class="col-md-3"><label class="form-label">Harga Lainnya</label><input id="saleManualPrice" value="${saleProductDraft.manualPrice}" type="number" min="0" class="form-control" placeholder="Harga negosiasi"></div>
+                <input id="saleHpp" value="${saleProductDraft.hpp}" type="hidden">
+                <div class="col-md-4"><label class="form-label">Harga Jual 1</label><input id="salePrice1" value="${saleProductDraft.price1}" type="number" min="0" class="form-control"></div>
+                <div class="col-md-4"><label class="form-label">Harga Jual 2</label><input id="salePrice2" value="${saleProductDraft.price2}" type="number" min="0" class="form-control"></div>
+                <div class="col-md-4"><label class="form-label">Harga Lainnya</label><input id="saleManualPrice" value="${saleProductDraft.manualPrice}" type="number" min="0" class="form-control" placeholder="Harga negosiasi"></div>
                 <div class="col-md-4"><label class="form-label">Gunakan Harga</label><select id="salePriceMode" class="form-select"><option value="price1" ${saleProductDraft.priceMode === "price1" ? "selected" : ""}>Harga Jual 1</option><option value="price2" ${saleProductDraft.priceMode === "price2" ? "selected" : ""}>Harga Jual 2</option><option value="manual" ${saleProductDraft.priceMode === "manual" ? "selected" : ""}>Harga Lainnya</option></select></div>
                 <div class="col-md-6"><button id="saleAddBtn" class="btn btn-outline-primary w-100"><i class="bi bi-plus-lg"></i> Tambah</button></div>
                 <div class="col-md-6"><button id="saleReturnBtn" class="btn btn-outline-danger w-100"><i class="bi bi-arrow-return-left"></i> Retur</button></div>
@@ -1615,21 +1618,21 @@
         saleDraft.bankCharge = Number(document.getElementById("saleBankCharge").value || 0);
         document.getElementById("saleGrandTotal").textContent = idr.format(saleGrandTotal());
       }
-      function openCartEditModal(item, cart) {
+      function openCartEditModal(item, cart, mode = "sale") {
         if (!item) return;
         openModal("Edit Item Keranjang", `
           <div class="row g-3">
             <div class="col-md-6"><label class="form-label">Produk</label><input value="${item.name}" class="form-control" readonly></div>
             <div class="col-md-3"><label class="form-label">Satuan</label><select name="unit" class="form-select">${unitOptions.map((u) => `<option ${u === normalizeUnit(item.unit) ? "selected" : ""}>${u}</option>`).join("")}</select></div>
             <div class="col-md-3"><label class="form-label">Qty</label><input name="qty" type="number" min="1" value="${item.qty}" class="form-control"></div>
-            <div class="col-md-3"><label class="form-label">Harga HPP</label><input name="buy" type="number" min="0" value="${item.buy || 0}" class="form-control"></div>
+            ${mode === "purchase" ? `<div class="col-md-3"><label class="form-label">Harga HPP</label><input name="buy" type="number" min="0" value="${item.buy || 0}" class="form-control"></div>` : ""}
             <div class="col-md-3"><label class="form-label">Harga Jual</label><input name="price" type="number" min="0" value="${item.price}" class="form-control"></div>
             <div class="col-md-3"><label class="form-label">Subtotal</label><input value="${idr.format((item.qty * item.price) - (item.discount || 0))}" class="form-control" readonly></div>
             <div class="col-12"><label class="form-label">Note</label><input name="note" value="${item.note || ""}" class="form-control"></div>
           </div>`, (fd) => {
           item.unit = fd.get("unit");
           item.qty = Math.max(1, Number(fd.get("qty") || 1));
-          item.buy = Number(fd.get("buy") || 0);
+          if (mode === "purchase") item.buy = Number(fd.get("buy") || 0);
           item.price = Number(fd.get("price") || 0);
           item.discount = 0;
           item.note = fd.get("note");
@@ -2611,12 +2614,14 @@
 
       function printDoc(title, doc, type) {
         const rows = doc.items.map((item) => `<tr><td>${item.name}</td><td class="text-end">${idr.format(item.price)}</td><td class="text-end">${item.qty}</td><td class="text-end">${idr.format(item.qty * item.price - (item.discount || 0))}</td></tr>`).join("");
+        const deliveryRows = doc.items.map((item) => `<tr><td>${item.name}</td><td>${item.qty}</td></tr>`).join("");
         const isSale = type === "sales";
         const relation = isSale ? (doc.customerName || relationName(doc.customerId)) : (doc.salesName || personName(state.suppliers, doc.supplierId));
         const relationAddress = isSale ? (doc.customerAddress || "-") : (doc.company || "-");
         const relationWhatsapp = isSale ? (doc.customerWhatsapp || "-") : (doc.whatsapp || "-");
         const printArea = document.getElementById("printArea");
-        printArea.innerHTML = `${officialPrintHeader(title)}<p><strong>${isSale ? "Nomor Invoice" : "No. PO"}:</strong> ${doc.invoiceNo || doc.id}<br><strong>Tanggal:</strong> ${displayDate(doc.date)}<br><strong>${isSale ? "Nama Pelanggan" : "Nama Sales"}:</strong> ${relation}<br><strong>${isSale ? "Alamat Pelanggan" : "Nama Perusahaan"}:</strong> ${relationAddress}<br><strong>WhatsApp:</strong> ${relationWhatsapp}<br><strong>Metode Bayar:</strong> ${doc.method}</p><table class="table"><thead><tr><th>Nama Barang</th><th>Harga</th><th>Qty</th><th>Subtotal</th></tr></thead><tbody>${rows}</tbody></table><p>Biaya Ongkir: ${idr.format(doc.ongkir || 0)}<br>Bank Charge: ${idr.format(doc.bankCharge || 0)}</p><h3 style="margin-bottom:0">Jumlah Total<br>${idr.format(doc.total)}</h3>`;
+        const details = `<p><strong>${isSale ? "Nomor Invoice" : "No. PO"}:</strong> ${doc.invoiceNo || doc.id}<br><strong>Tanggal:</strong> ${displayDate(doc.date)}<br><strong>${isSale ? "Nama Pelanggan" : "Nama Sales"}:</strong> ${relation}<br><strong>${isSale ? "Alamat Pelanggan" : "Nama Perusahaan"}:</strong> ${relationAddress}<br><strong>WhatsApp:</strong> ${relationWhatsapp}<br><strong>Metode Bayar:</strong> ${doc.method}</p>`;
+        printArea.innerHTML = `<section class="receipt-copy">${officialPrintHeader(`${title} - RANGKAP 1`)}${details}<table class="table"><thead><tr><th>Nama Barang</th><th>Harga</th><th>Qty</th><th>Subtotal</th></tr></thead><tbody>${rows}</tbody></table><p>Biaya Ongkir: ${idr.format(doc.ongkir || 0)}<br>Bank Charge: ${idr.format(doc.bankCharge || 0)}</p><h3 style="margin-bottom:0">Jumlah Total<br>${idr.format(doc.total)}</h3></section><section class="receipt-copy">${officialPrintHeader(`${title} - RANGKAP 2`)}${details}<table class="table no-price-table"><thead><tr><th>Nama Barang</th><th>Qty</th></tr></thead><tbody>${deliveryRows}</tbody></table><h3 style="margin-bottom:0">SALINAN TANPA HARGA</h3></section>`;
         printArea.classList.add("receipt-58");
         printArea.classList.remove("d-none");
         window.print();

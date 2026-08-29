@@ -12,6 +12,7 @@
   <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <style>
     :root {
       --sidebar: #17212b;
@@ -771,10 +772,10 @@
       const idr = new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 });
       const number = new Intl.NumberFormat("id-ID");
       const uid = (prefix) => prefix + "-" + Math.random().toString(36).slice(2, 7).toUpperCase();
-      const users = [
-        { username: "owner", password: "owner123", name: "Owner", role: "Owner" },
-        { username: "kasir", password: "kasir123", name: "Kasir", role: "Kasir" },
-        { username: "gudang", password: "gudang123", name: "Admin Gudang", role: "Gudang" }
+      const defaultUsers = [
+        { username: "owner", password: "060361", name: "Owner", role: "Owner" },
+        { username: "kasir", password: "111111", name: "Kasir", role: "Kasir" },
+        { username: "gudang", password: "123456", name: "Admin Gudang", role: "Gudang" }
       ];
       const navItems = [
         ["dashboardView", "bi-speedometer2", "Dashboard Owner"],
@@ -817,6 +818,7 @@
       let selectedPurchaseProductId = "";
       let modalSubmit = null;
       let masterSearchSources = {};
+      let productDatabaseQuery = "";
       let salesChart = null;
       let syncTimer = null;
       let autoPullTimer = null;
@@ -825,7 +827,7 @@
       let isPulling = false;
       let lastSyncedSnapshot = null;
       const SYNC_TABLE_KEYS = ["products", "customers", "suppliers", "employees", "categories", "discounts", "cashAccounts", "packages", "sales", "purchases", "cashTx", "payments", "stockMoves", "returns", "pendingSales", "pendingPurchases", "history"];
-      const SYNC_SETTING_KEYS = ["profile", "hardware", "accessCodes", "accessRules"];
+      const SYNC_SETTING_KEYS = ["profile", "hardware", "accessCodes", "accessRules", "userAccounts"];
 
       document.addEventListener("DOMContentLoaded", init);
 
@@ -834,6 +836,7 @@
           profile: { name: STORE_PRINT_NAME, address: STORE_PRINT_ADDRESS, phone: STORE_PRINT_PHONE, tax: "", googleEndpoint: "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec", googleAccount: "friendsindonesia28@gmail.com", githubRepo: "https://github.com/FriendsIndonesia/mddmaterialpro", onlineMode: true },
           hardware: { receipt: "Thermal 58/80mm", invoice: "Printer Faktur", barcode: "USB/HID Barcode Scanner", drawer: "RJ11 Cash Drawer", tag: "Printer Barcode" },
           accessCodes: { owner: "060361", admin: "123456", kasir: "111111" },
+          userAccounts: defaultUsers.map((user) => ({ ...user })),
           categories: [],
           products: DEFAULT_PRODUCTS.map((product) => ({ ...product })),
           customers: [],
@@ -869,6 +872,11 @@
         } catch {}
       }
       function normalizeState(data) {
+        data.userAccounts = Array.isArray(data.userAccounts) && data.userAccounts.length
+          ? data.userAccounts.map((user) => ({ username: String(user.username || "").trim().toLowerCase(), password: String(user.password || ""), name: String(user.name || user.username || "User").trim(), role: ["Owner", "Kasir", "Gudang"].includes(user.role) ? user.role : "Kasir" })).filter((user) => user.username)
+          : defaultUsers.map((user) => ({ ...user }));
+        const legacyPasswords = { owner: data.accessCodes?.owner, gudang: data.accessCodes?.admin, kasir: data.accessCodes?.kasir };
+        data.userAccounts.forEach((user) => { if (legacyPasswords[user.username]) user.password = String(legacyPasswords[user.username]); });
         data.accessRules = data.accessRules || cloneAccessRules(defaultAccessRules);
         const allowedMaster = new Set(masterAccessOptions);
         ["Kasir", "Gudang"].forEach((role) => {
@@ -1052,6 +1060,10 @@
 
       function renderSyncedState() {
         const activeView = document.querySelector(".view-section.active")?.id;
+        if (activeView === "productsView" && (productDatabaseQuery || document.activeElement?.id === "productDatabaseSearch")) {
+          renderProductDatabaseSearch();
+          return;
+        }
         const cashierEditing = activeView === "cashierView" && (
           selectedSaleProductId || saleProductDraft.sku || saleProductDraft.search ||
           document.activeElement?.closest?.("#cashierView")
@@ -1099,7 +1111,7 @@
         const username = document.getElementById("username").value.trim().toLowerCase();
         const password = document.getElementById("password").value;
         const configuredPassword = { owner: state.accessCodes.owner, kasir: state.accessCodes.kasir, gudang: state.accessCodes.admin };
-        const user = users.find((item) => item.username === username && password === String(configuredPassword[item.username] || item.password));
+        const user = state.userAccounts.find((item) => item.username === username && password === String(item.password || configuredPassword[item.username] || ""));
         if (!user) {
           document.getElementById("loginAlert").textContent = "Username atau password salah.";
           document.getElementById("loginAlert").classList.remove("d-none");
@@ -1237,21 +1249,22 @@
             <div class="metric-card"><div class="metric-icon bg-amber"><i class="bi bi-exclamation-triangle"></i></div><div><span>Stok Kritis</span><strong>${number.format(critical.length)}</strong><small class="metric-source">Stok akhir ≤ stok minimum</small></div></div>
           </div>
           <section class="panel"><div class="panel-header"><div><h3>Daftar Produk Material</h3></div><span class="chip">${number.format(activeProducts.length)} data tersedia</span></div>
-            <div class="row g-2 mb-3"><div class="col-md-10"><label class="form-label">Pencarian Produk</label><input id="productDatabaseSearch" class="form-control" autocomplete="off" placeholder="Cari berdasarkan kode, nama, kategori, atau satuan"></div><div class="col-md-2 d-flex align-items-end"><button id="clearProductDatabaseSearch" class="btn btn-outline-secondary w-100" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button></div></div>
+            <div class="row g-2 mb-3"><div class="col-md-10"><label class="form-label">Pencarian Produk</label><input id="productDatabaseSearch" class="form-control" autocomplete="off" value="${esc(productDatabaseQuery)}" placeholder="Cari berdasarkan kode, nama, kategori, atau satuan"></div><div class="col-md-2 d-flex align-items-end"><button id="clearProductDatabaseSearch" class="btn btn-outline-secondary w-100" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button></div></div>
             <div id="productDatabaseSearchResult">${productsTable([], { actions: canAccessMaster("Master Barang") })}</div>
           </section>`;
         document.getElementById("exportProductsBtn").onclick = () => exportReportPdf("Database Produk Material", productRows(activeProducts));
-        document.getElementById("productDatabaseSearch").oninput = renderProductDatabaseSearch;
-        document.getElementById("clearProductDatabaseSearch").onclick = () => { document.getElementById("productDatabaseSearch").value = ""; renderProductDatabaseSearch(); document.getElementById("productDatabaseSearch").focus(); };
+        document.getElementById("productDatabaseSearch").oninput = (event) => { productDatabaseQuery = event.target.value; renderProductDatabaseSearch(); };
+        document.getElementById("clearProductDatabaseSearch").onclick = () => { productDatabaseQuery = ""; document.getElementById("productDatabaseSearch").value = ""; renderProductDatabaseSearch(); document.getElementById("productDatabaseSearch").focus(); };
         const addBtn = document.getElementById("addProductFromProductsBtn");
         if (addBtn) addBtn.onclick = openProductModal;
         bindProductActions();
+        if (productDatabaseQuery) renderProductDatabaseSearch();
       }
       function renderProductDatabaseSearch() {
         const input = document.getElementById("productDatabaseSearch");
         const target = document.getElementById("productDatabaseSearchResult");
         if (!input || !target) return;
-        const query = String(input.value || "").trim().toLowerCase();
+        const query = String(productDatabaseQuery || input.value || "").trim().toLowerCase();
         const matches = query ? state.products.filter((product) => product.active !== false && [product.code, product.name, product.category, product.unit].some((value) => String(value || "").toLowerCase().includes(query))).slice(0, 100) : [];
         target.innerHTML = productsTable(matches, { actions: canAccessMaster("Master Barang") });
         bindProductActions();
@@ -2296,7 +2309,7 @@
 
       function renderReports() {
         const salesRevenue = state.sales.reduce((sum, sale) => sum + (sale.items || []).reduce((x, item) => x + (toNumber(item.price) * toNumber(item.qty) - toNumber(item.discount)), 0), 0);
-        const cogs = state.sales.reduce((sum, sale) => sum + (sale.items || []).reduce((x, item) => x + (toNumber(findProduct(item.productId)?.buy) * toNumber(item.qty)), 0), 0);
+        const cogs = state.sales.reduce((sum, sale) => sum + (sale.items || []).reduce((x, item) => x + (toNumber(item.buy ?? findProduct(item.productId)?.buy) * toNumber(item.qty)), 0), 0);
         const grossProfit = salesRevenue - cogs;
         const expenseCategories = ["Biaya Operasional", "Gaji Karyawan", "Lainnya"];
         const expenses = state.cashTx.filter((x) => x.type === "Keluar" && expenseCategories.includes(x.category)).reduce((s, x) => s + toNumber(x.amount), 0);
@@ -2323,9 +2336,9 @@
         }));
         const netProfit = grossProfit - expenses;
         const reports = [
-          { title: "Laporan Penjualan", rows: state.sales, value: idr.format(state.sales.reduce((s, x) => s + x.total, 0)), note: `${state.sales.length} invoice. Nilai mencakup ongkir dan bank charge bila ada.` },
+          { title: "Laporan Penjualan", rows: salesReportRows(state.sales), value: idr.format(state.sales.reduce((s, x) => s + toNumber(x.total), 0)), note: `${state.sales.length} invoice dari sheet Sales. Nilai mencakup ongkir dan bank charge bila ada.` },
           { title: "Laporan Retur Penjualan", rows: salesReturn, value: `${number.format(salesReturn.reduce((s, x) => s + Number(x.qty || 0), 0))} item`, note: `${salesReturn.length} transaksi retur penjualan tercatat.` },
-          { title: "Laporan Pembelian", rows: state.purchases, value: idr.format(state.purchases.reduce((s, x) => s + x.total, 0)), note: `${state.purchases.length} transaksi pembelian supplier.` },
+          { title: "Laporan Pembelian", rows: purchaseReportRows(state.purchases), value: idr.format(state.purchases.reduce((s, x) => s + toNumber(x.total), 0)), note: `${state.purchases.length} transaksi dari sheet Purchases.` },
           { title: "Laporan Retur Pembelian", rows: purchaseReturn, value: `${number.format(purchaseReturn.reduce((s, x) => s + Number(x.qty || 0), 0))} item`, note: `${purchaseReturn.length} transaksi retur pembelian tercatat.` },
           { title: "Laporan Transaksi Kas", rows: state.cashTx, value: idr.format(cashNet), note: `${state.cashTx.length} transaksi. Rumus: kas masuk ${idr.format(flow.cashIn)} − kas keluar ${idr.format(flow.cashOut)}.` },
           { title: "Laporan Hutang", rows: debtReport, value: idr.format(debtRows.reduce((s, x) => s + x.due, 0)), note: `${debtRows.length} hutang aktif. Kolom disamakan dengan form Pembayaran Hutang.` },
@@ -2336,7 +2349,7 @@
           { title: "Laporan Rugi Laba", rows: [{ penjualanBarang: salesRevenue, hargaPokokPenjualan: cogs, biayaOperasional: expenses, labaKotor: grossProfit, labaBersih: netProfit }], value: idr.format(netProfit), note: `Laba bersih = penjualan barang ${idr.format(salesRevenue)} − HPP ${idr.format(cogs)} − biaya operasional ${idr.format(expenses)}. Modal, transfer antar-kas, dan pengisian petty cash bukan biaya.` }
         ];
         document.getElementById("reportsView").innerHTML = `
-          <div class="page-header"><div><p class="eyebrow">Laporan</p><h2>Semua Laporan dan Export PDF</h2></div><div class="header-actions"><button id="printReportsBtn" class="btn btn-outline-secondary"><i class="bi bi-printer"></i> Print</button><button id="exportAllReportsBtn" class="btn btn-primary"><i class="bi bi-filetype-pdf"></i> Export Semua PDF</button></div></div>
+          <div class="page-header"><div><p class="eyebrow">Laporan</p><h2>Semua Laporan dan Export PDF/Excel</h2></div><div class="header-actions"><button id="printReportsBtn" class="btn btn-outline-secondary"><i class="bi bi-printer"></i> Print</button><button id="exportAllReportsExcelBtn" class="btn btn-outline-success"><i class="bi bi-file-earmark-excel"></i> Export Semua Excel</button><button id="exportAllReportsBtn" class="btn btn-primary"><i class="bi bi-filetype-pdf"></i> Export Semua PDF</button></div></div>
           <div class="metrics-grid">
             <div class="metric-card"><div class="metric-icon bg-green"><i class="bi bi-receipt"></i></div><div><span>Total Penjualan</span><strong>${idr.format(state.sales.reduce((s, x) => s + toNumber(x.total), 0))}</strong><small class="metric-source">Σ total seluruh invoice penjualan</small></div></div>
             <div class="metric-card"><div class="metric-icon bg-cyan"><i class="bi bi-box-arrow-in-down"></i></div><div><span>Total Pembelian</span><strong>${idr.format(state.purchases.reduce((s, x) => s + toNumber(x.total), 0))}</strong><small class="metric-source">Σ total seluruh faktur pembelian</small></div></div>
@@ -2344,10 +2357,12 @@
             <div class="metric-card"><div class="metric-icon bg-amber"><i class="bi bi-currency-exchange"></i></div><div><span>Laba Bersih Operasional</span><strong>${idr.format(netProfit)}</strong><small class="metric-source">Laba kotor barang − biaya operasional</small></div></div>
           </div>
           <div class="audit-box mb-3"><strong>Rincian laba:</strong> penjualan barang ${idr.format(salesRevenue)} − HPP barang terjual ${idr.format(cogs)} = laba kotor ${idr.format(grossProfit)}; dikurangi biaya operasional ${idr.format(expenses)} = <strong>${idr.format(netProfit)}</strong>.</div>
-          <div class="module-grid">${reports.map((report, i) => `<div class="module-card"><h4>${report.title}</h4><strong class="report-value">${report.value}</strong><p class="report-note">${report.note}</p><p class="small text-secondary mb-2">${report.rows.length} baris data siap diterima dan diexport.</p><button class="btn btn-outline-primary btn-sm" data-report-index="${i}"><i class="bi bi-filetype-pdf"></i> Export PDF</button></div>`).join("")}</div>
+          <div class="module-grid">${reports.map((report, i) => `<div class="module-card"><h4>${report.title}</h4><strong class="report-value">${report.value}</strong><p class="report-note">${report.note}</p><p class="small text-secondary mb-2">${report.rows.length} baris data siap diexport.</p><div class="d-flex gap-2 flex-wrap"><button class="btn btn-outline-primary btn-sm" data-report-index="${i}"><i class="bi bi-filetype-pdf"></i> PDF</button><button class="btn btn-outline-success btn-sm" data-report-excel-index="${i}"><i class="bi bi-file-earmark-excel"></i> Excel</button></div></div>`).join("")}</div>
           <section class="panel mt-3" id="reportPrintable"><div class="panel-header"><h3>Preview Laporan Penjualan</h3><span class="chip">Penerimaan laporan</span></div>${salesTable(state.sales)}</section>`;
         document.querySelectorAll("[data-report-index]").forEach((btn) => btn.onclick = () => exportReportPdf(reports[btn.dataset.reportIndex].title, reports[btn.dataset.reportIndex].rows));
+        document.querySelectorAll("[data-report-excel-index]").forEach((btn) => btn.onclick = () => exportReportExcel(reports[btn.dataset.reportExcelIndex].title, reports[btn.dataset.reportExcelIndex].rows));
         document.getElementById("exportAllReportsBtn").onclick = () => exportReportPdf("Semua Laporan MDD", reports.flatMap((report) => report.rows.map((r) => ({ laporan: report.title, nilaiRingkasan: report.value, catatan: report.note, ...r }))));
+        document.getElementById("exportAllReportsExcelBtn").onclick = () => exportAllReportsExcel(reports);
         document.getElementById("printReportsBtn").onclick = () => window.print();
         bindCompletedSalesActions();
       }
@@ -2788,10 +2803,25 @@
       }
       function openAccessCodeModal() {
         if (session.role !== "Owner") return toast("Hanya Owner yang dapat mengubah kode akses.");
-        openModal("Kode Akses", `<div class="row g-3"><div class="col-md-4"><label class="form-label">Owner</label><input name="owner" type="password" value="${esc(state.accessCodes.owner)}" minlength="4" class="form-control" required></div><div class="col-md-4"><label class="form-label">Admin Gudang</label><input name="admin" type="password" value="${esc(state.accessCodes.admin)}" minlength="4" class="form-control" required></div><div class="col-md-4"><label class="form-label">Kasir</label><input name="kasir" type="password" value="${esc(state.accessCodes.kasir)}" minlength="4" class="form-control" required></div><div class="col-12"><p class="small text-secondary mb-0">Kode ini langsung digunakan sebagai password login username owner, gudang, dan kasir.</p></div></div>`, (fd) => {
-          state.accessCodes = { owner: String(fd.get("owner")).trim(), admin: String(fd.get("admin")).trim(), kasir: String(fd.get("kasir")).trim() };
-          saveState("Kode akses login diperbarui"); closeModal(); renderAll(); toast("Kode akses tersimpan dan berlaku pada login berikutnya.");
+        const accountRow = (user = { username: "", password: "", name: "", role: "Kasir" }) => `<div class="row g-2 align-items-end mb-2 access-account-row"><div class="col-md-3"><label class="form-label">Username</label><input name="account_username" value="${esc(user.username)}" class="form-control" required></div><div class="col-md-3"><label class="form-label">Nama</label><input name="account_name" value="${esc(user.name)}" class="form-control" required></div><div class="col-md-2"><label class="form-label">Hak Akses</label><select name="account_role" class="form-select">${["Owner","Gudang","Kasir"].map((role) => `<option ${user.role === role ? "selected" : ""}>${role}</option>`).join("")}</select></div><div class="col-md-3"><label class="form-label">Password</label><div class="input-group"><input name="account_password" type="password" value="${esc(user.password)}" minlength="4" class="form-control" required><button class="btn btn-outline-secondary toggle-access-password" type="button" aria-label="Lihat password"><i class="bi bi-eye"></i></button></div></div><div class="col-md-1"><button class="btn btn-outline-danger remove-access-account" type="button" title="Hapus user"><i class="bi bi-trash3"></i></button></div></div>`;
+        openModal("Kode Akses", `<div id="accessAccountRows">${state.userAccounts.map(accountRow).join("")}</div><button id="addAccessAccount" class="btn btn-outline-primary btn-sm mt-2" type="button"><i class="bi bi-person-plus"></i> Tambah User</button><p class="small text-secondary mt-3 mb-0">Owner dapat menambah, mengubah, dan menghapus akun. Minimal satu akun Owner wajib dipertahankan.</p>`, (fd) => {
+          const usernames = fd.getAll("account_username").map((value) => String(value).trim().toLowerCase());
+          const names = fd.getAll("account_name"); const roles = fd.getAll("account_role"); const passwords = fd.getAll("account_password");
+          if (new Set(usernames).size !== usernames.length) return toast("Username tidak boleh sama.");
+          const accounts = usernames.map((username, index) => ({ username, name: String(names[index]).trim(), role: String(roles[index]), password: String(passwords[index]) }));
+          if (!accounts.some((account) => account.role === "Owner")) return toast("Minimal satu akun Owner wajib tersedia.");
+          state.userAccounts = accounts;
+          const primary = (role) => accounts.find((account) => account.role === role);
+          state.accessCodes = { owner: primary("Owner")?.password || state.accessCodes.owner, admin: primary("Gudang")?.password || "", kasir: primary("Kasir")?.password || "" };
+          saveState("Daftar user dan kode akses diperbarui"); closeModal(); renderAll(); toast("Akun dan password tersimpan serta berlaku pada login berikutnya.");
         });
+        const rows = document.getElementById("accessAccountRows");
+        const bindAccessRows = () => {
+          rows.querySelectorAll(".toggle-access-password").forEach((button) => button.onclick = () => { const input = button.previousElementSibling; const showing = input.type === "text"; input.type = showing ? "password" : "text"; button.innerHTML = `<i class="bi bi-eye${showing ? "" : "-slash"}"></i>`; });
+          rows.querySelectorAll(".remove-access-account").forEach((button) => button.onclick = () => button.closest(".access-account-row").remove());
+        };
+        document.getElementById("addAccessAccount").onclick = () => { rows.insertAdjacentHTML("beforeend", accountRow()); bindAccessRows(); };
+        bindAccessRows();
       }
       function openAccessControlModal() {
         if (session.role !== "Owner") return toast("Hanya Owner yang dapat mengatur hak akses.");
@@ -3046,6 +3076,25 @@
         const body = data.map((r) => keys.map((k) => String(r[k] ?? "-")));
         pdf.autoTable ? pdf.autoTable({ head: [keys], body, startY: 28, styles: { fontSize: 7 } }) : pdf.text(JSON.stringify(data).slice(0, 4000), 14, 30);
         pdf.save(`${title.toLowerCase().replaceAll(" ", "-")}.pdf`);
+      }
+      function exportReportExcel(title, rows) {
+        if (!window.XLSX) return toast("Library Excel belum termuat. Periksa koneksi internet lalu coba lagi.");
+        const normalized = (rows || []).map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, formatCell(value)])));
+        const workbook = XLSX.utils.book_new();
+        const sheet = XLSX.utils.json_to_sheet(normalized.length ? normalized : [{ keterangan: "Tidak ada data" }]);
+        XLSX.utils.book_append_sheet(workbook, sheet, "Laporan");
+        XLSX.writeFile(workbook, `${title.toLowerCase().replace(/[^a-z0-9]+/gi, "-")}.xlsx`);
+      }
+      function exportAllReportsExcel(reports) {
+        if (!window.XLSX) return toast("Library Excel belum termuat. Periksa koneksi internet lalu coba lagi.");
+        const workbook = XLSX.utils.book_new();
+        reports.forEach((report, index) => {
+          const rows = (report.rows || []).map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, formatCell(value)])));
+          const sheet = XLSX.utils.json_to_sheet(rows.length ? rows : [{ keterangan: "Tidak ada data", ringkasan: report.value }]);
+          const name = report.title.replace(/^Laporan\s+/i, "").slice(0, 25) || `Laporan ${index + 1}`;
+          XLSX.utils.book_append_sheet(workbook, sheet, name);
+        });
+        XLSX.writeFile(workbook, `semua-laporan-mdd-${today()}.xlsx`);
       }
       function bindTableExports() {
         document.querySelectorAll("[data-export-table]").forEach((btn) => {

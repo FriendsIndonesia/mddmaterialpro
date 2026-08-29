@@ -900,6 +900,9 @@
           if (Array.isArray(remoteData[key])) {
             if (JSON.stringify(state[key] || []) !== JSON.stringify(remoteData[key])) changedKeys.push(key);
             state[key] = remoteData[key];
+          } else if (SYNC_SETTING_KEYS.includes(key) && remoteData[key] && typeof remoteData[key] === "object") {
+            if (JSON.stringify(state[key] || {}) !== JSON.stringify(remoteData[key])) changedKeys.push(key);
+            state[key] = remoteData[key];
           }
         });
         normalizeState(state);
@@ -952,7 +955,7 @@
           const timer = setTimeout(() => {
             cleanup();
             resolve(false);
-          }, action === "finance" ? 7000 : action === "master" ? 12000 : 15000);
+          }, action === "finance" || action === "auth" ? 7000 : action === "master" ? 12000 : 15000);
           window[callbackName] = (response) => {
             clearTimeout(timer);
             const changed = action === "state" ? mergeStateFromBackend(response?.data) : mergeSubsetFromBackend(response?.data);
@@ -1030,8 +1033,12 @@
           if (modalSubmit) modalSubmit(new FormData(event.currentTarget));
         });
       }
-      function login(event) {
+      async function login(event) {
         event.preventDefault();
+        const submitButton = document.querySelector("#loginForm button[type='submit']");
+        submitButton.disabled = true;
+        submitButton.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span> Memeriksa akses...';
+        await loadGoogleWorkspaceState("auth");
         const username = document.getElementById("username").value.trim().toLowerCase();
         const password = document.getElementById("password").value;
         const configuredPassword = { owner: state.accessCodes.owner, kasir: state.accessCodes.kasir, gudang: state.accessCodes.admin };
@@ -1039,6 +1046,8 @@
         if (!user) {
           document.getElementById("loginAlert").textContent = "Username atau password salah.";
           document.getElementById("loginAlert").classList.remove("d-none");
+          submitButton.disabled = false;
+          submitButton.innerHTML = '<i class="bi bi-box-arrow-in-right"></i> Masuk';
           return;
         }
         session = { name: user.name, role: user.role, username: user.username };

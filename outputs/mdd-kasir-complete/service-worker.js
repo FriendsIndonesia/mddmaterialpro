@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v49-thermal-reference";
+const CACHE_NAME = "mdd-material-pro-v50-readable-two-sheet";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

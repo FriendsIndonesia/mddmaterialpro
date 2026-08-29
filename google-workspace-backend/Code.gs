@@ -309,7 +309,7 @@ function writeMetadata_(ss, payload, data) {
 
 function writeProfile_(ss, data) {
   const rows = [];
-  ["profile", "hardware", "accessCodes", "accessRules"].forEach((key) => rows.push([key, normalizeValue_(data[key] || {})]));
+  ["profile", "hardware", "accessCodes", "accessRules", "userAccounts"].forEach((key) => rows.push([key, normalizeValue_(data[key] || {})]));
   writeKeyValue_(ss, "Profile", rows);
 }
 

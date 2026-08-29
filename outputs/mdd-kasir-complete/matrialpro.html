@@ -587,9 +587,12 @@
       .owner-report-grid { grid-template-columns: 1fr; }
     }
     @media print {
+      @page { margin: 0; size: auto; }
+      html, body { width: 100%; height: auto !important; min-height: 0 !important; margin: 0 !important; padding: 0 !important; background: #fff !important; }
       body * { visibility: hidden; }
       #printArea, #printArea * { visibility: visible; }
-      #printArea { position: absolute; inset: 0; padding: 24px; }
+      #printArea { position: absolute; top: 0; left: 0; right: 0; bottom: auto; width: 100%; height: auto; min-height: 0; margin: 0; padding: 8mm; overflow: visible; }
+      #printArea > :last-child { margin-bottom: 0 !important; padding-bottom: 0 !important; }
     }
     /* Royal blue, white, and gold visual system. */
     :root { --sidebar:#071a44; --sidebar-2:#04102d; --bg:#eef4ff; --panel:#fff; --line:#c9d8f3; --text:#10234a; --muted:#607194; --blue:#164ec7; --green:#164ec7; --amber:#c99518; --cyan:#245fda; }
@@ -2603,7 +2606,7 @@
         const relation = isSale ? (doc.customerName || relationName(doc.customerId)) : (doc.salesName || personName(state.suppliers, doc.supplierId));
         const relationAddress = isSale ? (doc.customerAddress || "-") : (doc.company || "-");
         const relationWhatsapp = isSale ? (doc.customerWhatsapp || "-") : (doc.whatsapp || "-");
-        document.getElementById("printArea").innerHTML = `${officialPrintHeader(title)}<p><strong>${isSale ? "Nomor Invoice" : "No. PO"}:</strong> ${doc.invoiceNo || doc.id}<br><strong>Tanggal:</strong> ${displayDate(doc.date)}<br><strong>${isSale ? "Nama Pelanggan" : "Nama Sales"}:</strong> ${relation}<br><strong>${isSale ? "Alamat Pelanggan" : "Nama Perusahaan"}:</strong> ${relationAddress}<br><strong>WhatsApp:</strong> ${relationWhatsapp}<br><strong>Metode Bayar:</strong> ${doc.method}</p><table class="table"><thead><tr><th>Nama Barang</th><th class="text-end">Harga Satuan</th><th class="text-end">Qty</th><th class="text-end">Subtotal</th></tr></thead><tbody>${rows}</tbody></table><p class="text-end">Biaya Ongkir: ${idr.format(doc.ongkir || 0)}<br>Bank Charge: ${idr.format(doc.bankCharge || 0)}</p><h3 class="text-end">Jumlah Total ${idr.format(doc.total)}</h3><p><strong>Catatan:</strong> ${doc.note || "-"}</p>`;
+        document.getElementById("printArea").innerHTML = `${officialPrintHeader(title)}<p><strong>${isSale ? "Nomor Invoice" : "No. PO"}:</strong> ${doc.invoiceNo || doc.id}<br><strong>Tanggal:</strong> ${displayDate(doc.date)}<br><strong>${isSale ? "Nama Pelanggan" : "Nama Sales"}:</strong> ${relation}<br><strong>${isSale ? "Alamat Pelanggan" : "Nama Perusahaan"}:</strong> ${relationAddress}<br><strong>WhatsApp:</strong> ${relationWhatsapp}<br><strong>Metode Bayar:</strong> ${doc.method}</p><table class="table"><thead><tr><th>Nama Barang</th><th class="text-end">Harga Satuan</th><th class="text-end">Qty</th><th class="text-end">Subtotal</th></tr></thead><tbody>${rows}</tbody></table><p class="text-end">Biaya Ongkir: ${idr.format(doc.ongkir || 0)}<br>Bank Charge: ${idr.format(doc.bankCharge || 0)}</p><h3 class="text-end" style="margin-bottom:0">Jumlah Total ${idr.format(doc.total)}</h3>`;
         document.getElementById("printArea").classList.remove("d-none");
         window.print();
         document.getElementById("printArea").classList.add("d-none");
@@ -2625,7 +2628,6 @@
               <tr><th>Nominal Bayar</th><td>${idr.format(payment.amount || 0)}</td></tr>
               <tr><th>Sisa Hutang</th><td>${idr.format(payment.remaining || 0)}</td></tr>
               <tr><th>Metode Bayar</th><td>${payment.method}</td></tr>
-              <tr><th>Catatan</th><td>${payment.note || "-"}</td></tr>
             </tbody>
           </table>
           <p style="margin-top:36px">Diterima oleh,</p>
@@ -2651,7 +2653,6 @@
               <tr><th>Nominal Bayar</th><td>${idr.format(payment.amount || 0)}</td></tr>
               <tr><th>Sisa Piutang</th><td>${idr.format(payment.remaining || 0)}</td></tr>
               <tr><th>Metode Bayar</th><td>${payment.method}</td></tr>
-              <tr><th>Catatan</th><td>${payment.note || "-"}</td></tr>
             </tbody>
           </table>
           <p style="margin-top:36px">Dibayar oleh,</p>

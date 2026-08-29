@@ -640,6 +640,8 @@
     .table { width:100%; table-layout:fixed; font-size:clamp(.62rem,.72vw,.8rem); }
     .table th,.table td { padding:.55rem .38rem; white-space:normal; overflow-wrap:anywhere; vertical-align:middle; }
     .table .btn { padding:.3rem .42rem; font-size:.68rem; white-space:normal; }
+    [data-finance-bulk-check] { width:1.45rem; height:1.45rem; border:2px solid #164ec7; background-color:#fff; box-shadow:0 0 0 3px rgba(212,175,55,.25); cursor:pointer; }
+    [data-finance-bulk-check]:checked { background-color:#164ec7; border-color:#d4af37; box-shadow:0 0 0 3px rgba(22,78,199,.2); }
     @media (max-width:900px) { .table { font-size:.62rem; } .table th,.table td { padding:.4rem .2rem; } }
   </style>
 </head>
@@ -819,6 +821,7 @@
       let modalSubmit = null;
       let masterSearchSources = {};
       let productDatabaseQuery = "";
+      let financeDatabaseQuery = "";
       let salesChart = null;
       let syncTimer = null;
       let autoPullTimer = null;
@@ -827,7 +830,7 @@
       let isPulling = false;
       let lastSyncedSnapshot = null;
       const SYNC_TABLE_KEYS = ["products", "customers", "suppliers", "employees", "categories", "discounts", "cashAccounts", "packages", "sales", "purchases", "cashTx", "payments", "stockMoves", "returns", "pendingSales", "pendingPurchases", "history"];
-      const SYNC_SETTING_KEYS = ["profile", "hardware", "accessCodes", "accessRules", "userAccounts"];
+      const SYNC_SETTING_KEYS = ["profile", "hardware", "accessCodes", "accessRules", "userAccounts", "deletionTombstones"];
 
       document.addEventListener("DOMContentLoaded", init);
 
@@ -837,6 +840,7 @@
           hardware: { receipt: "Thermal 58/80mm", invoice: "Printer Faktur", barcode: "USB/HID Barcode Scanner", drawer: "RJ11 Cash Drawer", tag: "Printer Barcode" },
           accessCodes: { owner: "060361", admin: "123456", kasir: "111111" },
           userAccounts: defaultUsers.map((user) => ({ ...user })),
+          deletionTombstones: { sales: [], purchases: [] },
           categories: [],
           products: DEFAULT_PRODUCTS.map((product) => ({ ...product })),
           customers: [],
@@ -872,6 +876,9 @@
         } catch {}
       }
       function normalizeState(data) {
+        data.deletionTombstones = data.deletionTombstones || { sales: [], purchases: [] };
+        data.deletionTombstones.sales = [...new Set(data.deletionTombstones.sales || [])];
+        data.deletionTombstones.purchases = [...new Set(data.deletionTombstones.purchases || [])];
         data.userAccounts = Array.isArray(data.userAccounts) && data.userAccounts.length
           ? data.userAccounts.map((user) => ({ username: String(user.username || "").trim().toLowerCase(), password: String(user.password || ""), name: String(user.name || user.username || "User").trim(), role: ["Owner", "Kasir", "Gudang"].includes(user.role) ? user.role : "Kasir" })).filter((user) => user.username)
           : defaultUsers.map((user) => ({ ...user }));
@@ -887,10 +894,12 @@
         data.cashAccounts = data.cashAccounts || [];
         data.cashAccounts.forEach((account) => {
           if (account.name === ["Bank", "BSI"].join(" ")) account.name = "Rek. Bank";
+          if (/^kas\s*2$/i.test(String(account.name || "").trim())) account.name = "Petty Cash";
         });
         data.products = (data.products || []).map((product) => {
           product.code = String(product.code ?? product.kode ?? "").trim();
           const rawStock = toNumber(product.stock);
+          const hasExplicitStockAkhir = product.stockAkhir !== undefined && product.stockAkhir !== null && product.stockAkhir !== "";
           const rawStockAkhir = toNumber(product.stockAkhir);
           const rawStockIn = toNumber(product.stockIn);
           const rawStockOut = toNumber(product.stockOut);
@@ -901,11 +910,15 @@
           });
           product.stockIn = rawStockIn;
           product.stockOut = rawStockOut;
-          product.stock = Math.max(0, product.stockAwal + product.stockIn - product.stockOut);
+          product.stock = Math.max(0, hasExplicitStockAkhir ? rawStockAkhir : product.stockAwal + product.stockIn - product.stockOut);
           product.stockAkhir = product.stock;
           product.active = product.active !== false && String(product.active).toLowerCase() !== "false";
           return product;
         });
+        const deletedSales = new Set(data.deletionTombstones.sales);
+        const deletedPurchases = new Set(data.deletionTombstones.purchases);
+        data.sales = (data.sales || []).filter((row) => !deletedSales.has(row.id));
+        data.purchases = (data.purchases || []).filter((row) => !deletedPurchases.has(row.id));
         return data;
       }
       function toNumber(value) {
@@ -940,7 +953,13 @@
 
       function mergeStateFromBackend(remoteData) {
         if (!remoteData || typeof remoteData !== "object") return false;
+        const localTombstones = state.deletionTombstones || { sales: [], purchases: [] };
         const merged = normalizeState(Object.assign(defaultState(), remoteData));
+        merged.deletionTombstones = {
+          sales: [...new Set([...(merged.deletionTombstones?.sales || []), ...(localTombstones.sales || [])])],
+          purchases: [...new Set([...(merged.deletionTombstones?.purchases || []), ...(localTombstones.purchases || [])])]
+        };
+        normalizeState(merged);
         Object.keys(state).forEach((key) => delete state[key]);
         Object.assign(state, merged);
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -950,6 +969,12 @@
 
       function mergeSubsetFromBackend(remoteData) {
         if (!remoteData || typeof remoteData !== "object") return false;
+        if (remoteData.deletionTombstones) {
+          remoteData.deletionTombstones = {
+            sales: [...new Set([...(state.deletionTombstones?.sales || []), ...(remoteData.deletionTombstones.sales || [])])],
+            purchases: [...new Set([...(state.deletionTombstones?.purchases || []), ...(remoteData.deletionTombstones.purchases || [])])]
+          };
+        }
         const changedKeys = [];
         Object.keys(remoteData).forEach((key) => {
           if (Array.isArray(remoteData[key])) {
@@ -986,6 +1011,7 @@
           });
           const deletes = [];
           baseById.forEach((_row, id) => { if (!currentById.has(id)) deletes.push(id); });
+          if (key === "sales" || key === "purchases") (state.deletionTombstones?.[key] || []).forEach((id) => { if (!deletes.includes(id)) deletes.push(id); });
           if (upserts.length || deletes.length) tables[key] = { upserts, deletes };
         });
         return { tables };
@@ -1062,6 +1088,10 @@
         const activeView = document.querySelector(".view-section.active")?.id;
         if (activeView === "productsView" && (productDatabaseQuery || document.activeElement?.id === "productDatabaseSearch")) {
           renderProductDatabaseSearch();
+          return;
+        }
+        if (activeView === "financeView" && (financeDatabaseQuery || document.activeElement?.id === "financeDatabaseSearch")) {
+          renderFinanceDatabaseSearch();
           return;
         }
         const cashierEditing = activeView === "cashierView" && (
@@ -1216,14 +1246,20 @@
         if (!confirm(`Bersihkan ${labels[view]}? Data master produk, pelanggan, supplier, dan akun kas tidak dihapus.`)) return;
         if (view === "cashierView") {
           const saleIds = new Set(state.sales.map((row) => row.id));
+          state.deletionTombstones.sales = [...new Set([...(state.deletionTombstones.sales || []), ...saleIds])];
           Object.assign(state, { sales:[], pendingSales:[], payments:state.payments.filter((payment) => !saleIds.has(payment.refId)), returns:state.returns.filter((x) => x.module !== "Penjualan") });
         }
         if (view === "purchaseView") {
           const purchaseIds = new Set(state.purchases.map((row) => row.id));
+          state.deletionTombstones.purchases = [...new Set([...(state.deletionTombstones.purchases || []), ...purchaseIds])];
           Object.assign(state, { purchases:[], pendingPurchases:[], payments:state.payments.filter((payment) => !purchaseIds.has(payment.refId)), returns:state.returns.filter((x) => x.module !== "Pembelian") });
         }
         if (view === "financeView") Object.assign(state, { cashTx:[], payments:[] });
-        if (view === "dashboardView" || view === "reportsView") Object.assign(state, { sales:[], purchases:[], cashTx:[], payments:[], stockMoves:[], returns:[], pendingSales:[], pendingPurchases:[] });
+        if (view === "dashboardView" || view === "reportsView") {
+          state.deletionTombstones.sales = [...new Set([...(state.deletionTombstones.sales || []), ...state.sales.map((row) => row.id)])];
+          state.deletionTombstones.purchases = [...new Set([...(state.deletionTombstones.purchases || []), ...state.purchases.map((row) => row.id)])];
+          Object.assign(state, { sales:[], purchases:[], cashTx:[], payments:[], stockMoves:[], returns:[], pendingSales:[], pendingPurchases:[] });
+        }
         saveState(`${labels[view]} dibersihkan`);
         renderAll();
         toast("Laporan berhasil dibersihkan.");
@@ -1386,11 +1422,10 @@
       }
       function ensurePurchaseDraft() {
         if (!purchaseDraft.invoiceNo) purchaseDraft.invoiceNo = nextPurchaseNo();
-        if (!purchaseDraft.supplierId) purchaseDraft.supplierId = state.suppliers[0]?.id || "";
         return purchaseDraft;
       }
       function resetPurchaseDraft() {
-        purchaseDraft = { invoiceNo: nextPurchaseNo(), dueDate: "", ongkir: 0, bankCharge: 0, note: "", method: "Cash", supplierId: state.suppliers[0]?.id || "", salesName: "", company: "", whatsapp: "" };
+        purchaseDraft = { invoiceNo: nextPurchaseNo(), dueDate: "", ongkir: 0, bankCharge: 0, note: "", method: "Cash", supplierId: "", salesName: "", company: "", whatsapp: "" };
         selectedPurchaseProductId = "";
       }
       function cartTotal(cart) {
@@ -1462,7 +1497,7 @@
         const todayPaymentsDebt = state.payments.filter((x) => isToday(x.date) && x.type === "Hutang").reduce((sum, x) => sum + toNumber(x.amount), 0);
         const todayPettyCash = state.cashTx.filter((x) => isToday(x.date) && x.category === "Petty Cash").reduce((sum, x) => sum + (x.type === "Masuk" ? toNumber(x.amount) : -toNumber(x.amount)), 0);
         const activeProducts = state.products.filter((p) => p.active !== false);
-        const stockValue = state.products.reduce((sum, product) => sum + (toNumber(product.buy) * stockAkhirProduk(product)), 0);
+        const stockValue = state.products.reduce((sum, product) => sum + (toNumber(product.buy) * toNumber(product.stockAkhir)), 0);
         const receivable = state.sales.filter((s) => toNumber(s.due) > 0).reduce((sum, s) => sum + toNumber(s.due), 0);
         const payable = state.purchases.filter((p) => toNumber(p.due) > 0).reduce((sum, p) => sum + toNumber(p.due), 0);
         const cashBalance = state.cashAccounts.reduce((s, a) => s + toNumber(a.balance), 0);
@@ -1477,7 +1512,7 @@
           ["bi-arrow-left-right", "Pembayaran Piutang Hari Ini", idr.format(todayPaymentsReceivable), "bg-rose", "Pembayaran bertipe Piutang tanggal hari ini"],
           ["bi-wallet2", "Pembayaran Hutang Hari Ini", idr.format(todayPaymentsDebt), "bg-blue", "Pembayaran bertipe Hutang tanggal hari ini"],
           ["bi-bank", "Saldo Kas Per Hari Ini", idr.format(cashBalance), "bg-green", `${state.cashAccounts.length} akun pada Master Kas`],
-          ["bi-box2-heart", "Nilai Stok Per Hari Ini", idr.format(stockValue), "bg-cyan", "Σ HPP setiap produk × stock akhir; seluruh produk dari backend Products"]
+          ["bi-box2-heart", "Nilai Stok Per Hari Ini", idr.format(stockValue), "bg-cyan", "Σ kolom HPP × kolom stockAkhir langsung dari setiap baris backend Products (tanpa menghitung ulang stock masuk/keluar)"]
         ].map(([icon, label, value, cls, source]) => `<div class="metric-card"><div class="metric-icon ${cls}"><i class="bi ${icon}"></i></div><div><span>${label}</span><strong>${value}</strong><small class="metric-source">Sumber: ${source}</small></div></div>`).join("");
         const reportBox = document.getElementById("ownerReportRows");
         if (reportBox) {
@@ -2009,7 +2044,7 @@
           <div class="audit-box mb-3"><strong>Rincian arus kas:</strong> penerimaan penjualan ${idr.format(flow.salesReceived)} − pembayaran pembelian ${idr.format(flow.purchasesPaid)} + kas masuk ${idr.format(flow.cashIn)} − kas keluar ${idr.format(flow.cashOut)} = <strong>${idr.format(flow.total)}</strong>. Saldo awal/Master Kas tidak dihitung dalam arus kas.</div>
           <section class="panel mb-3"><div class="panel-header"><h3>Pencarian Data Base Hutang-Piutang</h3><span class="chip"><i class="bi bi-search"></i> Cari dan bayar</span></div>
             <div class="row g-3 align-items-end">
-              <div class="col-md-9"><label class="form-label">Nama Orang/Perusahaan atau Nomor Faktur</label><input id="financeDatabaseSearch" list="financeDatabaseNames" class="form-control" autocomplete="off" placeholder="Ketik nama supplier, perusahaan, pelanggan, atau nomor faktur"><datalist id="financeDatabaseNames">${[...new Set([...debts.flatMap((x) => { const supplier = selectedSupplierData(x.supplierId); return [x.company, x.salesName, supplier.company, supplier.name]; }), ...receivables.flatMap((x) => [x.customerName, personName(state.customers, x.customerId)])].filter(Boolean))].map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist></div>
+              <div class="col-md-9"><label class="form-label">Nama Orang/Perusahaan atau Nomor Faktur</label><input id="financeDatabaseSearch" list="financeDatabaseNames" class="form-control" value="${esc(financeDatabaseQuery)}" autocomplete="off" placeholder="Ketik nama supplier, perusahaan, pelanggan, atau nomor faktur"><datalist id="financeDatabaseNames">${[...new Set([...debts.flatMap((x) => { const supplier = selectedSupplierData(x.supplierId); return [x.company, x.salesName, supplier.company, supplier.name]; }), ...receivables.flatMap((x) => [x.customerName, personName(state.customers, x.customerId)])].filter(Boolean))].map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist></div>
               <div class="col-md-3 d-grid gap-2"><button id="clearFinanceDatabaseSearch" class="btn btn-outline-secondary" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button><button id="bulkFinancePaymentBtn" class="btn btn-primary" type="button" disabled><i class="bi bi-check2-square"></i> Bayar Terpilih</button></div>
               <div class="col-12"><div id="financeDatabaseSearchResults" class="small text-secondary">Ketik nama atau nomor faktur untuk menampilkan hutang dan piutang aktif.</div></div>
             </div>
@@ -2025,8 +2060,8 @@
           </section>
           <section class="panel mt-3"><div class="panel-header"><h3>Laporan Transaksi Kas</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="cash"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${cashTable()}</section>`;
         document.getElementById("addCashTxBtn").onclick = openCashTxModal;
-        document.getElementById("financeDatabaseSearch").oninput = renderFinanceDatabaseSearch;
-        document.getElementById("clearFinanceDatabaseSearch").onclick = () => { document.getElementById("financeDatabaseSearch").value = ""; renderFinanceDatabaseSearch(); document.getElementById("financeDatabaseSearch").focus(); };
+        document.getElementById("financeDatabaseSearch").oninput = (event) => { financeDatabaseQuery = event.target.value; renderFinanceDatabaseSearch(); };
+        document.getElementById("clearFinanceDatabaseSearch").onclick = () => { financeDatabaseQuery = ""; document.getElementById("financeDatabaseSearch").value = ""; renderFinanceDatabaseSearch(); document.getElementById("financeDatabaseSearch").focus(); };
         document.getElementById("bulkFinancePaymentBtn").onclick = openBulkFinancePaymentModal;
         document.getElementById("inputDebtDataBtn").onclick = openDebtInputModal;
         document.getElementById("inputReceivableDataBtn").onclick = openReceivableInputModal;
@@ -2037,12 +2072,13 @@
         document.querySelectorAll("[data-edit-receivable]").forEach((btn) => btn.onclick = () => openReceivableInputModal(btn.dataset.editReceivable));
         document.querySelectorAll("[data-delete-receivable]").forEach((btn) => btn.onclick = () => deleteReceivableRecord(btn.dataset.deleteReceivable));
         bindTableExports();
+        if (financeDatabaseQuery) renderFinanceDatabaseSearch();
       }
       function renderFinanceDatabaseSearch() {
         const input = document.getElementById("financeDatabaseSearch");
         const target = document.getElementById("financeDatabaseSearchResults");
         if (!input || !target) return;
-        const query = String(input.value || "").trim().toLowerCase();
+        const query = String(financeDatabaseQuery || input.value || "").trim().toLowerCase();
         if (!query) {
           target.innerHTML = "Ketik nama atau nomor faktur untuk menampilkan hutang dan piutang aktif.";
           return;

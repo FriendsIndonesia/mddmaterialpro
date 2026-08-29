@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v60-stable-search-users-valid-reports";
+const CACHE_NAME = "mdd-material-pro-v61-stock-tombstones-stable-search";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

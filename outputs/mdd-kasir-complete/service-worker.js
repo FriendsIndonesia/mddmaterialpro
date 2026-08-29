@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v52-ledger-restore-print";
+const CACHE_NAME = "mdd-material-pro-v53-sales-actions-supplier-search";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

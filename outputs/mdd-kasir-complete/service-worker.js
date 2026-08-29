@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v46-receipt-58x210";
+const CACHE_NAME = "mdd-material-pro-v47-two-copy-receipt";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

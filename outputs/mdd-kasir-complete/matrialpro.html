@@ -760,7 +760,7 @@
       const STORE_PRINT_NAME = "MUTIARA JAYA";
       const STORE_PRINT_ADDRESS = "JL. RAYA KARAKAL RT.03 / RW. 03, CIAWI, BOGOR";
       const STORE_PRINT_PHONE = "082312233247";
-      const today = () => new Date().toISOString().slice(0, 10);
+      const today = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jakarta", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
       const displayDate = (value) => {
         if (!value) return "-";
         const text = String(value).slice(0, 10);
@@ -820,6 +820,7 @@
       let autoPullTimer = null;
       let refreshPullCount = 0;
       let isSyncing = false;
+      let isPulling = false;
       let lastSyncedSnapshot = null;
       const SYNC_TABLE_KEYS = ["products", "customers", "suppliers", "employees", "categories", "discounts", "cashAccounts", "packages", "sales", "purchases", "cashTx", "payments", "stockMoves", "returns", "pendingSales", "pendingPurchases", "history"];
       const SYNC_SETTING_KEYS = ["profile", "hardware", "accessCodes", "accessRules"];
@@ -879,12 +880,18 @@
         });
         data.products = (data.products || []).map((product) => {
           product.code = String(product.code ?? product.kode ?? "").trim();
+          const rawStock = toNumber(product.stock);
+          const rawStockAkhir = toNumber(product.stockAkhir);
+          const rawStockIn = toNumber(product.stockIn);
+          const rawStockOut = toNumber(product.stockOut);
+          const looksLikeOldComputedCache = product.stockAwal === undefined && rawStockAkhir === rawStock && (rawStockIn > 0 || rawStockOut > 0);
+          product.stockAwal = toNumber(product.stockAwal ?? (looksLikeOldComputedCache ? Math.max(0, rawStock - rawStockIn + rawStockOut) : rawStock));
           ["buy", "price", "price2", "stockIn", "stockOut", "stock", "stockAkhir", "min"].forEach((field) => {
             product[field] = toNumber(product[field]);
           });
-          product.stockIn = product.stockIn || product.stock || product.stockAkhir || 0;
-          product.stockOut = product.stockOut || 0;
-          product.stock = Math.max(0, product.stockIn - product.stockOut);
+          product.stockIn = rawStockIn;
+          product.stockOut = rawStockOut;
+          product.stock = Math.max(0, product.stockAwal + product.stockIn - product.stockOut);
           product.stockAkhir = product.stock;
           product.active = product.active !== false && String(product.active).toLowerCase() !== "false";
           return product;
@@ -918,7 +925,7 @@
       function queueGoogleWorkspaceSync() {
         if (!state.profile?.onlineMode || !state.profile?.googleEndpoint || isSyncing) return;
         clearTimeout(syncTimer);
-        syncTimer = setTimeout(syncGoogleWorkspace, 1800);
+        syncTimer = setTimeout(syncGoogleWorkspace, 250);
       }
 
       function mergeStateFromBackend(remoteData) {
@@ -1028,11 +1035,17 @@
       }
 
       async function refreshGoogleWorkspaceState() {
-        if (isSyncing || document.hidden || hasLocalSyncChanges()) return;
-        refreshPullCount += 1;
-        const action = refreshPullCount % 6 === 0 ? "products" : refreshPullCount % 2 === 0 ? "masterlite" : "finance";
-        const changed = await loadGoogleWorkspaceState(action);
-        if (changed) renderSyncedState();
+        if (isSyncing || isPulling || document.hidden) return;
+        if (hasLocalSyncChanges()) return queueGoogleWorkspaceSync();
+        isPulling = true;
+        try {
+          refreshPullCount += 1;
+          const action = ["finance", "masterlite", "products"][(refreshPullCount - 1) % 3];
+          const changed = await loadGoogleWorkspaceState(action);
+          if (changed) renderSyncedState();
+        } finally {
+          isPulling = false;
+        }
       }
 
       function renderSyncedState() {
@@ -1122,9 +1135,11 @@
         });
         setTimeout(() => {
           if (!hasLocalSyncChanges()) loadGoogleWorkspaceState("products").then((loaded) => { if (loaded) renderSyncedState(); });
-        }, 250);
+        }, 100);
         clearInterval(autoPullTimer);
-        autoPullTimer = setInterval(refreshGoogleWorkspaceState, 5000);
+        autoPullTimer = setInterval(refreshGoogleWorkspaceState, 1500);
+        window.onfocus = refreshGoogleWorkspaceState;
+        window.ononline = () => { queueGoogleWorkspaceSync(); refreshGoogleWorkspaceState(); };
       }
       function renderNav() {
         document.getElementById("mainNav").innerHTML = navItems.filter(([view]) => canAccessView(view)).map(([view, icon, label]) => `<button class="nav-link ${document.querySelector(".view-section.active")?.id === view ? "active" : ""}" data-view="${view}" type="button"><i class="bi ${icon}"></i>${label}</button>`).join("");
@@ -1196,7 +1211,6 @@
 
       function renderProducts() {
         const activeProducts = state.products.filter((p) => p.active);
-        const visibleProducts = activeProducts.slice(0, 200);
         const stockQty = activeProducts.reduce((sum, p) => sum + stockAkhirProduk(p), 0);
         const stockValue = activeProducts.reduce((sum, p) => sum + (stockAkhirProduk(p) * toNumber(p.buy)), 0);
         const critical = activeProducts.filter((p) => stockAkhirProduk(p) <= toNumber(p.min));
@@ -1214,10 +1228,24 @@
             <div class="metric-card"><div class="metric-icon bg-cyan"><i class="bi bi-wallet2"></i></div><div><span>Nilai Stok</span><strong>${idr.format(stockValue)}</strong><small class="metric-source">Σ stok akhir × harga beli</small></div></div>
             <div class="metric-card"><div class="metric-icon bg-amber"><i class="bi bi-exclamation-triangle"></i></div><div><span>Stok Kritis</span><strong>${number.format(critical.length)}</strong><small class="metric-source">Stok akhir ≤ stok minimum</small></div></div>
           </div>
-          <section class="panel"><div class="panel-header"><div><h3>Daftar Produk Material</h3>${activeProducts.length > visibleProducts.length ? `<p class="small text-secondary mb-0">Menampilkan 200 data pertama agar halaman tetap cepat. Seluruh data tetap tersedia untuk kasir, pencarian, dan PDF.</p>` : ""}</div><span class="chip">${number.format(activeProducts.length)} data</span></div>${productsTable(visibleProducts, { actions: canAccessMaster("Master Barang") })}</section>`;
+          <section class="panel"><div class="panel-header"><div><h3>Daftar Produk Material</h3></div><span class="chip">${number.format(activeProducts.length)} data tersedia</span></div>
+            <div class="row g-2 mb-3"><div class="col-md-10"><label class="form-label">Pencarian Produk</label><input id="productDatabaseSearch" class="form-control" autocomplete="off" placeholder="Cari berdasarkan kode, nama, kategori, atau satuan"></div><div class="col-md-2 d-flex align-items-end"><button id="clearProductDatabaseSearch" class="btn btn-outline-secondary w-100" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button></div></div>
+            <div id="productDatabaseSearchResult">${productsTable([], { actions: canAccessMaster("Master Barang") })}</div>
+          </section>`;
         document.getElementById("exportProductsBtn").onclick = () => exportReportPdf("Database Produk Material", productRows(activeProducts));
+        document.getElementById("productDatabaseSearch").oninput = renderProductDatabaseSearch;
+        document.getElementById("clearProductDatabaseSearch").onclick = () => { document.getElementById("productDatabaseSearch").value = ""; renderProductDatabaseSearch(); document.getElementById("productDatabaseSearch").focus(); };
         const addBtn = document.getElementById("addProductFromProductsBtn");
         if (addBtn) addBtn.onclick = openProductModal;
+        bindProductActions();
+      }
+      function renderProductDatabaseSearch() {
+        const input = document.getElementById("productDatabaseSearch");
+        const target = document.getElementById("productDatabaseSearchResult");
+        if (!input || !target) return;
+        const query = String(input.value || "").trim().toLowerCase();
+        const matches = query ? state.products.filter((product) => product.active !== false && [product.code, product.name, product.category, product.unit].some((value) => String(value || "").toLowerCase().includes(query))).slice(0, 100) : [];
+        target.innerHTML = productsTable(matches, { actions: canAccessMaster("Master Barang") });
         bindProductActions();
       }
 
@@ -1251,9 +1279,7 @@
       }
       function stockAkhirProduk(product) {
         if (!product) return 0;
-        if (product.stockIn !== undefined || product.stockOut !== undefined) {
-          return Math.max(0, toNumber(product.stockIn) - toNumber(product.stockOut));
-        }
+        if (product.stockAwal !== undefined || product.stockIn !== undefined || product.stockOut !== undefined) return Math.max(0, toNumber(product.stockAwal) + toNumber(product.stockIn) - toNumber(product.stockOut));
         return toNumber(product.stock ?? product.stockAkhir ?? 0);
       }
       function findProduct(idOrCode) {
@@ -1295,7 +1321,11 @@
         return personName(state.customers, id);
       }
       function isToday(value) {
-        return value === today();
+        const text = String(value || "").trim();
+        const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}` === today();
+        const local = text.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+        return local ? `${local[3]}-${local[2]}-${local[1]}` === today() : false;
       }
       function nextInvoiceNo() {
         const stamp = today().split("-").reverse().join("");
@@ -1417,7 +1447,7 @@
         const cashBalance = state.cashAccounts.reduce((s, a) => s + toNumber(a.balance), 0);
         const netAssetValue = cashBalance + stockValue + receivable - payable;
         const low = activeProducts.filter((p) => stockAkhirProduk(p) <= toNumber(p.min));
-        const stockDifference = state.stockMoves.filter((m) => m.type === "Opname").reduce((sum, m) => sum + Number(m.difference ?? m.qty ?? 0), 0);
+        const stockDifference = state.stockMoves.filter((m) => ["Opname", "Penyesuaian"].includes(m.type)).reduce((sum, m) => sum + toNumber(m.difference ?? m.qty), 0);
         document.getElementById("metricGrid").innerHTML = [
           ["bi-box-seam", "Total Produk Terjual", number.format(todaySales.reduce((sum, sale) => sum + (sale.items || []).reduce((qty, item) => qty + toNumber(item.qty), 0), 0)), "bg-blue", `${todaySales.length} invoice tanggal hari ini`],
           ["bi-cash-stack", "Omzet Hari Ini", idr.format(todaySales.reduce((s, x) => s + toNumber(x.total), 0)), "bg-green", "Jumlah total invoice penjualan hari ini"],
@@ -1443,9 +1473,11 @@
         document.getElementById("lowStockCount").textContent = `${low.length} item`;
         document.getElementById("dashboardStockRows").innerHTML = low.map((p) => { const stock = stockAkhirProduk(p); return `<tr><td>${p.name}</td><td class="text-end">${number.format(stock)} ${p.unit}</td><td><span class="status-dot ${stock === 0 ? "danger" : "warn"}"></span> ${stock === 0 ? "Out of stock" : "Limit stok"}</td></tr>`; }).join("") || `<tr><td colspan="3" class="text-center text-secondary">Stok aman.</td></tr>`;
         const fast = low.length ? `Prioritaskan restock ${low[0].name}; item ini sudah menyentuh batas minimum.` : "Stok sehat. Pertimbangkan paket promo dari produk dengan margin terbaik.";
-        const margin = salesTotal - state.sales.reduce((sum, sale) => sum + sale.items.reduce((x, item) => x + ((findProduct(item.productId)?.buy || 0) * item.qty), 0), 0);
+        const salesItemRevenue = state.sales.reduce((sum, sale) => sum + (sale.items || []).reduce((subtotal, item) => subtotal + Math.max(0, toNumber(item.price) * toNumber(item.qty) - toNumber(item.discount)), 0), 0);
+        const transactionCogs = state.sales.reduce((sum, sale) => sum + (sale.items || []).reduce((subtotal, item) => subtotal + (toNumber(item.buy ?? findProduct(item.productId)?.buy) * toNumber(item.qty)), 0), 0);
+        const margin = salesItemRevenue - transactionCogs;
         const advice = document.getElementById("businessAdvice");
-        if (advice) advice.textContent = `${fast} Estimasi margin berjalan: ${idr.format(margin)}.`;
+        if (advice) advice.textContent = `${fast} Margin barang berdasarkan harga jual transaksi dikurangi HPP tersimpan: ${idr.format(margin)}.`;
         drawSalesChart();
       }
       function drawSalesChart() {
@@ -2389,7 +2421,7 @@
         return `<div class="table-responsive"><table class="table table-hover align-middle"><thead><tr>${keys.map((k) => `<th>${k}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${keys.map((k) => `<td>${formatCell(r[k], k)}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="${keys.length}" class="text-center text-secondary">Belum ada data.</td></tr>`}</tbody></table></div>`;
       }
       function formatCell(value, key = "") {
-        const plainNumberKeys = new Set(["kode", "code", "qty", "item", "stock", "stock_masuk", "stock_keluar", "stock_akhir", "min", "systemStock", "physicalStock", "difference"]);
+        const plainNumberKeys = new Set(["kode", "code", "qty", "item", "stock", "stock_awal", "stock_masuk", "stock_keluar", "stock_akhir", "min", "systemStock", "physicalStock", "difference"]);
         if (/date|tanggal|jatuh|tempo/i.test(String(key))) return displayDate(value);
         if (typeof value === "number") return plainNumberKeys.has(key) ? number.format(value) : idr.format(value);
         if (Array.isArray(value)) return `${value.length} item`;
@@ -2401,13 +2433,13 @@
       }
       function productRows(rows = state.products, options = {}) {
         return rows.map((p) => {
-          const row = { kode: p.code, nama: p.name, kategori: p.category, satuan: p.unit, harga_beli: p.buy, harga_jual_1: p.price, harga_jual_2: p.price2 || Math.round((p.price || 0) * 1.05), stock_masuk: p.stockIn || 0, stock_keluar: p.stockOut || 0, stock_akhir: stockAkhirProduk(p), min: p.min, aktif: p.active };
+          const row = { kode: p.code, nama: p.name, kategori: p.category, satuan: p.unit, harga_jual_1: p.price, harga_jual_2: p.price2 || Math.round((p.price || 0) * 1.05), stock_awal: p.stockAwal || 0, stock_masuk: p.stockIn || 0, stock_keluar: p.stockOut || 0, stock_akhir: stockAkhirProduk(p) };
           if (options.actions) row.aksi = `<div class="d-flex gap-1 justify-content-end"><button class="btn btn-outline-secondary btn-icon btn-sm" type="button" data-edit-product="${p.id}" title="Edit produk"><i class="bi bi-pencil-square"></i></button><button class="btn btn-outline-danger btn-icon btn-sm" type="button" data-delete-product="${p.id}" title="Delete produk"><i class="bi bi-trash"></i></button></div>`;
           return row;
         });
       }
       function productsTable(rows = state.products, options = {}) {
-        const keys = ["kode", "nama", "kategori", "satuan", "harga_beli", "harga_jual_1", "harga_jual_2", "stock_masuk", "stock_keluar", "stock_akhir", "min", "aktif"];
+        const keys = ["kode", "nama", "kategori", "satuan", "harga_jual_1", "harga_jual_2", "stock_awal", "stock_masuk", "stock_keluar", "stock_akhir"];
         if (options.actions) keys.push("aksi");
         return genericTable(productRows(rows, options), keys);
       }

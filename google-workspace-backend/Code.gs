@@ -25,6 +25,7 @@ const TABLES = [
 
 function doGet(e) {
   const ss = getSpreadsheet_();
+  normalizeCashAccountNames_(ss);
   const action = String((e && e.parameter && e.parameter.action) || "status").toLowerCase();
   const callback = e && e.parameter && e.parameter.callback;
   let payload;
@@ -48,6 +49,7 @@ function doPost(e) {
     const payload = JSON.parse((e && e.postData && e.postData.contents) || "{}");
     const data = payload.data || {};
     const ss = getSpreadsheet_();
+    normalizeCashAccountNames_(ss);
     ensureWorkbook_(ss);
 
     writeMetadata_(ss, payload, data);
@@ -309,7 +311,7 @@ function writeMetadata_(ss, payload, data) {
 
 function writeProfile_(ss, data) {
   const rows = [];
-  ["profile", "hardware", "accessCodes", "accessRules", "userAccounts"].forEach((key) => rows.push([key, normalizeValue_(data[key] || {})]));
+  ["profile", "hardware", "accessCodes", "accessRules", "userAccounts", "deletionTombstones"].forEach((key) => rows.push([key, normalizeValue_(data[key] || {})]));
   writeKeyValue_(ss, "Profile", rows);
 }
 
@@ -318,6 +320,24 @@ function readProfile_(ss) {
   const data = {};
   Object.keys(profileRows).forEach((key) => data[key] = parseValue_(profileRows[key]));
   return data;
+}
+
+function normalizeCashAccountNames_(ss) {
+  const sheet = ss.getSheetByName("CashAccounts");
+  if (!sheet || sheet.getLastRow() < 2) return;
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map((value) => String(value || "").trim().toLowerCase());
+  const nameIndex = headers.indexOf("name");
+  if (nameIndex < 0) return;
+  const range = sheet.getRange(2, nameIndex + 1, sheet.getLastRow() - 1, 1);
+  const values = range.getValues();
+  let changed = false;
+  values.forEach((row) => {
+    if (/^kas\s*2$/i.test(String(row[0] || "").trim())) {
+      row[0] = "Petty Cash";
+      changed = true;
+    }
+  });
+  if (changed) range.setValues(values);
 }
 
 function writeKeyValue_(ss, sheetName, rows) {

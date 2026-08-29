@@ -54,14 +54,18 @@ function doPost(e) {
     writeProfile_(ss, data);
     // New clients send row-level changes. This preserves records entered or
     // edited directly in Google Sheets instead of replacing every table.
+    let preferCanonicalFinancialTables = { purchases: false, sales: false };
     if (payload.changes && payload.changes.tables) {
+      const purchaseDeletes = payload.changes.tables.purchases && payload.changes.tables.purchases.deletes || [];
+      const salesDeletes = payload.changes.tables.sales && payload.changes.tables.sales.deletes || [];
+      preferCanonicalFinancialTables = { purchases: purchaseDeletes.length > 0, sales: salesDeletes.length > 0 };
       TABLES.forEach((table) => applyTableChanges_(ss, table, payload.changes.tables[table.key]));
     } else {
       // Backward-compatible import: merge rows and never delete sheet-only data.
       TABLES.forEach((table) => mergeTable_(ss, table, data[table.key] || []));
     }
     writeRawState_(ss, payload);
-    syncFinancialLedgerSheets_(ss);
+    syncFinancialLedgerSheets_(ss, preferCanonicalFinancialTables);
 
     return output_({
       ok: true,
@@ -212,9 +216,13 @@ function ledgerDate_(value) {
   return match ? match[1] + "-" + match[2] + "-" + match[3] : text;
 }
 
-function syncFinancialLedgerSheets_(ss) {
+function syncFinancialLedgerSheets_(ss, preferCanonical) {
   const data = { purchases: readTableDefinition_(ss, TABLES.find((table) => table.key === "purchases")), sales: readTableDefinition_(ss, TABLES.find((table) => table.key === "sales")) };
-  overlayFinancialLedgers_(ss, data);
+  // Ketika aplikasi mengirim penghapusan eksplisit, tabel canonical menjadi
+  // sumber utama agar baris lama di Hutang/Piutang tidak hidup kembali.
+  preferCanonical = preferCanonical || {};
+  if (!preferCanonical.purchases) data.purchases = mergeLedgerRows_(data.purchases, readLedgerRows_(ss, "Hutang", "debt"));
+  if (!preferCanonical.sales) data.sales = mergeLedgerRows_(data.sales, readLedgerRows_(ss, "Piutang", "receivable"));
   writeLedgerSheet_(ss, "Hutang", data.purchases, "debt");
   writeLedgerSheet_(ss, "Piutang", data.sales, "receivable");
 }

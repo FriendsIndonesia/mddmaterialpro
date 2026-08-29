@@ -30,7 +30,8 @@ function doGet(e) {
   let payload;
   if (action === "state") payload = readState_(ss);
   else if (action === "auth") payload = { ok: true, app: APP_NAME, source: "Sheets", data: readProfile_(ss) };
-  else if (action === "finance") payload = readSubsetState_(ss, ["purchases", "sales", "payments", "cashAccounts", "cashTx", "returns"]);
+  else if (action === "finance") payload = readSubsetState_(ss, ["purchases", "sales", "payments", "cashAccounts", "cashTx", "returns", "pendingSales", "pendingPurchases"]);
+  else if (action === "masterlite") payload = readSubsetState_(ss, ["customers", "suppliers", "employees", "categories", "discounts", "cashAccounts", "packages", "stockMoves"]);
   else if (action === "master") payload = readSubsetState_(ss, ["products", "customers", "suppliers", "employees", "categories", "discounts", "cashAccounts", "packages", "stockMoves"]);
   else if (action === "products") payload = readSubsetState_(ss, ["products", "categories", "discounts"]);
   else {

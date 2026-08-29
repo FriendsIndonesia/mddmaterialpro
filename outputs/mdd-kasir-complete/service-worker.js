@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v58-fast-sync-product-search-audit";
+const CACHE_NAME = "mdd-material-pro-v59-search-ledger-clear-bulk-pay";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

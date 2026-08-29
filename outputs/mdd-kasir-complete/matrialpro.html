@@ -712,6 +712,7 @@
             </section>
             <section class="panel">
               <div class="panel-header"><h3>Warning Stok</h3><span id="lowStockCount" class="chip">0 item</span></div>
+              <div class="mb-3"><label class="form-label">Pencarian Warning Stock</label><input id="dashboardWarningSearch" class="form-control" autocomplete="off" placeholder="Cari kode, nama, kategori, atau satuan barang"></div>
               <div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Produk</th><th class="text-end">Stok</th><th>Status</th></tr></thead><tbody id="dashboardStockRows"></tbody></table></div>
             </section>
           </div>
@@ -815,6 +816,7 @@
       let saleProductDraft = { sku: "", search: "", unit: "", qty: 1, hpp: "", price1: "", price2: "", manualPrice: "", priceMode: "price1" };
       let selectedPurchaseProductId = "";
       let modalSubmit = null;
+      let masterSearchSources = {};
       let salesChart = null;
       let syncTimer = null;
       let autoPullTimer = null;
@@ -1200,8 +1202,14 @@
         if (session.role !== "Owner") return toast("Hanya owner yang dapat membersihkan laporan.");
         const labels = { dashboardView:"seluruh laporan dashboard", cashierView:"laporan penjualan Kasir", purchaseView:"laporan Purchase", financeView:"laporan pembayaran dan kas", reportsView:"seluruh laporan transaksi" };
         if (!confirm(`Bersihkan ${labels[view]}? Data master produk, pelanggan, supplier, dan akun kas tidak dihapus.`)) return;
-        if (view === "cashierView") Object.assign(state, { sales:[], pendingSales:[], returns:state.returns.filter((x) => x.module !== "Penjualan") });
-        if (view === "purchaseView") Object.assign(state, { purchases:[], pendingPurchases:[], returns:state.returns.filter((x) => x.module !== "Pembelian") });
+        if (view === "cashierView") {
+          const saleIds = new Set(state.sales.map((row) => row.id));
+          Object.assign(state, { sales:[], pendingSales:[], payments:state.payments.filter((payment) => !saleIds.has(payment.refId)), returns:state.returns.filter((x) => x.module !== "Penjualan") });
+        }
+        if (view === "purchaseView") {
+          const purchaseIds = new Set(state.purchases.map((row) => row.id));
+          Object.assign(state, { purchases:[], pendingPurchases:[], payments:state.payments.filter((payment) => !purchaseIds.has(payment.refId)), returns:state.returns.filter((x) => x.module !== "Pembelian") });
+        }
         if (view === "financeView") Object.assign(state, { cashTx:[], payments:[] });
         if (view === "dashboardView" || view === "reportsView") Object.assign(state, { sales:[], purchases:[], cashTx:[], payments:[], stockMoves:[], returns:[], pendingSales:[], pendingPurchases:[] });
         saveState(`${labels[view]} dibersihkan`);
@@ -1441,7 +1449,7 @@
         const todayPaymentsDebt = state.payments.filter((x) => isToday(x.date) && x.type === "Hutang").reduce((sum, x) => sum + toNumber(x.amount), 0);
         const todayPettyCash = state.cashTx.filter((x) => isToday(x.date) && x.category === "Petty Cash").reduce((sum, x) => sum + (x.type === "Masuk" ? toNumber(x.amount) : -toNumber(x.amount)), 0);
         const activeProducts = state.products.filter((p) => p.active !== false);
-        const stockValue = activeProducts.reduce((s, p) => s + (stockAkhirProduk(p) * toNumber(p.buy)), 0);
+        const stockValue = state.products.reduce((sum, product) => sum + (toNumber(product.buy) * stockAkhirProduk(product)), 0);
         const receivable = state.sales.filter((s) => toNumber(s.due) > 0).reduce((sum, s) => sum + toNumber(s.due), 0);
         const payable = state.purchases.filter((p) => toNumber(p.due) > 0).reduce((sum, p) => sum + toNumber(p.due), 0);
         const cashBalance = state.cashAccounts.reduce((s, a) => s + toNumber(a.balance), 0);
@@ -1456,7 +1464,7 @@
           ["bi-arrow-left-right", "Pembayaran Piutang Hari Ini", idr.format(todayPaymentsReceivable), "bg-rose", "Pembayaran bertipe Piutang tanggal hari ini"],
           ["bi-wallet2", "Pembayaran Hutang Hari Ini", idr.format(todayPaymentsDebt), "bg-blue", "Pembayaran bertipe Hutang tanggal hari ini"],
           ["bi-bank", "Saldo Kas Per Hari Ini", idr.format(cashBalance), "bg-green", `${state.cashAccounts.length} akun pada Master Kas`],
-          ["bi-box2-heart", "Nilai Stok Per Hari Ini", idr.format(stockValue), "bg-cyan", "Σ stok akhir × harga beli produk aktif"]
+          ["bi-box2-heart", "Nilai Stok Per Hari Ini", idr.format(stockValue), "bg-cyan", "Σ HPP setiap produk × stock akhir; seluruh produk dari backend Products"]
         ].map(([icon, label, value, cls, source]) => `<div class="metric-card"><div class="metric-icon ${cls}"><i class="bi ${icon}"></i></div><div><span>${label}</span><strong>${value}</strong><small class="metric-source">Sumber: ${source}</small></div></div>`).join("");
         const reportBox = document.getElementById("ownerReportRows");
         if (reportBox) {
@@ -1471,7 +1479,11 @@
           ].map(([label, value]) => `<div class="owner-report-item"><span>${label}</span><strong>${value}</strong></div>`).join("") + `<div class="audit-box"><strong>Rumus Aset Bersih:</strong> saldo kas + nilai stok + sisa piutang − sisa hutang.</div>`;
         }
         document.getElementById("lowStockCount").textContent = `${low.length} item`;
-        document.getElementById("dashboardStockRows").innerHTML = low.map((p) => { const stock = stockAkhirProduk(p); return `<tr><td>${p.name}</td><td class="text-end">${number.format(stock)} ${p.unit}</td><td><span class="status-dot ${stock === 0 ? "danger" : "warn"}"></span> ${stock === 0 ? "Out of stock" : "Limit stok"}</td></tr>`; }).join("") || `<tr><td colspan="3" class="text-center text-secondary">Stok aman.</td></tr>`;
+        const warningSearch = document.getElementById("dashboardWarningSearch");
+        if (warningSearch) {
+          warningSearch.oninput = () => renderDashboardWarningSearch(low);
+          renderDashboardWarningSearch(low);
+        }
         const fast = low.length ? `Prioritaskan restock ${low[0].name}; item ini sudah menyentuh batas minimum.` : "Stok sehat. Pertimbangkan paket promo dari produk dengan margin terbaik.";
         const salesItemRevenue = state.sales.reduce((sum, sale) => sum + (sale.items || []).reduce((subtotal, item) => subtotal + Math.max(0, toNumber(item.price) * toNumber(item.qty) - toNumber(item.discount)), 0), 0);
         const transactionCogs = state.sales.reduce((sum, sale) => sum + (sale.items || []).reduce((subtotal, item) => subtotal + (toNumber(item.buy ?? findProduct(item.productId)?.buy) * toNumber(item.qty)), 0), 0);
@@ -1479,6 +1491,14 @@
         const advice = document.getElementById("businessAdvice");
         if (advice) advice.textContent = `${fast} Margin barang berdasarkan harga jual transaksi dikurangi HPP tersimpan: ${idr.format(margin)}.`;
         drawSalesChart();
+      }
+      function renderDashboardWarningSearch(lowStockRows) {
+        const input = document.getElementById("dashboardWarningSearch");
+        const target = document.getElementById("dashboardStockRows");
+        if (!input || !target) return;
+        const query = String(input.value || "").trim().toLowerCase();
+        const rows = query ? lowStockRows.filter((product) => [product.code, product.name, product.category, product.unit].some((value) => String(value || "").toLowerCase().includes(query))).slice(0, 100) : [];
+        target.innerHTML = rows.map((product) => { const stock = stockAkhirProduk(product); return `<tr><td>${esc(product.name)}</td><td class="text-end">${number.format(stock)} ${esc(product.unit)}</td><td><span class="status-dot ${stock === 0 ? "danger" : "warn"}"></span> ${stock === 0 ? "Out of stock" : "Limit stok"}</td></tr>`; }).join("") || `<tr><td colspan="3" class="text-center text-secondary">${query ? "Barang warning stock tidak ditemukan." : "Gunakan Pencarian Warning Stock untuk melihat barang kosong atau di bawah minimum."}</td></tr>`;
       }
       function drawSalesChart() {
         if (!window.Chart) return;
@@ -1977,12 +1997,12 @@
           <section class="panel mb-3"><div class="panel-header"><h3>Pencarian Data Base Hutang-Piutang</h3><span class="chip"><i class="bi bi-search"></i> Cari dan bayar</span></div>
             <div class="row g-3 align-items-end">
               <div class="col-md-9"><label class="form-label">Nama Orang/Perusahaan atau Nomor Faktur</label><input id="financeDatabaseSearch" list="financeDatabaseNames" class="form-control" autocomplete="off" placeholder="Ketik nama supplier, perusahaan, pelanggan, atau nomor faktur"><datalist id="financeDatabaseNames">${[...new Set([...debts.flatMap((x) => { const supplier = selectedSupplierData(x.supplierId); return [x.company, x.salesName, supplier.company, supplier.name]; }), ...receivables.flatMap((x) => [x.customerName, personName(state.customers, x.customerId)])].filter(Boolean))].map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist></div>
-              <div class="col-md-3"><button id="clearFinanceDatabaseSearch" class="btn btn-outline-secondary w-100" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button></div>
+              <div class="col-md-3 d-grid gap-2"><button id="clearFinanceDatabaseSearch" class="btn btn-outline-secondary" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button><button id="bulkFinancePaymentBtn" class="btn btn-primary" type="button" disabled><i class="bi bi-check2-square"></i> Bayar Terpilih</button></div>
               <div class="col-12"><div id="financeDatabaseSearchResults" class="small text-secondary">Ketik nama atau nomor faktur untuk menampilkan hutang dan piutang aktif.</div></div>
             </div>
           </section>
-          <section class="panel"><div class="panel-header"><h3>Pembayaran Hutang</h3><button id="inputDebtDataBtn" class="btn btn-outline-primary btn-sm" type="button"><i class="bi bi-plus-lg"></i> Input Data</button></div>${paymentDueTable(debts, "debt")}</section>
-          <section class="panel mt-3"><div class="panel-header"><h3>Pembayaran Piutang</h3><button id="inputReceivableDataBtn" class="btn btn-outline-primary btn-sm" type="button"><i class="bi bi-plus-lg"></i> Input Data</button></div>${paymentDueTable(receivables, "receivable")}</section>
+          <section class="panel"><div class="panel-header"><h3>Pembayaran Hutang</h3><button id="inputDebtDataBtn" class="btn btn-outline-primary btn-sm" type="button"><i class="bi bi-plus-lg"></i> Input Data</button></div>${paymentDueTable([], "debt")}</section>
+          <section class="panel mt-3"><div class="panel-header"><h3>Pembayaran Piutang</h3><button id="inputReceivableDataBtn" class="btn btn-outline-primary btn-sm" type="button"><i class="bi bi-plus-lg"></i> Input Data</button></div>${paymentDueTable([], "receivable")}</section>
           <section class="panel mt-3"><div class="panel-header"><h3>Laporan Petty Cash</h3><span class="chip">Ringkasan kas kecil</span></div>
             <div class="owner-report-grid">
               <div class="owner-report-item"><span>Petty Cash Awal</span><strong>${idr.format(pettyCashStart)}</strong></div>
@@ -1994,6 +2014,7 @@
         document.getElementById("addCashTxBtn").onclick = openCashTxModal;
         document.getElementById("financeDatabaseSearch").oninput = renderFinanceDatabaseSearch;
         document.getElementById("clearFinanceDatabaseSearch").onclick = () => { document.getElementById("financeDatabaseSearch").value = ""; renderFinanceDatabaseSearch(); document.getElementById("financeDatabaseSearch").focus(); };
+        document.getElementById("bulkFinancePaymentBtn").onclick = openBulkFinancePaymentModal;
         document.getElementById("inputDebtDataBtn").onclick = openDebtInputModal;
         document.getElementById("inputReceivableDataBtn").onclick = openReceivableInputModal;
         document.querySelectorAll("[data-pay-debt]").forEach((btn) => btn.onclick = () => openPaymentModal("debt", btn.dataset.payDebt));
@@ -2024,8 +2045,45 @@
           return [row.invoiceNo, row.customerName, row.customerWhatsapp, customer.name, customer.phone, customer.address].some((value) => String(value || "").toLowerCase().includes(query));
         }).map((row) => ({ type: "Piutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.customerName || personName(state.customers, row.customerId), date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due }));
         const matches = [...debtMatches, ...receivableMatches];
-        target.innerHTML = matches.length ? `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Jenis</th><th>Nama/Perusahaan</th><th>No. Faktur</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="text-end">Total</th><th class="text-end">Sisa</th><th></th></tr></thead><tbody>${matches.map((row) => `<tr><td><span class="soft-tag">${row.type}</span></td><td><strong>${esc(row.name)}</strong></td><td>${esc(row.invoice)}</td><td>${displayDate(row.date)}</td><td>${displayDate(row.dueDate)}</td><td class="text-end">${idr.format(row.total || 0)}</td><td class="text-end fw-bold">${idr.format(row.remaining || 0)}</td><td class="text-end"><button class="btn btn-sm btn-primary" data-finance-search-pay="${row.type === "Hutang" ? "debt" : "receivable"}" data-finance-search-id="${row.id}"><i class="bi bi-cash-coin"></i> Bayar</button></td></tr>`).join("")}</tbody></table></div>` : `<div class="text-center text-secondary py-3">Data hutang/piutang aktif tidak ditemukan.</div>`;
+        target.innerHTML = matches.length ? `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th><i class="bi bi-check2-square"></i></th><th>Jenis</th><th>Nama/Perusahaan</th><th>No. Faktur</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="text-end">Total</th><th class="text-end">Sisa</th><th></th></tr></thead><tbody>${matches.map((row) => `<tr><td><input class="form-check-input" type="checkbox" data-finance-bulk-check="${row.type === "Hutang" ? "debt" : "receivable"}:${row.id}" aria-label="Pilih ${esc(row.invoice)}"></td><td><span class="soft-tag">${row.type}</span></td><td><strong>${esc(row.name)}</strong></td><td>${esc(row.invoice)}</td><td>${displayDate(row.date)}</td><td>${displayDate(row.dueDate)}</td><td class="text-end">${idr.format(row.total || 0)}</td><td class="text-end fw-bold">${idr.format(row.remaining || 0)}</td><td class="text-end"><button class="btn btn-sm btn-primary" data-finance-search-pay="${row.type === "Hutang" ? "debt" : "receivable"}" data-finance-search-id="${row.id}"><i class="bi bi-cash-coin"></i> Bayar</button></td></tr>`).join("")}</tbody></table></div>` : `<div class="text-center text-secondary py-3">Data hutang/piutang aktif tidak ditemukan.</div>`;
         document.querySelectorAll("[data-finance-search-pay]").forEach((button) => button.onclick = () => openPaymentModal(button.dataset.financeSearchPay, button.dataset.financeSearchId));
+        document.querySelectorAll("[data-finance-bulk-check]").forEach((checkbox) => checkbox.onchange = updateBulkFinancePaymentButton);
+        updateBulkFinancePaymentButton();
+      }
+      function updateBulkFinancePaymentButton() {
+        const button = document.getElementById("bulkFinancePaymentBtn");
+        if (!button) return;
+        const count = document.querySelectorAll("[data-finance-bulk-check]:checked").length;
+        button.disabled = count === 0;
+        button.innerHTML = `<i class="bi bi-check2-square"></i> Bayar Terpilih${count ? ` (${count})` : ""}`;
+      }
+      function openBulkFinancePaymentModal() {
+        const selected = [...document.querySelectorAll("[data-finance-bulk-check]:checked")].map((checkbox) => {
+          const [type, id] = checkbox.dataset.financeBulkCheck.split(":");
+          const row = type === "debt" ? state.purchases.find((item) => item.id === id) : state.sales.find((item) => item.id === id);
+          return row ? { type, row } : null;
+        }).filter(Boolean);
+        if (!selected.length) return toast("Pilih minimal satu hutang atau piutang.");
+        openModal("Pembayaran Hutang-Piutang Terpilih", `<div class="row g-3"><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control" required></div><div class="col-md-4"><label class="form-label">Metode</label><select name="method" class="form-select">${payMethods.map((method) => `<option>${method}</option>`).join("")}</select></div><div class="col-md-4"><label class="form-label">Kas</label><select name="accountId" class="form-select">${accountOptions()}</select></div><div class="col-12"><div class="table-responsive"><table class="table"><thead><tr><th>Jenis</th><th>Faktur</th><th>Nama</th><th class="text-end">Sisa</th><th>Nominal Bayar</th></tr></thead><tbody>${selected.map(({ type, row }) => `<tr><td>${type === "debt" ? "Hutang" : "Piutang"}</td><td>${esc(row.invoiceNo || row.id)}</td><td>${esc(type === "debt" ? (row.company || row.salesName || personName(state.suppliers, row.supplierId)) : (row.customerName || personName(state.customers, row.customerId)))}</td><td class="text-end">${idr.format(row.due)}</td><td><input name="amount:${type}:${row.id}" type="number" min="1" max="${row.due}" value="${row.due}" class="form-control" required></td></tr>`).join("")}</tbody></table></div></div><div class="col-12"><label class="form-label">Catatan</label><input name="note" class="form-control" placeholder="Pembayaran sekaligus"></div></div>`, (fd) => {
+          let processed = 0;
+          selected.forEach(({ type, row }) => {
+            const amount = Math.min(toNumber(row.due), toNumber(fd.get(`amount:${type}:${row.id}`)));
+            if (amount <= 0) return;
+            row.due = Math.max(0, toNumber(row.due) - amount);
+            row.paid = toNumber(row.paid) + amount;
+            if (row.due === 0) row.status = "Lunas";
+            const relation = type === "debt" ? (row.company || row.salesName || personName(state.suppliers, row.supplierId)) : (row.customerName || personName(state.customers, row.customerId));
+            state.payments.unshift({ id: uid("PAY"), date: fd.get("date"), refId: row.id, invoiceNo: row.invoiceNo || row.id, relation, type: type === "debt" ? "Hutang" : "Piutang", amount, remaining: row.due, method: fd.get("method"), note: fd.get("note") || "Pembayaran sekaligus" });
+            const account = state.cashAccounts.find((item) => item.id === fd.get("accountId"));
+            if (account) account.balance += type === "debt" ? -amount : amount;
+            processed += 1;
+          });
+          if (!processed) return toast("Nominal pembayaran tidak valid.");
+          saveState(`${processed} pembayaran hutang-piutang diproses sekaligus`);
+          closeModal();
+          renderAll();
+          toast(`${processed} transaksi pembayaran berhasil disimpan.`);
+        }, "Simpan Pembayaran");
       }
       function cashflowTotal() {
         return cashflowBreakdown().total;
@@ -2043,13 +2101,13 @@
             const paid = debtPaidAmount(x);
             const returns = debtReturnAmount(x);
             return `<tr><td>${displayDate(x.date)}</td><td>${displayDate(x.dueDate)}</td><td>${x.invoiceNo || "-"}</td><td>${x.salesName || personName(state.suppliers, x.supplierId)}</td><td class="text-end">${idr.format(x.total || 0)}</td><td class="text-end">${idr.format(paid)}</td><td class="text-end">${idr.format(returns)}</td><td class="text-end fw-bold">${idr.format(x.due || 0)}</td><td class="text-end"><div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-primary" data-pay-debt="${x.id}"><i class="bi bi-cash-coin"></i> Bayar</button><button class="btn btn-sm btn-outline-secondary" data-edit-debt="${x.id}"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-danger" data-delete-debt="${x.id}"><i class="bi bi-trash"></i> Hapus</button></div></td></tr>`;
-          }).join("") || `<tr><td colspan="9" class="text-center text-secondary">Tidak ada hutang aktif.</td></tr>`}</tbody></table></div>`;
+          }).join("") || `<tr><td colspan="9" class="text-center text-secondary">Gunakan Pencarian Data Base Hutang-Piutang untuk menampilkan hutang.</td></tr>`}</tbody></table></div>`;
         }
         return `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Tanggal</th><th>Jatuh Tempo</th><th>No. Faktur</th><th>Pelanggan</th><th class="text-end">Piutang Aktif</th><th class="text-end">Bayar</th><th class="text-end">Retur</th><th class="text-end">Sisa Piutang</th><th></th></tr></thead><tbody>${items.map((x) => {
           const paid = receivablePaidAmount(x);
           const returns = receivableReturnAmount(x);
           return `<tr><td>${displayDate(x.date)}</td><td>${displayDate(x.dueDate)}</td><td>${x.invoiceNo || "-"}</td><td>${x.customerName || personName(state.customers, x.customerId)}</td><td class="text-end">${idr.format(x.total || 0)}</td><td class="text-end">${idr.format(paid)}</td><td class="text-end">${idr.format(returns)}</td><td class="text-end fw-bold">${idr.format(x.due || 0)}</td><td class="text-end"><div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-primary" data-pay-receivable="${x.id}"><i class="bi bi-cash-coin"></i> Bayar</button><button class="btn btn-sm btn-outline-secondary" data-edit-receivable="${x.id}"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-danger" data-delete-receivable="${x.id}"><i class="bi bi-trash"></i> Hapus</button></div></td></tr>`;
-        }).join("") || `<tr><td colspan="9" class="text-center text-secondary">Tidak ada piutang aktif.</td></tr>`}</tbody></table></div>`;
+        }).join("") || `<tr><td colspan="9" class="text-center text-secondary">Gunakan Pencarian Data Base Hutang-Piutang untuk menampilkan piutang.</td></tr>`}</tbody></table></div>`;
       }
       function debtPaidAmount(purchase) {
         const logged = state.payments.filter((p) => p.type === "Hutang" && p.refId === purchase.id).reduce((sum, p) => sum + Number(p.amount || 0), 0);
@@ -2203,6 +2261,7 @@
           </div>`, (fd) => {
           const amount = Math.min(row.due, Number(fd.get("amount")));
           row.due -= amount;
+          row.paid = toNumber(row.paid) + amount;
           if (row.due === 0) row.status = "Lunas";
           const account = state.cashAccounts.find((a) => a.id === fd.get("accountId"));
           if (account) account.balance += type === "debt" ? -amount : amount;
@@ -2312,12 +2371,14 @@
           <div class="module-grid">${modules.map(([title, key, icon], i) => smallModule(title, `${state[key]?.length || 0} data`, `masterAction${i}`, icon)).join("") || `<div class="module-card"><h4>Akses belum tersedia</h4><p>Hubungi Owner untuk membuka akses master dokumen.</p></div>`}</div>
           ${masterDatabaseDashboard()}`;
         modules.forEach((m, i) => document.getElementById(`masterAction${i}`).onclick = m[3]);
+        bindMasterDatabaseSearch();
         bindMasterDatabaseActions();
         document.getElementById("refreshMasterBtn").onclick = () => manualRefreshBackend("master", "master dokumen");
         document.getElementById("exportMasterBtn").onclick = () => exportReportPdf("Laporan Master", masterExportRows());
       }
 
       function masterDatabaseDashboard() {
+        masterSearchSources = {};
         const sections = [];
         if (canAccessMaster("Master Pelanggan")) sections.push(masterDatabasePanel("Master Pelanggan", "customers", state.customers.map((c) => ({ id: c.id, nama: c.name, whatsapp: c.phone, tipe: c.type, alamat: c.address, jumlah_deposit: Number(c.deposit || 0) })), ["nama", "whatsapp", "tipe", "alamat", "jumlah_deposit"]));
         if (canAccessMaster("Master Supplier")) sections.push(masterDatabasePanel("Master Supplier", "suppliers", state.suppliers.map((s) => ({ id: s.id, nama_perusahaan: s.company || "-", nama_sales: s.name, whatsapp: s.phone, alamat: s.address })), ["nama_perusahaan", "nama_sales", "whatsapp", "alamat"]));
@@ -2333,8 +2394,31 @@
       }
 
       function masterDatabasePanel(title, type, rows, keys) {
-        const tableRows = rows.map((row) => ({ ...row, aksi: masterDatabaseActions(type, row.id) }));
-        return `<div class="master-report-block"><div class="panel-header compact"><h3>${title}</h3><span class="chip">${rows.length} data</span></div>${genericTable(tableRows, [...keys, "aksi"])}</div>`;
+        const panelId = `master-search-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+        masterSearchSources[panelId] = { type, rows, keys };
+        return `<div class="master-report-block"><div class="panel-header compact"><h3>${title}</h3><span class="chip">${rows.length} data tersedia</span></div><div class="row g-2 mb-2"><div class="col-md-10"><label class="form-label">Pencarian ${title}</label><input class="form-control" data-master-search-input="${panelId}" autocomplete="off" placeholder="Ketik nama, kode, kategori, atau data terkait"></div><div class="col-md-2 d-flex align-items-end"><button class="btn btn-outline-secondary w-100" type="button" data-master-search-clear="${panelId}"><i class="bi bi-x-circle"></i></button></div></div><div data-master-search-result="${panelId}">${genericTable([], [...keys, "aksi"])}</div></div>`;
+      }
+
+      function bindMasterDatabaseSearch() {
+        document.querySelectorAll("[data-master-search-input]").forEach((input) => input.oninput = () => renderMasterDatabaseSearch(input.dataset.masterSearchInput));
+        document.querySelectorAll("[data-master-search-clear]").forEach((button) => button.onclick = () => {
+          const input = document.querySelector(`[data-master-search-input="${button.dataset.masterSearchClear}"]`);
+          if (input) input.value = "";
+          renderMasterDatabaseSearch(button.dataset.masterSearchClear);
+          input?.focus();
+        });
+      }
+
+      function renderMasterDatabaseSearch(panelId) {
+        const source = masterSearchSources[panelId];
+        const input = document.querySelector(`[data-master-search-input="${panelId}"]`);
+        const target = document.querySelector(`[data-master-search-result="${panelId}"]`);
+        if (!source || !input || !target) return;
+        const query = String(input.value || "").trim().toLowerCase();
+        const matches = query ? source.rows.filter((row) => Object.values(row).some((value) => String(value ?? "").toLowerCase().includes(query))).slice(0, 100) : [];
+        const tableRows = matches.map((row) => ({ ...row, aksi: masterDatabaseActions(source.type, row.id) }));
+        target.innerHTML = genericTable(tableRows, [...source.keys, "aksi"]);
+        bindMasterDatabaseActions();
       }
 
       function masterDatabaseActions(type, id) {

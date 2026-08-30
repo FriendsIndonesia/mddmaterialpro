@@ -57,7 +57,7 @@ function doPost(e) {
     // New clients send row-level changes. This preserves records entered or
     // edited directly in Google Sheets instead of replacing every table.
     let preferCanonicalFinancialTables = { purchases: false, sales: false };
-    if (payload.changes && payload.changes.tables) {
+    if (payload.changes && payload.changes.tables && Number(payload.syncProtocol || 0) >= 2) {
       const purchaseChange = payload.changes.tables.purchases || {};
       const salesChange = payload.changes.tables.sales || {};
       const purchaseDeletes = purchaseChange.deletes || [];
@@ -71,9 +71,13 @@ function doPost(e) {
         sales: salesDeletes.length > 0 || salesUpserts.length > 0
       };
       TABLES.forEach((table) => applyTableChanges_(ss, table, payload.changes.tables[table.key]));
-    } else {
+    } else if (!payload.changes || !payload.changes.tables) {
       // Backward-compatible import: merge rows and never delete sheet-only data.
       TABLES.forEach((table) => mergeTable_(ss, table, data[table.key] || []));
+    } else {
+      // Abaikan delta dari aplikasi lama. Versi lama dapat memiliki snapshot
+      // cache yang salah dan tidak boleh lagi menimpa input langsung di Sheet.
+      preferCanonicalFinancialTables = { purchases: false, sales: false };
     }
     writeRawState_(ss, payload);
     syncFinancialLedgerSheets_(ss, preferCanonicalFinancialTables);

@@ -467,17 +467,19 @@ function readTable_(ss, sheetName) {
   const range = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn());
   const values = range.getValues();
   const idIndex = headers.indexOf("id");
-  let idsAdded = false;
   if (idIndex >= 0) {
     const prefix = sheetName.replace(/[^A-Za-z]/g, "").slice(0, 3).toUpperCase() || "ROW";
-    values.forEach((row) => {
+    const missingIds = [];
+    values.forEach((row, index) => {
       const hasData = row.some((value, index) => index !== idIndex && String(value || "").trim());
       if (hasData && !String(row[idIndex] || "").trim()) {
         row[idIndex] = prefix + "-" + Utilities.getUuid().slice(0, 12).toUpperCase();
-        idsAdded = true;
+        missingIds.push({ row: index + 2, id: row[idIndex] });
       }
     });
-    if (idsAdded) range.setValues(values);
+    // Jangan menulis ulang seluruh tabel hanya untuk mengisi ID. Penulisan
+    // rentang penuh dapat menimpa sel lain yang sedang diketik user.
+    missingIds.forEach((entry) => sheet.getRange(entry.row, idIndex + 1).setValue(entry.id));
   }
   const textFields = ["id", "code", "invoiceNo", "number", "sku", "phone", "whatsapp"];
   return values.map((row) => {

@@ -11,14 +11,14 @@ const TABLES = [
   { key: "discounts", sheet: "Discounts", fields: ["id", "name", "amount", "type", "active"] },
   { key: "cashAccounts", sheet: "CashAccounts", fields: ["id", "name", "balance"] },
   { key: "packages", sheet: "Packages", fields: ["id", "name", "items", "price"] },
-  { key: "sales", sheet: "Sales", fields: ["id", "invoiceNo", "date", "dueDate", "customerId", "customerName", "customerType", "customerAddress", "customerWhatsapp", "customerDeposit", "items", "method", "ongkir", "bankCharge", "status", "total", "due", "paid", "returnAmount", "depositRemaining", "note"] },
-  { key: "purchases", sheet: "Purchases", fields: ["id", "invoiceNo", "date", "dueDate", "supplierId", "salesName", "company", "whatsapp", "items", "method", "ongkir", "bankCharge", "status", "total", "due", "paid", "returnAmount", "note"] },
+  { key: "sales", sheet: "Sales", fields: ["id", "invoiceNo", "date", "dueDate", "customerId", "customerName", "customerType", "customerAddress", "customerWhatsapp", "customerDeposit", "items", "method", "ongkir", "bankCharge", "cashReceived", "change", "status", "total", "due", "paid", "returnAmount", "depositRemaining", "note"] },
+  { key: "purchases", sheet: "Purchases", fields: ["id", "invoiceNo", "date", "dueDate", "supplierId", "salesName", "company", "whatsapp", "items", "method", "ongkir", "bankCharge", "cashReceived", "change", "status", "total", "due", "paid", "returnAmount", "note"] },
   { key: "cashTx", sheet: "CashTransactions", fields: ["id", "date", "type", "category", "accountId", "amount", "note"] },
   { key: "payments", sheet: "Payments", fields: ["id", "date", "refId", "invoiceNo", "relation", "type", "amount", "remaining", "method", "note"] },
   { key: "stockMoves", sheet: "StockMoves", fields: ["id", "number", "date", "productId", "sku", "productName", "unit", "type", "systemStock", "physicalStock", "difference", "qty", "note"] },
   { key: "returns", sheet: "Returns", fields: ["id", "module", "date", "refId", "invoiceNo", "productId", "product", "qty", "amount", "total", "method", "note"] },
-  { key: "pendingSales", sheet: "PendingSales", fields: ["id", "invoiceNo", "date", "customerId", "customerName", "customerType", "customerAddress", "customerWhatsapp", "method", "items", "ongkir", "bankCharge", "total", "note"] },
-  { key: "pendingPurchases", sheet: "PendingPurchases", fields: ["id", "invoiceNo", "date", "dueDate", "supplierId", "salesName", "company", "whatsapp", "items", "ongkir", "bankCharge", "total", "note"] },
+  { key: "pendingSales", sheet: "PendingSales", fields: ["id", "invoiceNo", "date", "customerId", "customerName", "customerType", "customerAddress", "customerWhatsapp", "method", "items", "ongkir", "bankCharge", "cashReceived", "change", "total", "note"] },
+  { key: "pendingPurchases", sheet: "PendingPurchases", fields: ["id", "invoiceNo", "date", "dueDate", "supplierId", "salesName", "company", "whatsapp", "method", "items", "ongkir", "bankCharge", "cashReceived", "change", "total", "note"] },
   { key: "history", sheet: "History", fields: ["id", "date", "user", "action"] },
   { key: "syncQueue", sheet: "SyncQueue", fields: ["type", "id"] }
 ];
@@ -560,3 +560,4 @@ function output_(value, callback) {
   const mime = callback ? ContentService.MimeType.JAVASCRIPT : ContentService.MimeType.JSON;
   return ContentService.createTextOutput(body).setMimeType(mime);
 }
+

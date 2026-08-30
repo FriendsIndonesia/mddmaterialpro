@@ -919,8 +919,27 @@
         });
         const deletedSales = new Set(data.deletionTombstones.sales);
         const deletedPurchases = new Set(data.deletionTombstones.purchases);
-        data.sales = (data.sales || []).filter((row) => !deletedSales.has(row.id));
-        data.purchases = (data.purchases || []).filter((row) => !deletedPurchases.has(row.id));
+        data.sales = (data.sales || []).map((row) => {
+          row.invoiceNo = String(row.invoiceNo ?? row.noFaktur ?? row.invoice ?? "").trim();
+          row.customerName = String(row.customerName ?? row.pelanggan ?? row.customer ?? row.relation ?? "").trim();
+          row.total = toNumber(row.total ?? row.piutangAktif ?? row.totalPiutang);
+          row.paid = toNumber(row.paid ?? row.bayar ?? row.dibayar);
+          row.returnAmount = toNumber(row.returnAmount ?? row.retur ?? row.returned);
+          row.due = toNumber(row.due ?? row.remaining ?? row.sisaPiutang ?? row.sisa);
+          if (!row.due && row.total > row.paid + row.returnAmount) row.due = Math.max(0, row.total - row.paid - row.returnAmount);
+          return row;
+        }).filter((row) => !deletedSales.has(row.id));
+        data.purchases = (data.purchases || []).map((row) => {
+          row.invoiceNo = String(row.invoiceNo ?? row.noFaktur ?? row.invoice ?? "").trim();
+          row.salesName = String(row.salesName ?? row.supplierName ?? row.supplier ?? row.relation ?? "").trim();
+          row.company = String(row.company ?? row.namaPerusahaan ?? row.perusahaan ?? "").trim();
+          row.total = toNumber(row.total ?? row.hutangAktif ?? row.totalHutang);
+          row.paid = toNumber(row.paid ?? row.bayar ?? row.dibayar);
+          row.returnAmount = toNumber(row.returnAmount ?? row.retur ?? row.returned);
+          row.due = toNumber(row.due ?? row.remaining ?? row.sisaHutang ?? row.sisa);
+          if (!row.due && row.total > row.paid + row.returnAmount) row.due = Math.max(0, row.total - row.paid - row.returnAmount);
+          return row;
+        }).filter((row) => !deletedPurchases.has(row.id));
         return data;
       }
       function toNumber(value) {
@@ -1198,6 +1217,11 @@
         document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
         bootstrap.Offcanvas.getInstance(document.getElementById("sidebar"))?.hide();
         renderAll();
+        if (view === "financeView" && state.profile?.onlineMode) {
+          loadGoogleWorkspaceState("finance").then((loaded) => {
+            if (loaded && document.querySelector(".view-section.active")?.id === "financeView") renderFinance();
+          }).catch(() => {});
+        }
       }
       function canAccessView(view) {
         if (!session || session.role === "Owner") return true;
@@ -2114,11 +2138,11 @@
       function financeRelationOptions() {
         const debtNames = state.purchases.flatMap((row) => {
           const supplier = selectedSupplierData(row.supplierId);
-          return [row.company, row.salesName, supplier.company, supplier.name];
+          return [row.company, row.salesName, row.supplierName, row.supplier, row.relation, supplier.company, supplier.name];
         });
         const receivableNames = state.sales.flatMap((row) => {
           const customer = state.customers.find((item) => item.id === row.customerId) || {};
-          return [row.customerName, customer.name];
+          return [row.customerName, row.pelanggan, row.customer, row.relation, customer.name];
         });
         const masterNames = [
           ...state.suppliers.flatMap((row) => [row.company, row.name]),
@@ -2134,7 +2158,7 @@
         if (!terms.length) { target.innerHTML = ""; return; }
         const matches = financeRelationOptions().filter((name) => financeTextMatches([name], query));
         target.innerHTML = matches.length
-          ? `<div class="px-2 py-1 small text-secondary">${matches.length} nama ditemukan</div>${matches.map((name) => `<button type="button" class="search-result-item" data-finance-name="${esc(name)}"><strong>${esc(name)}</strong></button>`).join("")}`
+          ? `<div class="px-2 py-1 small text-secondary"><strong>${matches.length} nama ditemukan</strong> — pilih salah satu untuk menampilkan transaksinya.</div>${matches.map((name) => `<button type="button" class="search-result" data-finance-name="${esc(name)}"><strong>${esc(name)}</strong></button>`).join("")}`
           : `<div class="px-2 py-2 small text-secondary">Nama tidak ditemukan pada database Supplier, Customer, Hutang, atau Piutang.</div>`;
         target.querySelectorAll("[data-finance-name]").forEach((button) => button.onclick = () => {
           financeDatabaseQuery = button.dataset.financeName;
@@ -2159,7 +2183,7 @@
           if (toNumber(row.due) <= 0) return false;
           const supplier = selectedSupplierData(row.supplierId);
           const products = financeRowProductData(row);
-          const relationMatch = financeTextMatches([row.invoiceNo, row.salesName, row.company, row.whatsapp, supplier.name, supplier.company, supplier.phone], query);
+          const relationMatch = financeTextMatches([row.invoiceNo, row.noFaktur, row.invoice, row.salesName, row.supplierName, row.supplier, row.relation, row.company, row.namaPerusahaan, row.whatsapp, supplier.name, supplier.company, supplier.phone], query);
           const productMatch = !productQuery || products.some((product) => product.tokens.some((value) => value.includes(productQuery)));
           return relationMatch && productMatch;
         }).map((row) => ({ type: "Hutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.company || selectedSupplierData(row.supplierId).company || row.salesName || selectedSupplierData(row.supplierId).name || "-", products: financeRowProductData(row).map((product) => product.label).filter(Boolean).join(", ") || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due }));
@@ -2167,7 +2191,7 @@
           if (toNumber(row.due) <= 0) return false;
           const customer = state.customers.find((item) => item.id === row.customerId) || {};
           const products = financeRowProductData(row);
-          const relationMatch = financeTextMatches([row.invoiceNo, row.customerName, row.customerWhatsapp, customer.name, customer.phone, customer.address], query);
+          const relationMatch = financeTextMatches([row.invoiceNo, row.noFaktur, row.invoice, row.customerName, row.pelanggan, row.customer, row.relation, row.customerWhatsapp, customer.name, customer.phone, customer.address], query);
           const productMatch = !productQuery || products.some((product) => product.tokens.some((value) => value.includes(productQuery)));
           return relationMatch && productMatch;
         }).map((row) => ({ type: "Piutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.customerName || personName(state.customers, row.customerId), products: financeRowProductData(row).map((product) => product.label).filter(Boolean).join(", ") || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due }));

@@ -3174,7 +3174,7 @@
         syncPending = false;
         try {
           const changes = buildSyncChanges();
-          await fetch(state.profile.googleEndpoint, { method: "POST", mode: "no-cors", body: JSON.stringify({ app: "MDD Material Pro", account: state.profile.googleAccount || "friendsindonesia28@gmail.com", githubRepo: state.profile.githubRepo || "https://github.com/FriendsIndonesia/mddmaterialpro", sentAt: new Date().toISOString(), queue: state.syncQueue, changes, data: state }) });
+          await fetch(state.profile.googleEndpoint, { method: "POST", mode: "no-cors", body: JSON.stringify({ app: "MDD Material Pro", syncProtocol: 2, account: state.profile.googleAccount || "friendsindonesia28@gmail.com", githubRepo: state.profile.githubRepo || "https://github.com/FriendsIndonesia/mddmaterialpro", sentAt: new Date().toISOString(), queue: state.syncQueue, changes, data: state }) });
           state.syncQueue = [];
           localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
           lastSyncedSnapshot = JSON.parse(JSON.stringify(state));

@@ -1245,9 +1245,9 @@
         const labels = { dashboardView:"seluruh laporan dashboard", cashierView:"laporan penjualan Kasir", purchaseView:"laporan Purchase", financeView:"laporan pembayaran dan kas", reportsView:"seluruh laporan transaksi" };
         if (!confirm(`Bersihkan ${labels[view]}? Data master produk, pelanggan, supplier, dan akun kas tidak dihapus.`)) return;
         if (view === "cashierView") {
-          const saleIds = new Set(state.sales.map((row) => row.id));
+          const saleIds = new Set(state.sales.filter(isCashierSale).map((row) => row.id));
           state.deletionTombstones.sales = [...new Set([...(state.deletionTombstones.sales || []), ...saleIds])];
-          Object.assign(state, { sales:[], pendingSales:[], payments:state.payments.filter((payment) => !saleIds.has(payment.refId)), returns:state.returns.filter((x) => x.module !== "Penjualan") });
+          Object.assign(state, { sales:state.sales.filter((row) => !saleIds.has(row.id)), pendingSales:[], payments:state.payments.filter((payment) => !saleIds.has(payment.refId)), returns:state.returns.filter((x) => x.module !== "Penjualan") });
         }
         if (view === "purchaseView") {
           const purchaseIds = new Set(state.purchases.map((row) => row.id));
@@ -1383,6 +1383,9 @@
         if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}` === today();
         const local = text.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
         return local ? `${local[3]}-${local[2]}-${local[1]}` === today() : false;
+      }
+      function isCashierSale(row) {
+        return Boolean(row && Array.isArray(row.items) && row.items.length > 0);
       }
       function nextInvoiceNo() {
         const stamp = today().split("-").reverse().join("");
@@ -1563,6 +1566,7 @@
       function renderCashier() {
         restoreSaleProductDraft();
         ensureSaleDraft();
+        const cashierSales = state.sales.filter(isCashierSale);
         document.getElementById("cashierView").innerHTML = `
           <div class="page-header"><div><p class="eyebrow">Kasir</p><h2>Penjualan dan Retur</h2></div><div class="header-actions"><button class="btn btn-outline-primary" id="refreshCashierProductsBtn"><i class="bi bi-arrow-repeat"></i> Sinkron Produk</button><button class="btn btn-outline-secondary" id="saleCancelBtn"><i class="bi bi-x-circle"></i> Batal</button><button class="btn btn-outline-secondary" id="salePendingBtn"><i class="bi bi-pause-circle"></i> Pending</button><button class="btn btn-primary" id="salePayBtn"><i class="bi bi-cash-coin"></i> Simpan & Bayar</button></div></div>
           <div class="content-grid">
@@ -1604,7 +1608,7 @@
             </section>
           </div>
           <section class="panel mt-3"><div class="panel-header"><h3>Invoice Pending</h3><span class="chip">${state.pendingSales.length} pending</span></div>${pendingSalesTable()}</section>
-          <section class="panel mt-3"><div class="panel-header"><h3>Laporan Pendapatan Kasir</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="sales"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${salesTable(state.sales.slice(0, 12))}</section>`;
+          <section class="panel mt-3"><div class="panel-header"><div><h3>Laporan Pendapatan Kasir</h3><small class="text-secondary">Khusus transaksi penjualan yang dibuat melalui menu Kasir</small></div><button class="btn btn-outline-secondary btn-sm" data-export-table="cashier-sales"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${salesTable(cashierSales.slice(0, 12))}</section>`;
         document.getElementById("saleAddBtn").onclick = addSaleFromSearch;
         document.getElementById("refreshCashierProductsBtn").onclick = () => manualRefreshBackend("products", "produk");
         document.getElementById("saleSku").oninput = selectSaleProductBySku;
@@ -3136,7 +3140,7 @@
         document.querySelectorAll("[data-export-table]").forEach((btn) => {
           btn.onclick = () => {
             const type = btn.dataset.exportTable;
-            const rows = type === "sales" ? salesReportRows(state.sales) : type === "purchases" ? purchaseReportRows(state.purchases) : state.cashTx;
+            const rows = type === "cashier-sales" ? salesReportRows(state.sales.filter(isCashierSale)) : type === "sales" ? salesReportRows(state.sales) : type === "purchases" ? purchaseReportRows(state.purchases) : state.cashTx;
             exportReportPdf(`Laporan ${type}`, rows);
           };
         });

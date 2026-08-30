@@ -390,7 +390,7 @@
     .search-results {
       display: grid;
       gap: 8px;
-      max-height: 180px;
+      max-height: 360px;
       overflow: auto;
     }
     .search-result {
@@ -822,6 +822,7 @@
       let masterSearchSources = {};
       let productDatabaseQuery = "";
       let financeDatabaseQuery = "";
+      let financeProductQuery = "";
       const financeBulkSelection = new Set();
       let salesChart = null;
       let syncTimer = null;
@@ -1346,7 +1347,15 @@
       function searchProducts(query) {
         const q = String(query || "").trim().toLowerCase();
         if (!q) return [];
-        return state.products.filter((p) => p.active && [p.code, p.name, p.category, p.unit].some((value) => String(value).toLowerCase().includes(q))).slice(0, 8);
+        const terms = q.split(/\s+/).filter(Boolean);
+        return state.products
+          .filter((p) => p.active !== false && terms.every((term) => [p.code, p.name, p.category, p.unit].some((value) => String(value || "").toLowerCase().includes(term))))
+          .sort((a, b) => {
+            const aName = String(a.name || "").toLowerCase(); const bName = String(b.name || "").toLowerCase();
+            const aScore = aName === q ? 0 : aName.startsWith(q) ? 1 : aName.includes(q) ? 2 : 3;
+            const bScore = bName === q ? 0 : bName.startsWith(q) ? 1 : bName.includes(q) ? 2 : 3;
+            return aScore - bScore || aName.localeCompare(bName, "id");
+          });
       }
       function personName(list, id) {
         return list.find((item) => item.id === id)?.name || "-";
@@ -1645,7 +1654,9 @@
       function renderSaleSearchResults() {
         const query = document.getElementById("saleSearch").value;
         const rows = searchProducts(query);
-        document.getElementById("saleSearchResults").innerHTML = rows.map((p) => `<button class="search-result" type="button" data-product-id="${p.id}"><strong>${p.name}</strong><br><span class="text-secondary">${p.code} | ${p.category} | Stok ${number.format(p.stock)} ${p.unit} | HPP ${idr.format(p.buy)} | Jual ${idr.format(p.price)}</span></button>`).join("");
+        document.getElementById("saleSearchResults").innerHTML = query.trim()
+          ? `<div class="d-flex justify-content-between align-items-center mb-1"><strong>${number.format(rows.length)} produk ditemukan</strong><span class="small text-secondary">Seluruh hasil terkait ditampilkan</span></div>${rows.map((p) => `<button class="search-result" type="button" data-product-id="${p.id}"><strong>${p.name}</strong><br><span class="text-secondary">${p.code} | ${p.category} | Stok ${number.format(stockAkhirProduk(p))} ${p.unit} | HPP ${idr.format(p.buy)} | Jual 1 ${idr.format(p.price)} | Jual 2 ${idr.format(p.price2)}</span></button>`).join("") || `<div class="text-center text-secondary py-3">Produk terkait tidak ditemukan.</div>`}`
+          : "";
         document.querySelectorAll("[data-product-id]").forEach((btn) => btn.onclick = () => selectSaleProduct(btn.dataset.productId));
       }
       function findProductBySku(value) {
@@ -2051,9 +2062,10 @@
           <div class="audit-box mb-3"><strong>Rincian arus kas:</strong> penerimaan penjualan ${idr.format(flow.salesReceived)} − pembayaran pembelian ${idr.format(flow.purchasesPaid)} + kas masuk ${idr.format(flow.cashIn)} − kas keluar ${idr.format(flow.cashOut)} = <strong>${idr.format(flow.total)}</strong>. Saldo awal/Master Kas tidak dihitung dalam arus kas.</div>
           <section class="panel mb-3"><div class="panel-header"><h3>Pencarian Data Base Hutang-Piutang</h3><span class="chip"><i class="bi bi-search"></i> Cari dan bayar</span></div>
             <div class="row g-3 align-items-end">
-              <div class="col-md-9"><label class="form-label">Nama Orang/Perusahaan atau Nomor Faktur</label><input id="financeDatabaseSearch" list="financeDatabaseNames" class="form-control" value="${esc(financeDatabaseQuery)}" autocomplete="off" placeholder="Ketik nama supplier, perusahaan, pelanggan, atau nomor faktur"><datalist id="financeDatabaseNames">${[...new Set([...debts.flatMap((x) => { const supplier = selectedSupplierData(x.supplierId); return [x.company, x.salesName, supplier.company, supplier.name]; }), ...receivables.flatMap((x) => [x.customerName, personName(state.customers, x.customerId)])].filter(Boolean))].map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist></div>
+              <div class="col-md-6"><label class="form-label">Nama Orang/Perusahaan atau Nomor Faktur</label><input id="financeDatabaseSearch" list="financeDatabaseNames" class="form-control" value="${esc(financeDatabaseQuery)}" autocomplete="off" placeholder="Ketik nama supplier, perusahaan, pelanggan, atau nomor faktur"><datalist id="financeDatabaseNames">${[...new Set([...debts.flatMap((x) => { const supplier = selectedSupplierData(x.supplierId); return [x.company, x.salesName, supplier.company, supplier.name]; }), ...receivables.flatMap((x) => [x.customerName, personName(state.customers, x.customerId)])].filter(Boolean))].map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist></div>
+              <div class="col-md-3"><label class="form-label">Produk</label><input id="financeProductSearch" list="financeProductNames" class="form-control" value="${esc(financeProductQuery)}" autocomplete="off" placeholder="Ketik nama, kode/SKU, atau kategori produk"><datalist id="financeProductNames">${state.products.filter((product) => product.active !== false).map((product) => `<option value="${esc(product.name || product.code)}">${esc(product.code || "")} ${esc(product.category || "")}</option>`).join("")}</datalist></div>
               <div class="col-md-3 d-grid gap-2"><button id="clearFinanceDatabaseSearch" class="btn btn-outline-secondary" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button><button id="bulkFinancePaymentBtn" class="btn btn-primary" type="button" disabled><i class="bi bi-check2-square"></i> Bayar Terpilih</button></div>
-              <div class="col-12"><div id="financeDatabaseSearchResults" class="small text-secondary">Ketik nama atau nomor faktur untuk menampilkan hutang dan piutang aktif.</div></div>
+              <div class="col-12"><div id="financeDatabaseSearchResults" class="small text-secondary">Ketik nama/perusahaan, nomor faktur, atau produk untuk menampilkan hutang dan piutang aktif.</div></div>
               <div class="col-12"><div id="financeBulkSelectionSummary" class="audit-box"><strong>Jumlah Total Terpilih:</strong> Rp 0</div></div>
             </div>
           </section>
@@ -2069,7 +2081,8 @@
           <section class="panel mt-3"><div class="panel-header"><h3>Laporan Transaksi Kas</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="cash"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${cashTable()}</section>`;
         document.getElementById("addCashTxBtn").onclick = openCashTxModal;
         document.getElementById("financeDatabaseSearch").oninput = (event) => { financeDatabaseQuery = event.target.value; renderFinanceDatabaseSearch(); };
-        document.getElementById("clearFinanceDatabaseSearch").onclick = () => { financeDatabaseQuery = ""; financeBulkSelection.clear(); document.getElementById("financeDatabaseSearch").value = ""; renderFinanceDatabaseSearch(); document.getElementById("financeDatabaseSearch").focus(); };
+        document.getElementById("financeProductSearch").oninput = (event) => { financeProductQuery = event.target.value; renderFinanceDatabaseSearch(); };
+        document.getElementById("clearFinanceDatabaseSearch").onclick = () => { financeDatabaseQuery = ""; financeProductQuery = ""; financeBulkSelection.clear(); document.getElementById("financeDatabaseSearch").value = ""; document.getElementById("financeProductSearch").value = ""; renderFinanceDatabaseSearch(); document.getElementById("financeDatabaseSearch").focus(); };
         document.getElementById("bulkFinancePaymentBtn").onclick = openBulkFinancePaymentModal;
         document.getElementById("inputDebtDataBtn").onclick = openDebtInputModal;
         document.getElementById("inputReceivableDataBtn").onclick = openReceivableInputModal;
@@ -2080,30 +2093,44 @@
         document.querySelectorAll("[data-edit-receivable]").forEach((btn) => btn.onclick = () => openReceivableInputModal(btn.dataset.editReceivable));
         document.querySelectorAll("[data-delete-receivable]").forEach((btn) => btn.onclick = () => deleteReceivableRecord(btn.dataset.deleteReceivable));
         bindTableExports();
-        if (financeDatabaseQuery) renderFinanceDatabaseSearch();
+        if (financeDatabaseQuery || financeProductQuery) renderFinanceDatabaseSearch();
+      }
+      function financeRowProductData(row) {
+        return (Array.isArray(row?.items) ? row.items : []).map((item) => {
+          const master = findProduct(item?.productId || item?.sku || item?.code || item?.name);
+          const label = item?.name || master?.name || item?.product || item?.sku || item?.code || "";
+          return { label, tokens: [label, item?.sku, item?.code, item?.productId, master?.code, master?.name, master?.category, master?.unit].map((value) => String(value || "").toLowerCase()) };
+        });
       }
       function renderFinanceDatabaseSearch() {
         const input = document.getElementById("financeDatabaseSearch");
         const target = document.getElementById("financeDatabaseSearchResults");
         if (!input || !target) return;
         const query = String(financeDatabaseQuery || input.value || "").trim().toLowerCase();
-        if (!query) {
-          target.innerHTML = "Ketik nama atau nomor faktur untuk menampilkan hutang dan piutang aktif.";
+        const productQuery = String(financeProductQuery || document.getElementById("financeProductSearch")?.value || "").trim().toLowerCase();
+        if (!query && !productQuery) {
+          target.innerHTML = "Ketik nama/perusahaan, nomor faktur, atau produk untuk menampilkan hutang dan piutang aktif.";
           updateBulkFinancePaymentButton();
           return;
         }
         const debtMatches = state.purchases.filter((row) => {
           if (toNumber(row.due) <= 0) return false;
           const supplier = selectedSupplierData(row.supplierId);
-          return [row.invoiceNo, row.salesName, row.company, row.whatsapp, supplier.name, supplier.company, supplier.phone].some((value) => String(value || "").toLowerCase().includes(query));
-        }).map((row) => ({ type: "Hutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.company || selectedSupplierData(row.supplierId).company || row.salesName || selectedSupplierData(row.supplierId).name || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due }));
+          const products = financeRowProductData(row);
+          const relationMatch = !query || [row.invoiceNo, row.salesName, row.company, row.whatsapp, supplier.name, supplier.company, supplier.phone].some((value) => String(value || "").toLowerCase().includes(query));
+          const productMatch = !productQuery || products.some((product) => product.tokens.some((value) => value.includes(productQuery)));
+          return relationMatch && productMatch;
+        }).map((row) => ({ type: "Hutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.company || selectedSupplierData(row.supplierId).company || row.salesName || selectedSupplierData(row.supplierId).name || "-", products: financeRowProductData(row).map((product) => product.label).filter(Boolean).join(", ") || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due }));
         const receivableMatches = state.sales.filter((row) => {
           if (toNumber(row.due) <= 0) return false;
           const customer = state.customers.find((item) => item.id === row.customerId) || {};
-          return [row.invoiceNo, row.customerName, row.customerWhatsapp, customer.name, customer.phone, customer.address].some((value) => String(value || "").toLowerCase().includes(query));
-        }).map((row) => ({ type: "Piutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.customerName || personName(state.customers, row.customerId), date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due }));
+          const products = financeRowProductData(row);
+          const relationMatch = !query || [row.invoiceNo, row.customerName, row.customerWhatsapp, customer.name, customer.phone, customer.address].some((value) => String(value || "").toLowerCase().includes(query));
+          const productMatch = !productQuery || products.some((product) => product.tokens.some((value) => value.includes(productQuery)));
+          return relationMatch && productMatch;
+        }).map((row) => ({ type: "Piutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.customerName || personName(state.customers, row.customerId), products: financeRowProductData(row).map((product) => product.label).filter(Boolean).join(", ") || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due }));
         const matches = [...debtMatches, ...receivableMatches];
-        target.innerHTML = matches.length ? `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th><i class="bi bi-check2-square"></i></th><th>Jenis</th><th>Nama/Perusahaan</th><th>No. Faktur</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="text-end">Total</th><th class="text-end">Sisa</th><th></th></tr></thead><tbody>${matches.map((row) => { const selectionKey = `${row.type === "Hutang" ? "debt" : "receivable"}:${row.id}`; return `<tr><td><input class="form-check-input" type="checkbox" data-finance-bulk-check="${selectionKey}" ${financeBulkSelection.has(selectionKey) ? "checked" : ""} aria-label="Pilih ${esc(row.invoice)}"></td><td><span class="soft-tag">${row.type}</span></td><td><strong>${esc(row.name)}</strong></td><td>${esc(row.invoice)}</td><td>${displayDate(row.date)}</td><td>${displayDate(row.dueDate)}</td><td class="text-end">${idr.format(row.total || 0)}</td><td class="text-end fw-bold">${idr.format(row.remaining || 0)}</td><td class="text-end"><button class="btn btn-sm btn-primary" data-finance-search-pay="${row.type === "Hutang" ? "debt" : "receivable"}" data-finance-search-id="${row.id}"><i class="bi bi-cash-coin"></i> Bayar</button></td></tr>`; }).join("")}</tbody></table></div>` : `<div class="text-center text-secondary py-3">Data hutang/piutang aktif tidak ditemukan.</div>`;
+        target.innerHTML = matches.length ? `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th><i class="bi bi-check2-square"></i></th><th>Jenis</th><th>Nama/Perusahaan</th><th>Produk</th><th>No. Faktur</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="text-end">Total</th><th class="text-end">Sisa</th><th></th></tr></thead><tbody>${matches.map((row) => { const selectionKey = `${row.type === "Hutang" ? "debt" : "receivable"}:${row.id}`; return `<tr><td><input class="form-check-input" type="checkbox" data-finance-bulk-check="${selectionKey}" ${financeBulkSelection.has(selectionKey) ? "checked" : ""} aria-label="Pilih ${esc(row.invoice)}"></td><td><span class="soft-tag">${row.type}</span></td><td><strong>${esc(row.name)}</strong></td><td>${esc(row.products)}</td><td>${esc(row.invoice)}</td><td>${displayDate(row.date)}</td><td>${displayDate(row.dueDate)}</td><td class="text-end">${idr.format(row.total || 0)}</td><td class="text-end fw-bold">${idr.format(row.remaining || 0)}</td><td class="text-end"><button class="btn btn-sm btn-primary" data-finance-search-pay="${row.type === "Hutang" ? "debt" : "receivable"}" data-finance-search-id="${row.id}"><i class="bi bi-cash-coin"></i> Bayar</button></td></tr>`; }).join("")}</tbody></table></div>` : `<div class="text-center text-secondary py-3">Data hutang/piutang aktif tidak ditemukan.</div>`;
         document.querySelectorAll("[data-finance-search-pay]").forEach((button) => button.onclick = () => openPaymentModal(button.dataset.financeSearchPay, button.dataset.financeSearchId));
         document.querySelectorAll("[data-finance-bulk-check]").forEach((checkbox) => checkbox.onchange = () => { if (checkbox.checked) financeBulkSelection.add(checkbox.dataset.financeBulkCheck); else financeBulkSelection.delete(checkbox.dataset.financeBulkCheck); updateBulkFinancePaymentButton(); });
         updateBulkFinancePaymentButton();

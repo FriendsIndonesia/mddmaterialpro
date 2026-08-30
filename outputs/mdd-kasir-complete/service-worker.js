@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v70-sheet-edit-safety";
+const CACHE_NAME = "mdd-material-pro-v71-safe-sync-protocol";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

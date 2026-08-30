@@ -2062,7 +2062,7 @@
           <div class="audit-box mb-3"><strong>Rincian arus kas:</strong> penerimaan penjualan ${idr.format(flow.salesReceived)} − pembayaran pembelian ${idr.format(flow.purchasesPaid)} + kas masuk ${idr.format(flow.cashIn)} − kas keluar ${idr.format(flow.cashOut)} = <strong>${idr.format(flow.total)}</strong>. Saldo awal/Master Kas tidak dihitung dalam arus kas.</div>
           <section class="panel mb-3"><div class="panel-header"><h3>Pencarian Data Base Hutang-Piutang</h3><span class="chip"><i class="bi bi-search"></i> Cari dan bayar</span></div>
             <div class="row g-3 align-items-end">
-              <div class="col-md-6"><label class="form-label">Nama Orang/Perusahaan atau Nomor Faktur</label><input id="financeDatabaseSearch" list="financeDatabaseNames" class="form-control" value="${esc(financeDatabaseQuery)}" autocomplete="off" placeholder="Ketik nama supplier, perusahaan, pelanggan, atau nomor faktur"><datalist id="financeDatabaseNames">${[...new Set([...debts.flatMap((x) => { const supplier = selectedSupplierData(x.supplierId); return [x.company, x.salesName, supplier.company, supplier.name]; }), ...receivables.flatMap((x) => [x.customerName, personName(state.customers, x.customerId)])].filter(Boolean))].map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist></div>
+              <div class="col-md-6"><label class="form-label">Nama Orang/Perusahaan atau Nomor Faktur</label><input id="financeDatabaseSearch" class="form-control" value="${esc(financeDatabaseQuery)}" autocomplete="off" placeholder="Ketik nama supplier, perusahaan, pelanggan, atau nomor faktur"><div id="financeNameSuggestions" class="search-results mt-2"></div></div>
               <div class="col-md-3"><label class="form-label">Produk</label><input id="financeProductSearch" list="financeProductNames" class="form-control" value="${esc(financeProductQuery)}" autocomplete="off" placeholder="Ketik nama, kode/SKU, atau kategori produk"><datalist id="financeProductNames">${state.products.filter((product) => product.active !== false).map((product) => `<option value="${esc(product.name || product.code)}">${esc(product.code || "")} ${esc(product.category || "")}</option>`).join("")}</datalist></div>
               <div class="col-md-3 d-grid gap-2"><button id="clearFinanceDatabaseSearch" class="btn btn-outline-secondary" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button><button id="bulkFinancePaymentBtn" class="btn btn-primary" type="button" disabled><i class="bi bi-check2-square"></i> Bayar Terpilih</button></div>
               <div class="col-12"><div id="financeDatabaseSearchResults" class="small text-secondary">Ketik nama/perusahaan, nomor faktur, atau produk untuk menampilkan hutang dan piutang aktif.</div></div>
@@ -2102,12 +2102,54 @@
           return { label, tokens: [label, item?.sku, item?.code, item?.productId, master?.code, master?.name, master?.category, master?.unit].map((value) => String(value || "").toLowerCase()) };
         });
       }
+      function financeSearchTerms(value) {
+        return String(value || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+      }
+      function financeTextMatches(values, query) {
+        const terms = financeSearchTerms(query);
+        if (!terms.length) return true;
+        const haystack = values.map((value) => String(value || "").toLowerCase()).join(" ");
+        return terms.every((term) => haystack.includes(term));
+      }
+      function financeRelationOptions() {
+        const debtNames = state.purchases.flatMap((row) => {
+          const supplier = selectedSupplierData(row.supplierId);
+          return [row.company, row.salesName, supplier.company, supplier.name];
+        });
+        const receivableNames = state.sales.flatMap((row) => {
+          const customer = state.customers.find((item) => item.id === row.customerId) || {};
+          return [row.customerName, customer.name];
+        });
+        const masterNames = [
+          ...state.suppliers.flatMap((row) => [row.company, row.name]),
+          ...state.customers.map((row) => row.name)
+        ];
+        return [...new Set([...debtNames, ...receivableNames, ...masterNames].map((name) => String(name || "").trim()).filter(Boolean))]
+          .sort((a, b) => a.localeCompare(b, "id"));
+      }
+      function renderFinanceNameSuggestions(query) {
+        const target = document.getElementById("financeNameSuggestions");
+        if (!target) return;
+        const terms = financeSearchTerms(query);
+        if (!terms.length) { target.innerHTML = ""; return; }
+        const matches = financeRelationOptions().filter((name) => financeTextMatches([name], query));
+        target.innerHTML = matches.length
+          ? `<div class="px-2 py-1 small text-secondary">${matches.length} nama ditemukan</div>${matches.map((name) => `<button type="button" class="search-result-item" data-finance-name="${esc(name)}"><strong>${esc(name)}</strong></button>`).join("")}`
+          : `<div class="px-2 py-2 small text-secondary">Nama tidak ditemukan pada database Supplier, Customer, Hutang, atau Piutang.</div>`;
+        target.querySelectorAll("[data-finance-name]").forEach((button) => button.onclick = () => {
+          financeDatabaseQuery = button.dataset.financeName;
+          const input = document.getElementById("financeDatabaseSearch");
+          if (input) input.value = financeDatabaseQuery;
+          renderFinanceDatabaseSearch();
+        });
+      }
       function renderFinanceDatabaseSearch() {
         const input = document.getElementById("financeDatabaseSearch");
         const target = document.getElementById("financeDatabaseSearchResults");
         if (!input || !target) return;
         const query = String(financeDatabaseQuery || input.value || "").trim().toLowerCase();
         const productQuery = String(financeProductQuery || document.getElementById("financeProductSearch")?.value || "").trim().toLowerCase();
+        renderFinanceNameSuggestions(query);
         if (!query && !productQuery) {
           target.innerHTML = "Ketik nama/perusahaan, nomor faktur, atau produk untuk menampilkan hutang dan piutang aktif.";
           updateBulkFinancePaymentButton();
@@ -2117,7 +2159,7 @@
           if (toNumber(row.due) <= 0) return false;
           const supplier = selectedSupplierData(row.supplierId);
           const products = financeRowProductData(row);
-          const relationMatch = !query || [row.invoiceNo, row.salesName, row.company, row.whatsapp, supplier.name, supplier.company, supplier.phone].some((value) => String(value || "").toLowerCase().includes(query));
+          const relationMatch = financeTextMatches([row.invoiceNo, row.salesName, row.company, row.whatsapp, supplier.name, supplier.company, supplier.phone], query);
           const productMatch = !productQuery || products.some((product) => product.tokens.some((value) => value.includes(productQuery)));
           return relationMatch && productMatch;
         }).map((row) => ({ type: "Hutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.company || selectedSupplierData(row.supplierId).company || row.salesName || selectedSupplierData(row.supplierId).name || "-", products: financeRowProductData(row).map((product) => product.label).filter(Boolean).join(", ") || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due }));
@@ -2125,7 +2167,7 @@
           if (toNumber(row.due) <= 0) return false;
           const customer = state.customers.find((item) => item.id === row.customerId) || {};
           const products = financeRowProductData(row);
-          const relationMatch = !query || [row.invoiceNo, row.customerName, row.customerWhatsapp, customer.name, customer.phone, customer.address].some((value) => String(value || "").toLowerCase().includes(query));
+          const relationMatch = financeTextMatches([row.invoiceNo, row.customerName, row.customerWhatsapp, customer.name, customer.phone, customer.address], query);
           const productMatch = !productQuery || products.some((product) => product.tokens.some((value) => value.includes(productQuery)));
           return relationMatch && productMatch;
         }).map((row) => ({ type: "Piutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.customerName || personName(state.customers, row.customerId), products: financeRowProductData(row).map((product) => product.label).filter(Boolean).join(", ") || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due }));

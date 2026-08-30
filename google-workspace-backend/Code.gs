@@ -58,9 +58,18 @@ function doPost(e) {
     // edited directly in Google Sheets instead of replacing every table.
     let preferCanonicalFinancialTables = { purchases: false, sales: false };
     if (payload.changes && payload.changes.tables) {
-      const purchaseDeletes = payload.changes.tables.purchases && payload.changes.tables.purchases.deletes || [];
-      const salesDeletes = payload.changes.tables.sales && payload.changes.tables.sales.deletes || [];
-      preferCanonicalFinancialTables = { purchases: purchaseDeletes.length > 0, sales: salesDeletes.length > 0 };
+      const purchaseChange = payload.changes.tables.purchases || {};
+      const salesChange = payload.changes.tables.sales || {};
+      const purchaseDeletes = purchaseChange.deletes || [];
+      const salesDeletes = salesChange.deletes || [];
+      const purchaseUpserts = purchaseChange.upserts || [];
+      const salesUpserts = salesChange.upserts || [];
+      // Perubahan transaksi yang benar-benar dikirim aplikasi menjadi sumber
+      // utama. Tanpa delta transaksi, edit manual pada ledger tetap dipelihara.
+      preferCanonicalFinancialTables = {
+        purchases: purchaseDeletes.length > 0 || purchaseUpserts.length > 0,
+        sales: salesDeletes.length > 0 || salesUpserts.length > 0
+      };
       TABLES.forEach((table) => applyTableChanges_(ss, table, payload.changes.tables[table.key]));
     } else {
       // Backward-compatible import: merge rows and never delete sheet-only data.
@@ -232,17 +241,33 @@ function syncFinancialLedgerSheets_(ss, preferCanonical) {
 function writeLedgerSheet_(ss, sheetName, rows, kind) {
   const headers = kind === "debt" ? ["Tanggal", "Jatuh Tempo", "No. Faktur", "Supplier", "Hutang Aktif", "Bayar", "Retur", "Sisa Hutang", "Metode", "Catatan"] : ["Tanggal", "Jatuh Tempo", "No. Faktur", "Pelanggan", "Piutang Aktif", "Bayar", "Retur", "Sisa Piutang", "Metode", "Catatan"];
   const sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
-  sheet.clearContents();
-  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   const activeRows = (rows || []).filter((row) => Number(row.due || 0) > 0 || Number(row.total || 0) > 0);
-  if (activeRows.length) {
-    const values = activeRows.map((row) => [ledgerDateValue_(row.date), ledgerDateValue_(row.dueDate), row.invoiceNo || row.id, kind === "debt" ? (row.salesName || row.company || "-") : (row.customerName || "-"), Number(row.total || 0), Number(row.paid || 0), Number(row.returnAmount || 0), Number(row.due || 0), row.method || "Tempo", row.note || ""]);
+  const values = activeRows.map((row) => [ledgerDateValue_(row.date), ledgerDateValue_(row.dueDate), row.invoiceNo || row.id, kind === "debt" ? (row.salesName || row.company || "-") : (row.customerName || "-"), Number(row.total || 0), Number(row.paid || 0), Number(row.returnAmount || 0), Number(row.due || 0), row.method || "Tempo", row.note || ""]);
+  const currentHeaders = sheet.getRange(1, 1, 1, headers.length).getDisplayValues()[0];
+  if (JSON.stringify(currentHeaders) !== JSON.stringify(headers)) sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  const currentRows = readLedgerRows_(ss, sheetName, kind);
+  const currentSignature = currentRows.map((row) => ledgerRowSignature_(row, kind)).sort();
+  const wantedSignature = activeRows.map((row) => ledgerRowSignature_(row, kind)).sort();
+  // Hindari clear/setValues berulang saat isi sama. Ini membuat user dapat
+  // mengetik langsung di Sheet tanpa sel tiba-tiba di-reset oleh auto-sync.
+  if (JSON.stringify(currentSignature) === JSON.stringify(wantedSignature)) return;
+  if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow() - 1, Math.max(sheet.getLastColumn(), headers.length)).clearContent();
+  if (values.length) {
     sheet.getRange(2, 1, values.length, headers.length).setValues(values);
     sheet.getRange(2, 1, values.length, 2).setNumberFormat("dd/MM/yyyy");
     sheet.getRange(2, 5, values.length, 4).setNumberFormat("#,##0");
   }
   sheet.setFrozenRows(1);
   sheet.autoResizeColumns(1, headers.length);
+}
+
+function ledgerRowSignature_(row, kind) {
+  return JSON.stringify([
+    ledgerDate_(row.date), ledgerDate_(row.dueDate), String(row.invoiceNo || row.id || "").trim(),
+    String(kind === "debt" ? (row.salesName || row.company || "-") : (row.customerName || "-")).trim(),
+    Number(row.total || 0), Number(row.paid || 0), Number(row.returnAmount || 0), Number(row.due || 0),
+    String(row.method || "Tempo"), String(row.note || "")
+  ]);
 }
 
 function ledgerDateValue_(value) {

@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v68-finance-ledger-search";
+const CACHE_NAME = "mdd-material-pro-v69-finance-checkbox-search";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

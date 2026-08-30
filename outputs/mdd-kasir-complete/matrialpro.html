@@ -1250,9 +1250,9 @@
           Object.assign(state, { sales:state.sales.filter((row) => !saleIds.has(row.id)), pendingSales:[], payments:state.payments.filter((payment) => !saleIds.has(payment.refId)), returns:state.returns.filter((x) => x.module !== "Penjualan") });
         }
         if (view === "purchaseView") {
-          const purchaseIds = new Set(state.purchases.map((row) => row.id));
+          const purchaseIds = new Set(state.purchases.filter(isPurchaseTransaction).map((row) => row.id));
           state.deletionTombstones.purchases = [...new Set([...(state.deletionTombstones.purchases || []), ...purchaseIds])];
-          Object.assign(state, { purchases:[], pendingPurchases:[], payments:state.payments.filter((payment) => !purchaseIds.has(payment.refId)), returns:state.returns.filter((x) => x.module !== "Pembelian") });
+          Object.assign(state, { purchases:state.purchases.filter((row) => !purchaseIds.has(row.id)), pendingPurchases:[], payments:state.payments.filter((payment) => !purchaseIds.has(payment.refId)), returns:state.returns.filter((x) => x.module !== "Pembelian") });
         }
         if (view === "financeView") Object.assign(state, { cashTx:[], payments:[] });
         if (view === "dashboardView" || view === "reportsView") {
@@ -1385,6 +1385,9 @@
         return local ? `${local[3]}-${local[2]}-${local[1]}` === today() : false;
       }
       function isCashierSale(row) {
+        return Boolean(row && Array.isArray(row.items) && row.items.length > 0);
+      }
+      function isPurchaseTransaction(row) {
         return Boolean(row && Array.isArray(row.items) && row.items.length > 0);
       }
       function nextInvoiceNo() {
@@ -1856,6 +1859,7 @@
 
       function renderPurchase() {
         ensurePurchaseDraft();
+        const purchaseTransactions = state.purchases.filter(isPurchaseTransaction);
         document.getElementById("purchaseView").innerHTML = `
           <div class="page-header"><div><p class="eyebrow">Purchase</p><h2>Pembelian ke Supplier</h2></div><div class="header-actions"><button class="btn btn-outline-secondary" id="purchaseCancelBtn"><i class="bi bi-x-circle"></i> Batal</button><button class="btn btn-outline-secondary" id="purchasePendingBtn"><i class="bi bi-pause-circle"></i> Pending</button><button class="btn btn-primary" id="purchasePayBtn"><i class="bi bi-cash-coin"></i> Simpan & Bayar</button></div></div>
           <div class="content-grid">
@@ -1893,7 +1897,7 @@
             ${smallModule("Cetak Price Tag", "Cetak label harga dan barcode produk.", "printPriceTags", "bi-tags")}
             ${smallModule("Produksi Paket", "Gabungkan barang menjadi paket penjualan.", "producePackage", "bi-boxes")}
           </div>
-          <section class="panel mt-3"><div class="panel-header"><h3>Laporan Pembelian</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="purchases"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${purchaseTable(state.purchases.slice(0, 12))}</section>`;
+          <section class="panel mt-3"><div class="panel-header"><div><h3>Laporan Pembelian</h3><small class="text-secondary">Khusus transaksi pembelian barang yang dibuat melalui menu Purchase</small></div><button class="btn btn-outline-secondary btn-sm" data-export-table="purchase-transactions"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${purchaseTable(purchaseTransactions.slice(0, 12))}</section>`;
         updatePurchaseSupplierFields();
         document.getElementById("purchaseAddBtn").onclick = addPurchaseFromSearch;
         document.getElementById("purchaseSearch").oninput = renderPurchaseSearchResults;
@@ -1911,7 +1915,7 @@
         document.getElementById("purchasePendingBtn").onclick = pendingPurchase;
         document.getElementById("purchasePayBtn").onclick = () => checkoutPurchase(true);
         document.getElementById("purchaseReturnBtn").onclick = () => openReturnModal("Pembelian");
-        document.getElementById("exportPurchasePdf").onclick = () => exportReportPdf("Laporan Pembelian", purchaseReportRows(state.purchases));
+        document.getElementById("exportPurchasePdf").onclick = () => exportReportPdf("Laporan Pembelian", purchaseReportRows(purchaseTransactions));
         document.getElementById("jumpStockReport").onclick = () => setView("reportsView");
         document.getElementById("printPriceTags").onclick = printPriceTags;
         document.getElementById("producePackage").onclick = producePackage;
@@ -3140,7 +3144,7 @@
         document.querySelectorAll("[data-export-table]").forEach((btn) => {
           btn.onclick = () => {
             const type = btn.dataset.exportTable;
-            const rows = type === "cashier-sales" ? salesReportRows(state.sales.filter(isCashierSale)) : type === "sales" ? salesReportRows(state.sales) : type === "purchases" ? purchaseReportRows(state.purchases) : state.cashTx;
+            const rows = type === "cashier-sales" ? salesReportRows(state.sales.filter(isCashierSale)) : type === "purchase-transactions" ? purchaseReportRows(state.purchases.filter(isPurchaseTransaction)) : type === "sales" ? salesReportRows(state.sales) : type === "purchases" ? purchaseReportRows(state.purchases) : state.cashTx;
             exportReportPdf(`Laporan ${type}`, rows);
           };
         });

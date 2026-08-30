@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v62-cashier-sales-only";
+const CACHE_NAME = "mdd-material-pro-v63-purchase-transactions-only";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

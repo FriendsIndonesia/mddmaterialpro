@@ -13,6 +13,7 @@
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="conversion-utils.js"></script>
   <style>
     :root {
       --sidebar: #17212b;
@@ -791,7 +792,7 @@
         ["historyView", "bi-clock-history", "History Transaksi"]
       ];
       const payMethods = ["Cash", "Transfer", "Debit Card", "Qris", "Credit Card", "Piutang", "Deposit", "Bonus", "Free"];
-      const unitOptions = ["Pcs", "Lbr", "Batang", "Zak", "Liter", "Dus", "Rol", "Klg", "Pl", "Gln", "Psg", "m", "m²", "m³", "1/4", "SI", "Kg", "Ton"];
+      const unitOptions = ["Pcs", "Lbr", "Batang", "Zak", "Liter", "Dus", "Rol", "Klg", "Pl", "Gln", "Psg", "Meter", "M2", "M3", "m", "m²", "m³", "1/4", "SI", "Kg", "Ton"];
       const materialCategories = ["Pondasi dan Beton", "Dinding dan Penyimpanan", "Struktur Rangka", "Penutup Atap", "Plafon", "Penutup Lantai dan Dinding", "Pengecatan", "Kaca dan Pelindung", "Sanitari dan Plambing", "Pengikat dan Perangkat Keras"];
       const masterAccessOptions = ["Master Pelanggan", "Master Supplier", "Master Kategori", "Master Barang", "Master Paket", "Stok Opname", "Master Cetak Barcode"];
       const defaultAccessRules = {
@@ -912,9 +913,14 @@
           const rawStockOut = toNumber(product.stockOut);
           const looksLikeOldComputedCache = product.stockAwal === undefined && rawStockAkhir === rawStock && (rawStockIn > 0 || rawStockOut > 0);
           product.stockAwal = toNumber(product.stockAwal ?? (looksLikeOldComputedCache ? Math.max(0, rawStock - rawStockIn + rawStockOut) : rawStock));
-          ["buy", "price", "price2", "stockIn", "stockOut", "stock", "stockAkhir", "min"].forEach((field) => {
+          ["buy", "price", "price2", "secondaryBuy", "secondaryPrice", "secondaryPrice2", "conversionValue", "stockIn", "stockOut", "stock", "stockAkhir", "min"].forEach((field) => {
             product[field] = toNumber(product[field]);
           });
+          product.primaryUnit = product.primaryUnit || product.unit || "Pcs";
+          product.unit = product.primaryUnit;
+          product.secondaryUnit = String(product.secondaryUnit || "").trim();
+          if (!product.secondaryUnit) product.conversionValue = 0;
+          product.secondaryBuy = product.secondaryUnit && product.conversionValue > 0 ? MDDConversion.calculateSecondaryCost(product.buy, product.conversionValue) : 0;
           product.stockIn = rawStockIn;
           product.stockOut = rawStockOut;
           product.stock = Math.max(0, hasExplicitStockAkhir ? rawStockAkhir : product.stockAwal + product.stockIn - product.stockOut);
@@ -1328,6 +1334,7 @@
             <div><p class="eyebrow">Produk</p><h2>Database Produk Material</h2><div class="text-secondary fw-semibold mt-1">Bersumber dari form input Master Barang.</div></div>
             <div class="header-actions">
               ${canAccessMaster("Master Barang") ? `<button id="addProductFromProductsBtn" class="btn btn-primary"><i class="bi bi-plus-lg"></i> Barang</button>` : ""}
+              ${canAccessMaster("Master Barang") ? `<button id="convertProductBtn" class="btn btn-outline-primary"><i class="bi bi-arrow-left-right"></i> Konversi Produk</button>` : ""}
               <button id="exportProductsBtn" class="btn btn-outline-primary"><i class="bi bi-filetype-pdf"></i> PDF Produk</button>
             </div>
           </div>
@@ -1346,6 +1353,8 @@
         document.getElementById("clearProductDatabaseSearch").onclick = () => { productDatabaseQuery = ""; document.getElementById("productDatabaseSearch").value = ""; renderProductDatabaseSearch(); document.getElementById("productDatabaseSearch").focus(); };
         const addBtn = document.getElementById("addProductFromProductsBtn");
         if (addBtn) addBtn.onclick = openProductModal;
+        const convertBtn = document.getElementById("convertProductBtn");
+        if (convertBtn) convertBtn.onclick = openProductConversionModal;
         bindProductActions();
         if (productDatabaseQuery) renderProductDatabaseSearch();
       }
@@ -1354,7 +1363,7 @@
         const target = document.getElementById("productDatabaseSearchResult");
         if (!input || !target) return;
         const query = String(productDatabaseQuery || input.value || "").trim().toLowerCase();
-        const matches = query ? state.products.filter((product) => product.active !== false && [product.code, product.name, product.category, product.unit].some((value) => String(value || "").toLowerCase().includes(query))).slice(0, 100) : [];
+        const matches = query ? state.products.filter((product) => product.active !== false && [product.code, product.secondaryBarcode, product.name, product.category, product.unit, product.secondaryUnit].some((value) => String(value || "").toLowerCase().includes(query))).slice(0, 100) : [];
         target.innerHTML = productsTable(matches, { actions: canAccessMaster("Master Barang") });
         bindProductActions();
       }
@@ -1392,6 +1401,20 @@
         if (product.stockAwal !== undefined || product.stockIn !== undefined || product.stockOut !== undefined) return Math.max(0, toNumber(product.stockAwal) + toNumber(product.stockIn) - toNumber(product.stockOut));
         return toNumber(product.stock ?? product.stockAkhir ?? 0);
       }
+      function productHasConversion(product) { return Boolean(product?.secondaryUnit && toNumber(product?.conversionValue) > 0); }
+      function productUnitOptions(product, selected = "") {
+        const units = [product?.primaryUnit || product?.unit, productHasConversion(product) ? product.secondaryUnit : ""].filter(Boolean);
+        return units.map((unit) => `<option value="${esc(unit)}" ${String(unit).toLowerCase() === String(selected || units[0]).toLowerCase() ? "selected" : ""}>${esc(unit)}</option>`).join("");
+      }
+      function productQuantityInPrimary(product, quantity, unit) { return MDDConversion.quantityInPrimary(quantity, unit, product || {}); }
+      function productHppForUnit(product, unit) {
+        return productHasConversion(product) && String(unit).toLowerCase() === String(product.secondaryUnit).toLowerCase() ? MDDConversion.calculateSecondaryCost(product.buy, product.conversionValue) : toNumber(product.buy);
+      }
+      function productPriceForUnit(product, unit, tier = 1) {
+        const secondary = productHasConversion(product) && String(unit).toLowerCase() === String(product.secondaryUnit).toLowerCase();
+        return secondary ? toNumber(tier === 2 ? product.secondaryPrice2 : product.secondaryPrice) : toNumber(tier === 2 ? product.price2 : product.price);
+      }
+      function conversionLabel(product) { return productHasConversion(product) ? `1 ${product.primaryUnit || product.unit} = ${number.format(product.conversionValue)} ${product.secondaryUnit}` : "Satu satuan (tanpa konversi)"; }
       function findProduct(idOrCode) {
         const q = String(idOrCode || "").toLowerCase();
         if (!q) return null;
@@ -1402,7 +1425,7 @@
         if (!q) return [];
         const terms = q.split(/\s+/).filter(Boolean);
         return state.products
-          .filter((p) => p.active !== false && terms.every((term) => [p.code, p.name, p.category, p.unit].some((value) => String(value || "").toLowerCase().includes(term))))
+          .filter((p) => p.active !== false && terms.every((term) => [p.code, p.secondaryBarcode, p.name, p.category, p.unit, p.secondaryUnit].some((value) => String(value || "").toLowerCase().includes(term))))
           .sort((a, b) => {
             const aName = String(a.name || "").toLowerCase(); const bName = String(b.name || "").toLowerCase();
             const aScore = aName === q ? 0 : aName.startsWith(q) ? 1 : aName.includes(q) ? 2 : 3;
@@ -1496,13 +1519,13 @@
         selectedPurchaseProductId = "";
       }
       function cartTotal(cart) {
-        return cart.reduce((sum, item) => sum + Math.max(0, (item.qty * item.price) - (item.discount || 0)), 0);
+        return MDDConversion.roundMoney(cart.reduce((sum, item) => sum + Math.max(0, MDDConversion.moneyMultiply(item.qty, item.price) - toNumber(item.discount)), 0));
       }
       function saleGrandTotal() {
-        return cartTotal(activeCart) + Number(saleDraft.ongkir || 0) + Number(saleDraft.bankCharge || 0);
+        return MDDConversion.roundMoney(cartTotal(activeCart) + Number(saleDraft.ongkir || 0) + Number(saleDraft.bankCharge || 0));
       }
       function purchaseGrandTotal() {
-        return cartTotal(purchaseCart) + Number(purchaseDraft.ongkir || 0) + Number(purchaseDraft.bankCharge || 0);
+        return MDDConversion.roundMoney(cartTotal(purchaseCart) + Number(purchaseDraft.ongkir || 0) + Number(purchaseDraft.bankCharge || 0));
       }
       function isCashMethod(method) {
         return String(method || "").trim().toLowerCase() === "cash";
@@ -1515,16 +1538,19 @@
       }
       function addCartLine(cart, product, qty = 1, mode = "sale", overrides = {}) {
         if (!product) return toast("Produk tidak ditemukan.");
-        if (mode === "sale" && product.stock < qty) return toast("Stok tidak cukup.");
-        const found = cart.find((line) => line.productId === product.id);
+        const unit = overrides.unit || product.primaryUnit || product.unit;
+        const primaryQty = productQuantityInPrimary(product, qty, unit);
+        if (mode === "sale" && stockAkhirProduk(product) + 0.000001 < primaryQty) return toast(`Stok tidak cukup. Tersedia ${number.format(stockAkhirProduk(product))} ${product.primaryUnit || product.unit}.`);
+        const found = cart.find((line) => line.productId === product.id && String(line.unit).toLowerCase() === String(unit).toLowerCase());
         const price = Number(overrides.price ?? (mode === "sale" ? product.price : product.buy));
         if (found) {
           found.qty += qty;
+          found.primaryQty = productQuantityInPrimary(product, found.qty, unit);
           found.discount = 0;
           found.price = price;
           Object.assign(found, overrides);
         } else {
-          cart.push({ id: uid("LINE"), productId: product.id, name: product.name, unit: overrides.unit || product.unit, qty, buy: Number(overrides.buy ?? product.buy), price, price1: Number(overrides.price1 ?? product.price), price2: Number(overrides.price2 ?? Math.round(product.price * 1.05)), discount: 0, note: "", ...overrides });
+          cart.push({ id: uid("LINE"), productId: product.id, name: product.name, unit, qty, primaryQty, buy: Number(overrides.buy ?? product.buy), price, price1: Number(overrides.price1 ?? product.price), price2: Number(overrides.price2 ?? Math.round(product.price * 1.05)), discount: 0, note: "", ...overrides });
         }
         renderAll();
       }
@@ -1545,7 +1571,7 @@
       function bindCartEvents(container, cart, prefix) {
         container.querySelectorAll(".cart-row").forEach((row) => {
           const item = cart.find((line) => line.id === row.dataset.id);
-          row.querySelector(".cart-qty").addEventListener("input", (e) => { item.qty = Math.max(1, Number(e.target.value || 1)); renderAll(); });
+          row.querySelector(".cart-qty").addEventListener("input", (e) => { item.qty = Math.max(0.000001, Number(e.target.value || 1)); item.primaryQty = productQuantityInPrimary(findProduct(item.productId), item.qty, item.unit); renderAll(); });
           row.querySelector(".cart-price").addEventListener("input", (e) => { item.price = Math.max(0, Number(e.target.value || 0)); renderAll(); });
           row.querySelector(".cart-note").addEventListener("input", (e) => { item.note = e.target.value; });
         });
@@ -1654,7 +1680,7 @@
                 <div class="col-md-8"><label class="form-label">Alamat Pelanggan</label><input id="saleCustomerAddress" class="form-control" value="${esc(saleDraft.customerAddress)}"></div>
                 <div class="col-md-4"><label class="form-label">Whatsapp</label><input id="saleCustomerWhatsapp" class="form-control" value="${esc(saleDraft.customerWhatsapp)}"></div>
                 <div class="col-md-4"><label class="form-label">Barcode/SKU</label><input id="saleSku" value="${esc(saleProductDraft.sku)}" class="form-control" inputmode="numeric" autocomplete="off" placeholder="Ketik atau scan Code dari Products"></div>
-                <div class="col-md-4"><label class="form-label">Satuan Produk</label><input id="saleUnit" value="${esc(saleProductDraft.unit)}" class="form-control" readonly placeholder="Otomatis dari Products.unit"></div>
+                <div class="col-md-4"><label class="form-label">Satuan Produk</label><select id="saleUnit" class="form-select" ${selectedSaleProductId ? "" : "disabled"}>${selectedSaleProductId ? productUnitOptions(findProduct(selectedSaleProductId), saleProductDraft.unit) : `<option>Pilih produk dahulu</option>`}</select></div>
                 <div class="col-md-4"><label class="form-label">Produk</label><input id="saleSearch" value="${esc(saleProductDraft.search)}" class="form-control" autocomplete="off" placeholder="Cari nama, kode, kategori, atau satuan"></div>
                 <div class="col-md-4"><label class="form-label">Qty</label><input id="saleQty" type="number" value="${saleProductDraft.qty || 1}" min="1" class="form-control"></div>
                 <div class="col-12"><div id="saleSearchResults" class="search-results"></div></div>
@@ -1698,6 +1724,7 @@
         document.getElementById("salePrice2").oninput = (event) => { saleProductDraft.price2 = event.target.value; persistSaleProductDraft(); };
         document.getElementById("saleManualPrice").oninput = (event) => { saleProductDraft.manualPrice = event.target.value; persistSaleProductDraft(); };
         document.getElementById("salePriceMode").onchange = (event) => { saleProductDraft.priceMode = event.target.value; persistSaleProductDraft(); };
+        document.getElementById("saleUnit").onchange = updateSaleUnitFields;
         document.getElementById("saleCustomerName").oninput = updateSaleCustomerDraft;
         document.getElementById("saleCustomerType").oninput = (e) => { saleDraft.customerType = e.target.value; };
         document.getElementById("saleCustomerAddress").oninput = (e) => { saleDraft.customerAddress = e.target.value; };
@@ -1721,14 +1748,14 @@
         const query = document.getElementById("saleSearch").value;
         const rows = searchProducts(query);
         document.getElementById("saleSearchResults").innerHTML = query.trim()
-          ? `<div class="d-flex justify-content-between align-items-center mb-1"><strong>${number.format(rows.length)} produk ditemukan</strong><span class="small text-secondary">Seluruh hasil terkait ditampilkan</span></div>${rows.map((p) => `<button class="search-result" type="button" data-product-id="${p.id}"><strong>${p.name}</strong><br><span class="text-secondary">${p.code} | ${p.category} | Stok ${number.format(stockAkhirProduk(p))} ${p.unit} | HPP ${idr.format(p.buy)} | Jual 1 ${idr.format(p.price)} | Jual 2 ${idr.format(p.price2)}</span></button>`).join("") || `<div class="text-center text-secondary py-3">Produk terkait tidak ditemukan.</div>`}`
+          ? `<div class="d-flex justify-content-between align-items-center mb-1"><strong>${number.format(rows.length)} produk ditemukan</strong><span class="small text-secondary">Seluruh hasil terkait ditampilkan</span></div>${rows.map((p) => `<button class="search-result" type="button" data-product-id="${p.id}"><strong>${p.name}</strong><br><span class="text-secondary">${p.code} | ${p.category} | Stok ${number.format(stockAkhirProduk(p))} ${p.primaryUnit || p.unit} | ${conversionLabel(p)} | Jual 1 ${idr.format(p.price)} | Jual 2 ${idr.format(p.price2)}</span></button>`).join("") || `<div class="text-center text-secondary py-3">Produk terkait tidak ditemukan.</div>`}`
           : "";
         document.querySelectorAll("[data-product-id]").forEach((btn) => btn.onclick = () => selectSaleProduct(btn.dataset.productId));
       }
       function findProductBySku(value) {
         const sku = String(value || "").trim().toLowerCase();
         if (!sku) return null;
-        return state.products.find((product) => product.active !== false && String(product.code || "").trim().toLowerCase() === sku) || null;
+        return state.products.find((product) => product.active !== false && [product.code, product.secondaryBarcode].some((code) => String(code || "").trim().toLowerCase() === sku)) || null;
       }
       function selectSaleProductBySku(event) {
         const skuInput = document.getElementById("saleSku");
@@ -1807,16 +1834,31 @@
         const product = findProduct(productId);
         if (!product) return;
         selectedSaleProductId = product.id;
-        saleProductDraft = { sku: product.code || "", search: product.name || "", unit: product.unit || "", qty: saleProductDraft.qty || 1, hpp: String(toNumber(product.buy)), price1: String(toNumber(product.price)), price2: String(toNumber(product.price2)), manualPrice: "", priceMode: saleProductDraft.priceMode || "price1" };
+        const primaryUnit = product.primaryUnit || product.unit || "Pcs";
+        saleProductDraft = { sku: product.code || "", search: product.name || "", unit: primaryUnit, qty: saleProductDraft.qty || 1, hpp: String(toNumber(product.buy)), price1: String(toNumber(product.price)), price2: String(toNumber(product.price2)), manualPrice: "", priceMode: saleProductDraft.priceMode || "price1" };
         persistSaleProductDraft();
         document.getElementById("saleSku").value = product.code || "";
         document.getElementById("saleSearch").value = product.name || "";
-        document.getElementById("saleUnit").value = product.unit || "";
+        document.getElementById("saleUnit").disabled = false;
+        document.getElementById("saleUnit").innerHTML = productUnitOptions(product, primaryUnit);
         document.getElementById("saleHpp").value = toNumber(product.buy);
         document.getElementById("salePrice1").value = toNumber(product.price);
         document.getElementById("salePrice2").value = toNumber(product.price2);
         document.getElementById("saleManualPrice").value = "";
         document.getElementById("saleSearchResults").innerHTML = "";
+      }
+      function updateSaleUnitFields() {
+        const product = findProduct(selectedSaleProductId);
+        if (!product) return;
+        const unit = document.getElementById("saleUnit").value;
+        saleProductDraft.unit = unit;
+        saleProductDraft.hpp = String(productHppForUnit(product, unit));
+        saleProductDraft.price1 = String(productPriceForUnit(product, unit, 1));
+        saleProductDraft.price2 = String(productPriceForUnit(product, unit, 2));
+        document.getElementById("saleHpp").value = saleProductDraft.hpp;
+        document.getElementById("salePrice1").value = saleProductDraft.price1;
+        document.getElementById("salePrice2").value = saleProductDraft.price2;
+        persistSaleProductDraft();
       }
       function normalizeUnit(unit) {
         const found = unitOptions.find((item) => item.toLowerCase() === String(unit || "").toLowerCase());
@@ -1838,9 +1880,10 @@
         const manual = Number(document.getElementById("saleManualPrice").value || 0);
         const selectedPrice = priceMode === "price2" ? price2 : priceMode === "manual" ? (manual || price1) : price1;
         const qty = Number(document.getElementById("saleQty").value || 1);
-        if (toNumber(product.stock) < qty) return toast("Stok tidak cukup.");
+        const selectedUnit = document.getElementById("saleUnit").value;
+        if (stockAkhirProduk(product) + 0.000001 < productQuantityInPrimary(product, qty, selectedUnit)) return toast("Stok tidak cukup untuk satuan yang dipilih.");
         const overrides = {
-          unit: document.getElementById("saleUnit").value,
+          unit: selectedUnit,
           buy: Number(document.getElementById("saleHpp").value || product.buy),
           price1,
           price2,
@@ -1912,7 +1955,7 @@
         if (previousSale) {
           (previousSale.items || []).forEach((item) => {
             const product = findProduct(item.productId);
-            if (product) product.stockOut = Math.max(0, toNumber(product.stockOut) - toNumber(item.qty));
+            if (product) product.stockOut = Math.max(0, toNumber(product.stockOut) - toNumber(item.primaryQty ?? productQuantityInPrimary(product, item.qty, item.unit)));
           });
           state.stockMoves = state.stockMoves.filter((move) => move.note !== `Penjualan ${previousSale.id}`);
           state.sales = state.sales.filter((item) => item.id !== previousSale.id);
@@ -1922,11 +1965,13 @@
           const p = findProduct(item.productId);
           if (p) {
             p.stockIn = toNumber(p.stockIn ?? p.stock ?? 0);
-            p.stockOut = toNumber(p.stockOut) + item.qty;
+            const primaryQty = productQuantityInPrimary(p, item.qty, item.unit);
+            item.primaryQty = primaryQty;
+            p.stockOut = toNumber(p.stockOut) + primaryQty;
             p.stock = stockAkhirProduk(p);
             p.stockAkhir = p.stock;
           }
-          state.stockMoves.unshift({ id: uid("STK"), date: sale.date, productId: item.productId, type: "Keluar", qty: item.qty, note: `Penjualan ${sale.id}` });
+          state.stockMoves.unshift({ id: uid("STK"), date: sale.date, productId: item.productId, productName: p?.name || item.name, unit: item.unit, type: "Keluar", qty: item.primaryQty ?? item.qty, note: `Penjualan ${sale.id}: ${item.qty} ${item.unit}` });
         });
         state.sales.unshift(sale);
         state.syncQueue.push({ type: "sale", id: sale.id });
@@ -1951,7 +1996,7 @@
                 <div class="col-md-4"><label class="form-label">Nama Sales</label><input id="purchaseSalesName" class="form-control" value="${esc(purchaseDraft.salesName)}" readonly></div>
                 <div class="col-md-4"><label class="form-label">Whatsapp</label><input id="purchaseWhatsapp" class="form-control" value="${esc(purchaseDraft.whatsapp)}" readonly></div>
                 <div class="col-md-4"><label class="form-label">Jatuh Tempo</label><input id="purchaseDueDate" type="date" value="${esc(purchaseDraft.dueDate || "")}" class="form-control"></div>
-                <div class="col-md-4"><label class="form-label">Satuan Produk</label><select id="purchaseUnit" class="form-select">${unitOptions.map((u) => `<option>${u}</option>`).join("")}</select></div>
+                <div class="col-md-4"><label class="form-label">Satuan Produk</label><select id="purchaseUnit" class="form-select" disabled><option>Pilih produk dahulu</option></select></div>
                 <div class="col-md-8"><label class="form-label">Produk</label><input id="purchaseSearch" class="form-control" autocomplete="off" placeholder="Ketik nama produk, kode, kategori, atau scan barcode"></div>
                 <div class="col-md-4"><label class="form-label">Qty</label><input id="purchaseQty" type="number" value="1" min="1" class="form-control"></div>
                 <div class="col-12"><div id="purchaseSearchResults" class="search-results"></div></div>
@@ -1984,6 +2029,7 @@
         document.getElementById("purchaseAddBtn").onclick = addPurchaseFromSearch;
         document.getElementById("purchaseSearch").oninput = renderPurchaseSearchResults;
         document.getElementById("purchaseSearch").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); addPurchaseFromSearch(); } };
+        document.getElementById("purchaseUnit").onchange = updatePurchaseUnitFields;
         document.getElementById("purchaseCompany").oninput = updatePurchaseSupplierFromCompany;
         document.getElementById("purchaseCompany").onchange = updatePurchaseSupplierFromCompany;
         document.getElementById("purchaseDueDate").oninput = (e) => { purchaseDraft.dueDate = e.target.value; };
@@ -2008,7 +2054,7 @@
       function renderPurchaseSearchResults() {
         const query = document.getElementById("purchaseSearch").value;
         const rows = searchProducts(query);
-        document.getElementById("purchaseSearchResults").innerHTML = rows.map((p) => `<button class="search-result" type="button" data-purchase-product-id="${p.id}"><strong>${p.name}</strong><br><span class="text-secondary">${p.code} | ${p.category} | Stok ${number.format(p.stock)} ${p.unit} | HPP ${idr.format(p.buy)} | Jual ${idr.format(p.price)}</span></button>`).join("");
+        document.getElementById("purchaseSearchResults").innerHTML = rows.map((p) => `<button class="search-result" type="button" data-purchase-product-id="${p.id}"><strong>${p.name}</strong><br><span class="text-secondary">${p.code} | ${p.category} | Stok ${number.format(stockAkhirProduk(p))} ${p.primaryUnit || p.unit} | ${conversionLabel(p)} | HPP ${idr.format(p.buy)}</span></button>`).join("");
         document.querySelectorAll("[data-purchase-product-id]").forEach((btn) => btn.onclick = () => selectPurchaseProduct(btn.dataset.purchaseProductId));
       }
       function selectPurchaseProduct(productId) {
@@ -2016,11 +2062,20 @@
         if (!product) return;
         selectedPurchaseProductId = product.id;
         document.getElementById("purchaseSearch").value = `${product.code} - ${product.name}`;
-        document.getElementById("purchaseUnit").value = normalizeUnit(product.unit);
+        document.getElementById("purchaseUnit").disabled = false;
+        document.getElementById("purchaseUnit").innerHTML = productUnitOptions(product, product.primaryUnit || product.unit);
         document.getElementById("purchaseHpp").value = product.buy;
         document.getElementById("purchasePrice1").value = product.buy;
         document.getElementById("purchaseManualPrice").value = "";
         document.getElementById("purchaseSearchResults").innerHTML = "";
+      }
+      function updatePurchaseUnitFields() {
+        const product = findProduct(selectedPurchaseProductId);
+        if (!product) return;
+        const unit = document.getElementById("purchaseUnit").value;
+        const hpp = productHppForUnit(product, unit);
+        document.getElementById("purchaseHpp").value = hpp;
+        document.getElementById("purchasePrice1").value = hpp;
       }
       function currentPurchaseProduct() {
         return findProduct(selectedPurchaseProductId) || findProduct(document.getElementById("purchaseSearch").value);
@@ -2059,6 +2114,7 @@
         addCartLine(purchaseCart, product, Number(document.getElementById("purchaseQty").value || 1), "purchase", {
           unit: document.getElementById("purchaseUnit").value,
           buy: hpp,
+          baseBuy: productHasConversion(product) && document.getElementById("purchaseUnit").value === product.secondaryUnit ? MDDConversion.convertPrimaryToSecondary(hpp, product.conversionValue) : hpp,
           price1,
           price2: 0,
           priceMode,
@@ -2100,14 +2156,16 @@
         purchase.items.forEach((item) => {
           const p = findProduct(item.productId);
           if (p) {
-            p.stockIn = toNumber(p.stockIn ?? p.stock ?? 0) + item.qty;
+            const primaryQty = productQuantityInPrimary(p, item.qty, item.unit);
+            item.primaryQty = primaryQty;
+            p.stockIn = toNumber(p.stockIn ?? p.stock ?? 0) + primaryQty;
             p.stockOut = toNumber(p.stockOut);
             p.stock = stockAkhirProduk(p);
             p.stockAkhir = p.stock;
-            p.buy = item.buy || item.price;
+            p.buy = item.baseBuy || item.buy || item.price;
             p.price = item.price1 || p.price;
           }
-          state.stockMoves.unshift({ id: uid("STK"), date: purchase.date, productId: item.productId, type: "Masuk", qty: item.qty, note: `Pembelian ${purchase.id}` });
+          state.stockMoves.unshift({ id: uid("STK"), date: purchase.date, productId: item.productId, productName: p?.name || item.name, unit: item.unit, type: "Masuk", qty: item.primaryQty ?? item.qty, note: `Pembelian ${purchase.id}: ${item.qty} ${item.unit}` });
         });
         state.purchases.unshift(purchase);
         state.syncQueue.push({ type: "purchase", id: purchase.id });
@@ -2783,6 +2841,74 @@
         renderAll();
         toast("Produk sudah dihapus dari daftar.");
       }
+      function openProductConversionModal(productId = "") {
+        const initial = state.products.find((p) => p.id === productId) || state.products.find((p) => p.active !== false);
+        if (!initial) return toast("Tambahkan Master Barang terlebih dahulu.");
+        openModal("Konversi Produk", `
+          <div class="p-3 rounded-4 border" style="border-color:#d9b35f!important;background:linear-gradient(135deg,#f8fbff,#fffaf0)">
+            <div class="row g-3">
+              <div class="col-12"><label class="form-label">Pilih Produk</label><select id="conversionProductId" name="productId" class="form-select">${state.products.filter((p) => p.active !== false).map((p) => `<option value="${p.id}" ${p.id === initial.id ? "selected" : ""}>${esc(p.code)} — ${esc(p.name)}</option>`).join("")}</select></div>
+              <div class="col-12"><label class="form-label d-block">Format Data</label><div class="d-flex gap-4"><label><input type="radio" name="unitMode" value="one"> Satu Satuan [F1]</label><label><input type="radio" name="unitMode" value="two"> Dua Satuan [F2]</label></div></div>
+              <div class="col-md-6"><label class="form-label">Nama Barang</label><input id="conversionName" class="form-control" readonly></div>
+              <div class="col-md-3"><label class="form-label">Barcode Utama</label><input id="conversionPrimaryBarcode" name="code" class="form-control" required></div>
+              <div class="col-md-3"><label class="form-label">Barcode Kedua</label><input id="conversionSecondaryBarcode" name="secondaryBarcode" class="form-control"></div>
+              <div class="col-md-3"><label class="form-label">Satuan Utama</label><select id="conversionPrimaryUnit" name="primaryUnit" class="form-select">${unitOptions.map((u) => `<option>${u}</option>`).join("")}</select></div>
+              <div class="col-md-3"><label class="form-label">Satuan Kedua</label><select id="conversionSecondaryUnit" name="secondaryUnit" class="form-select"><option value="">— Tanpa satuan kedua —</option>${unitOptions.map((u) => `<option>${u}</option>`).join("")}</select></div>
+              <div class="col-md-3"><label class="form-label">Konversi</label><input id="conversionValue" name="conversionValue" type="number" min="0.000001" step="0.000001" class="form-control"></div>
+              <div class="col-md-3"><label class="form-label">Stok Minimal (Satuan Utama)</label><input id="conversionMin" name="min" type="number" step="0.000001" class="form-control"></div>
+              <div class="col-12"><div id="conversionExplanation" class="alert alert-primary mb-0 fw-bold"></div></div>
+              <div class="col-md-6"><label class="form-label">HPP Satuan Utama</label><input id="conversionPrimaryBuy" name="buy" type="number" min="0" step="0.01" class="form-control"></div>
+              <div class="col-md-6"><label class="form-label">HPP Satuan Kedua (Otomatis)</label><input id="conversionSecondaryBuy" class="form-control" readonly></div>
+              <div class="col-md-6"><label class="form-label">Harga Jual 1 — Satuan Utama</label><input id="conversionPrimaryPrice" name="price" type="number" min="0" step="0.01" class="form-control"></div>
+              <div class="col-md-6"><label class="form-label">Harga Jual 1 — Satuan Kedua</label><input id="conversionSecondaryPrice" name="secondaryPrice" type="number" min="0" step="0.01" class="form-control"></div>
+              <div class="col-md-6"><label class="form-label">Harga Jual 2 — Satuan Utama</label><input id="conversionPrimaryPrice2" name="price2" type="number" min="0" step="0.01" class="form-control"></div>
+              <div class="col-md-6"><label class="form-label">Harga Jual 2 — Satuan Kedua</label><input id="conversionSecondaryPrice2" name="secondaryPrice2" type="number" min="0" step="0.01" class="form-control"></div>
+            </div>
+          </div>`, (fd) => {
+          const product = state.products.find((p) => p.id === fd.get("productId"));
+          if (!product) return toast("Produk tidak ditemukan.");
+          const twoUnits = fd.get("unitMode") === "two";
+          const primaryUnit = fd.get("primaryUnit");
+          const secondaryUnit = twoUnits ? fd.get("secondaryUnit") : "";
+          const conversionValue = twoUnits ? toNumber(fd.get("conversionValue")) : 0;
+          try { MDDConversion.validateConversion(primaryUnit, secondaryUnit, conversionValue); } catch (error) { return toast(error.message); }
+          Object.assign(product, { code: fd.get("code"), secondaryBarcode: twoUnits ? fd.get("secondaryBarcode") : "", primaryUnit, unit: primaryUnit, secondaryUnit, conversionValue, buy: toNumber(fd.get("buy")), secondaryBuy: twoUnits ? MDDConversion.calculateSecondaryCost(fd.get("buy"), conversionValue) : 0, price: toNumber(fd.get("price")), price2: toNumber(fd.get("price2")), secondaryPrice: twoUnits ? toNumber(fd.get("secondaryPrice")) : 0, secondaryPrice2: twoUnits ? toNumber(fd.get("secondaryPrice2")) : 0, min: toNumber(fd.get("min")) });
+          saveState(`Konversi produk ${product.name} diperbarui`);
+          closeModal(); renderAll(); toast(`Konversi tersimpan: ${conversionLabel(product)}.`);
+        });
+        const fillConversionForm = () => {
+          const product = findProduct(document.getElementById("conversionProductId").value) || initial;
+          const two = productHasConversion(product);
+          document.querySelector(`input[name="unitMode"][value="${two ? "two" : "one"}"]`).checked = true;
+          document.getElementById("conversionName").value = product.name || "";
+          document.getElementById("conversionPrimaryBarcode").value = product.code || "";
+          document.getElementById("conversionSecondaryBarcode").value = product.secondaryBarcode || "";
+          document.getElementById("conversionPrimaryUnit").value = normalizeUnit(product.primaryUnit || product.unit);
+          document.getElementById("conversionSecondaryUnit").value = two ? normalizeUnit(product.secondaryUnit) : "";
+          document.getElementById("conversionValue").value = two ? product.conversionValue : "";
+          document.getElementById("conversionMin").value = product.min || 0;
+          document.getElementById("conversionPrimaryBuy").value = product.buy || 0;
+          document.getElementById("conversionPrimaryPrice").value = product.price || 0;
+          document.getElementById("conversionPrimaryPrice2").value = product.price2 || 0;
+          document.getElementById("conversionSecondaryPrice").value = product.secondaryPrice || 0;
+          document.getElementById("conversionSecondaryPrice2").value = product.secondaryPrice2 || 0;
+          updateConversionPreview();
+        };
+        const updateConversionPreview = () => {
+          const two = document.querySelector('input[name="unitMode"]:checked')?.value === "two";
+          const primary = document.getElementById("conversionPrimaryUnit").value;
+          const secondary = document.getElementById("conversionSecondaryUnit").value;
+          const value = toNumber(document.getElementById("conversionValue").value);
+          const hpp = toNumber(document.getElementById("conversionPrimaryBuy").value);
+          ["conversionSecondaryUnit", "conversionValue", "conversionSecondaryBarcode", "conversionSecondaryPrice", "conversionSecondaryPrice2"].forEach((id) => document.getElementById(id).disabled = !two);
+          document.getElementById("conversionSecondaryBuy").value = two && value > 0 ? MDDConversion.calculateSecondaryCost(hpp, value) : "";
+          document.getElementById("conversionExplanation").textContent = two && secondary && value > 0 ? `1 ${primary} = ${number.format(value)} ${secondary} • HPP ${secondary}: ${idr.format(MDDConversion.calculateSecondaryCost(hpp, value))}` : `Produk memakai satu satuan: ${primary}`;
+        };
+        document.getElementById("conversionProductId").onchange = fillConversionForm;
+        document.querySelectorAll('input[name="unitMode"]').forEach((input) => input.onchange = updateConversionPreview);
+        ["conversionPrimaryUnit", "conversionSecondaryUnit", "conversionValue", "conversionPrimaryBuy"].forEach((id) => document.getElementById(id).oninput = updateConversionPreview);
+        fillConversionForm();
+      }
       function openProductModal(productId = "") {
         const editing = state.products.find((p) => p.id === productId);
         const stockInValue = toNumber(editing?.stockIn ?? editing?.stock ?? 0);
@@ -2805,7 +2931,7 @@
           const stockIn = Number(fd.get("stockIn"));
           const stockOut = Number(fd.get("stockOut"));
           const stockAkhir = Math.max(0, stockIn - stockOut);
-          const payload = { code: fd.get("code"), name: fd.get("name"), category: fd.get("category"), unit: fd.get("unit"), buy: Number(fd.get("buy")), price: Number(fd.get("price")), price2: Number(fd.get("price2")), stockIn, stockOut, stock: stockAkhir, stockAkhir, min: Number(fd.get("min")), active: true };
+          const payload = { code: fd.get("code"), name: fd.get("name"), category: fd.get("category"), unit: fd.get("unit"), primaryUnit: fd.get("unit"), buy: Number(fd.get("buy")), price: Number(fd.get("price")), price2: Number(fd.get("price2")), stockIn, stockOut, stock: stockAkhir, stockAkhir, min: Number(fd.get("min")), active: true };
           if (editing) {
             Object.assign(editing, payload);
             saveState(`Produk ${editing.name} diperbarui`);
@@ -2983,22 +3109,34 @@
           const p = findProduct(fd.get("productId"));
           p.buy = Number(fd.get("buy"));
           p.price = Number(fd.get("price"));
+          p.secondaryBuy = productHasConversion(p) ? MDDConversion.calculateSecondaryCost(p.buy, p.conversionValue) : 0;
           saveState(`Harga ${p.name} diperbarui`);
           closeModal();
           renderAll();
         });
       }
       function openReturnModal(module) {
-        openModal(`Retur ${module}`, `<div class="row g-3"><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div><div class="col-md-5"><label class="form-label">Produk</label><select name="productId" class="form-select">${productOptions()}</select></div><div class="col-md-3"><label class="form-label">Qty</label><input name="qty" type="number" min="1" value="1" class="form-control"></div><div class="col-md-6"><label class="form-label">Metode Retur</label><select name="method" class="form-select">${payMethods.map((m) => `<option>${m}</option>`).join("")}</select></div><div class="col-md-6"><label class="form-label">Catatan</label><input name="note" class="form-control"></div></div>`, (fd) => {
+        const first = state.products.find((p) => p.active !== false);
+        if (!first) return toast("Produk belum tersedia.");
+        openModal(`Retur ${module}`, `<div class="row g-3"><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div><div class="col-md-5"><label class="form-label">Produk</label><select id="returnProductId" name="productId" class="form-select">${productOptions()}</select></div><div class="col-md-3"><label class="form-label">Satuan</label><select id="returnUnit" name="unit" class="form-select">${productUnitOptions(first)}</select></div><div class="col-md-3"><label class="form-label">Qty</label><input name="qty" type="number" min="0.000001" step="0.000001" value="1" class="form-control"></div><div class="col-md-4"><label class="form-label">Metode Retur</label><select name="method" class="form-select">${payMethods.map((m) => `<option>${m}</option>`).join("")}</select></div><div class="col-md-5"><label class="form-label">Catatan/Alasan</label><input name="note" class="form-control" required></div></div>`, (fd) => {
           const p = findProduct(fd.get("productId"));
           const qty = Number(fd.get("qty"));
-          if (module === "Penjualan") p.stock += qty; else p.stock -= qty;
-          state.returns.unshift({ id: uid("RET"), module, date: fd.get("date"), productId: p.id, product: p.name, qty, method: fd.get("method"), note: fd.get("note") });
-          state.stockMoves.unshift({ id: uid("STK"), date: fd.get("date"), productId: p.id, type: `Retur ${module}`, qty, note: fd.get("note") });
+          const unit = fd.get("unit") || p.primaryUnit || p.unit;
+          const primaryQty = productQuantityInPrimary(p, qty, unit);
+          if (module === "Penjualan") p.stockOut = Math.max(0, toNumber(p.stockOut) - primaryQty);
+          else {
+            if (stockAkhirProduk(p) + 0.000001 < primaryQty) return toast("Stok tidak cukup untuk retur pembelian ini.");
+            p.stockIn = Math.max(0, toNumber(p.stockIn) - primaryQty);
+          }
+          p.stock = stockAkhirProduk(p); p.stockAkhir = p.stock;
+          const amount = MDDConversion.moneyMultiply(qty, productHppForUnit(p, unit));
+          state.returns.unshift({ id: uid("RET"), module, date: fd.get("date"), productId: p.id, product: p.name, qty, unit, primaryQty, amount, total: amount, method: fd.get("method"), note: fd.get("note") });
+          state.stockMoves.unshift({ id: uid("STK"), date: fd.get("date"), productId: p.id, productName: p.name, unit, type: `Retur ${module}`, qty: primaryQty, note: `${qty} ${unit}. ${fd.get("note")}` });
           saveState(`Retur ${module} ${p.name}`);
           closeModal();
           renderAll();
         });
+        document.getElementById("returnProductId").onchange = (event) => { const product = findProduct(event.target.value); document.getElementById("returnUnit").innerHTML = productUnitOptions(product); };
       }
       function openAccessCodeModal() {
         if (session.role !== "Owner") return toast("Hanya Owner yang dapat mengubah kode akses.");

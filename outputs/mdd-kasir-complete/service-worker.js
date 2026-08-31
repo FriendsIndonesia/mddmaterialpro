@@ -1,7 +1,8 @@
-const CACHE_NAME = "mdd-material-pro-v76-display-only-clear-report";
+const CACHE_NAME = "mdd-material-pro-v77-product-conversion";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
+  "./conversion-utils.js",
   "./manifest.webmanifest",
   "./mdd-material-pro-logo.png",
   "./mdd-material-pro-app-icon.png",

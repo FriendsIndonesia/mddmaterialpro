@@ -420,8 +420,8 @@ function normalizeCashAccountNames_(ss) {
   const values = range.getValues();
   let changed = false;
   values.forEach((row) => {
-    if (/^kas\s*2$/i.test(String(row[0] || "").trim())) {
-      row[0] = "Petty Cash";
+    if (/^(kas\s*2|petty\s*cash)$/i.test(String(row[0] || "").trim())) {
+      row[0] = "Petty Kas";
       changed = true;
     }
   });

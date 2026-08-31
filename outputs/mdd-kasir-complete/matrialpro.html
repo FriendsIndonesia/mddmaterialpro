@@ -791,7 +791,7 @@
         ["historyView", "bi-clock-history", "History Transaksi"]
       ];
       const payMethods = ["Cash", "Transfer", "Debit Card", "Qris", "Credit Card", "Piutang", "Deposit", "Bonus", "Free"];
-      const unitOptions = ["Pcs", "Lbr", "Batang", "Zak", "Liter", "Dus", "m", "m²", "m³", "1/4", "SI", "Kg", "Ton"];
+      const unitOptions = ["Pcs", "Lbr", "Batang", "Zak", "Liter", "Dus", "Rol", "Klg", "Pl", "Gln", "Psg", "m", "m²", "m³", "1/4", "SI", "Kg", "Ton"];
       const materialCategories = ["Pondasi dan Beton", "Dinding dan Penyimpanan", "Struktur Rangka", "Penutup Atap", "Plafon", "Penutup Lantai dan Dinding", "Pengecatan", "Kaca dan Pelindung", "Sanitari dan Plambing", "Pengikat dan Perangkat Keras"];
       const masterAccessOptions = ["Master Pelanggan", "Master Supplier", "Master Kategori", "Master Barang", "Master Paket", "Stok Opname", "Master Cetak Barcode"];
       const defaultAccessRules = {
@@ -831,6 +831,8 @@
       let refreshPullCount = 0;
       let isSyncing = false;
       let isPulling = false;
+      const REPORT_DISPLAY_STORAGE_KEY = "mdd_report_display_hidden_v1";
+      let hiddenReportRows = loadHiddenReportRows();
       // Cache yang sudah ada menjadi baseline awal. Tanpa baseline ini seluruh
       // cache lama dapat salah dianggap sebagai perubahan baru lalu menimpa Sheet.
       let lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
@@ -1276,29 +1278,44 @@
         button.onclick = () => clearCurrentViewReport(view);
         actions.prepend(button);
       }
+      function loadHiddenReportRows() {
+        try {
+          const saved = JSON.parse(localStorage.getItem(REPORT_DISPLAY_STORAGE_KEY) || "{}");
+          return saved && typeof saved === "object" ? saved : {};
+        } catch {
+          return {};
+        }
+      }
+      function reportDisplayKey(type, row) {
+        return `${type}:${String(row?.id || row?.invoiceNo || "")}`;
+      }
+      function visibleReportRows(view, type, rows) {
+        const hidden = new Set(hiddenReportRows[view] || []);
+        return (rows || []).filter((row) => !hidden.has(reportDisplayKey(type, row)));
+      }
+      function hideReportRows(view, entries) {
+        const hidden = new Set(hiddenReportRows[view] || []);
+        (entries || []).forEach(([type, rows]) => (rows || []).forEach((row) => hidden.add(reportDisplayKey(type, row))));
+        hiddenReportRows[view] = [...hidden];
+        localStorage.setItem(REPORT_DISPLAY_STORAGE_KEY, JSON.stringify(hiddenReportRows));
+      }
+      function isReportViewCleared(view) {
+        return (hiddenReportRows[view] || []).includes("*");
+      }
       function clearCurrentViewReport(view) {
         if (session.role !== "Owner") return toast("Hanya owner yang dapat membersihkan laporan.");
-        const labels = { dashboardView:"seluruh laporan dashboard", cashierView:"laporan penjualan Kasir", purchaseView:"laporan Purchase", financeView:"laporan pembayaran dan kas", reportsView:"seluruh laporan transaksi" };
-        if (!confirm(`Bersihkan ${labels[view]}? Data master produk, pelanggan, supplier, dan akun kas tidak dihapus.`)) return;
-        if (view === "cashierView") {
-          const saleIds = new Set(state.sales.filter(isCashierSale).map((row) => row.id));
-          state.deletionTombstones.sales = [...new Set([...(state.deletionTombstones.sales || []), ...saleIds])];
-          Object.assign(state, { sales:state.sales.filter((row) => !saleIds.has(row.id)), pendingSales:[], payments:state.payments.filter((payment) => !saleIds.has(payment.refId)), returns:state.returns.filter((x) => x.module !== "Penjualan") });
+        const labels = { dashboardView:"ringkasan histori Dashboard Owner", cashierView:"histori laporan penjualan Kasir", purchaseView:"histori laporan Purchase", financeView:"histori transaksi kas", reportsView:"preview histori penjualan" };
+        if (!confirm(`Bersihkan ${labels[view]} dari tampilan? Database tetap tersimpan dan tetap dapat diunduh melalui PDF/Excel.`)) return;
+        if (view === "dashboardView") {
+          hiddenReportRows.dashboardView = ["*"];
+          localStorage.setItem(REPORT_DISPLAY_STORAGE_KEY, JSON.stringify(hiddenReportRows));
         }
-        if (view === "purchaseView") {
-          const purchaseIds = new Set(state.purchases.filter(isPurchaseTransaction).map((row) => row.id));
-          state.deletionTombstones.purchases = [...new Set([...(state.deletionTombstones.purchases || []), ...purchaseIds])];
-          Object.assign(state, { purchases:state.purchases.filter((row) => !purchaseIds.has(row.id)), pendingPurchases:[], payments:state.payments.filter((payment) => !purchaseIds.has(payment.refId)), returns:state.returns.filter((x) => x.module !== "Pembelian") });
-        }
-        if (view === "financeView") Object.assign(state, { cashTx:[], payments:[] });
-        if (view === "dashboardView" || view === "reportsView") {
-          state.deletionTombstones.sales = [...new Set([...(state.deletionTombstones.sales || []), ...state.sales.map((row) => row.id)])];
-          state.deletionTombstones.purchases = [...new Set([...(state.deletionTombstones.purchases || []), ...state.purchases.map((row) => row.id)])];
-          Object.assign(state, { sales:[], purchases:[], cashTx:[], payments:[], stockMoves:[], returns:[], pendingSales:[], pendingPurchases:[] });
-        }
-        saveState(`${labels[view]} dibersihkan`);
+        if (view === "cashierView") hideReportRows(view, [["sales", state.sales.filter(isCashierSale)]]);
+        if (view === "purchaseView") hideReportRows(view, [["purchases", state.purchases.filter(isPurchaseTransaction)]]);
+        if (view === "financeView") hideReportRows(view, [["cashTx", state.cashTx]]);
+        if (view === "reportsView") hideReportRows(view, [["sales", state.sales]]);
         renderAll();
-        toast("Laporan berhasil dibersihkan.");
+        toast("Tampilan histori berhasil dibersihkan. Database dan file export tetap aman.");
       }
 
       function renderProducts() {
@@ -1574,7 +1591,9 @@
           ["bi-box2-heart", "Nilai Stok Per Hari Ini", idr.format(stockValue), "bg-cyan", "Σ kolom HPP × kolom stockAkhir langsung dari setiap baris backend Products (tanpa menghitung ulang stock masuk/keluar)"]
         ].map(([icon, label, value, cls, source]) => `<div class="metric-card"><div class="metric-icon ${cls}"><i class="bi ${icon}"></i></div><div><span>${label}</span><strong>${value}</strong><small class="metric-source">Sumber: ${source}</small></div></div>`).join("");
         const reportBox = document.getElementById("ownerReportRows");
-        if (reportBox) {
+        if (reportBox && isReportViewCleared("dashboardView")) {
+          reportBox.innerHTML = `<div class="audit-box"><strong>Tampilan ringkasan histori telah dibersihkan.</strong> Data tetap tersimpan di database dan tetap dihitung pada metrik utama.</div>`;
+        } else if (reportBox) {
           reportBox.innerHTML = [
             ["Jumlah Piutang Tersisa", idr.format(receivable)],
             ["Jumlah Hutang Tersisa", idr.format(payable)],
@@ -1597,7 +1616,7 @@
         const margin = salesItemRevenue - transactionCogs;
         const advice = document.getElementById("businessAdvice");
         if (advice) advice.textContent = `${fast} Margin barang berdasarkan harga jual transaksi dikurangi HPP tersimpan: ${idr.format(margin)}.`;
-        drawSalesChart();
+        drawSalesChart(isReportViewCleared("dashboardView") ? [] : state.sales);
       }
       function renderDashboardWarningSearch(lowStockRows) {
         const input = document.getElementById("dashboardWarningSearch");
@@ -1607,14 +1626,14 @@
         const rows = query ? lowStockRows.filter((product) => [product.code, product.name, product.category, product.unit].some((value) => String(value || "").toLowerCase().includes(query))).slice(0, 100) : [];
         target.innerHTML = rows.map((product) => { const stock = stockAkhirProduk(product); return `<tr><td>${esc(product.name)}</td><td class="text-end">${number.format(stock)} ${esc(product.unit)}</td><td><span class="status-dot ${stock === 0 ? "danger" : "warn"}"></span> ${stock === 0 ? "Out of stock" : "Limit stok"}</td></tr>`; }).join("") || `<tr><td colspan="3" class="text-center text-secondary">${query ? "Barang warning stock tidak ditemukan." : "Gunakan Pencarian Warning Stock untuk melihat barang kosong atau di bawah minimum."}</td></tr>`;
       }
-      function drawSalesChart() {
+      function drawSalesChart(sourceSales = state.sales) {
         if (!window.Chart) return;
         const labels = Array.from({ length: 14 }, (_, i) => {
           const d = new Date();
           d.setDate(d.getDate() - (13 - i));
           return d.toISOString().slice(0, 10);
         });
-        const values = labels.map((label) => state.sales.filter((s) => String(s.date || "").slice(0, 10) === label).reduce((sum, s) => sum + toNumber(s.total), 0));
+        const values = labels.map((label) => sourceSales.filter((s) => String(s.date || "").slice(0, 10) === label).reduce((sum, s) => sum + toNumber(s.total), 0));
         if (salesChart) salesChart.destroy();
         salesChart = new Chart(document.getElementById("salesChart"), { type: "bar", data: { labels: labels.map(displayDate), datasets: [{ label: "Omzet", data: values, backgroundColor: "#2563eb" }] }, options: { responsive: true, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `Omzet: ${idr.format(context.raw || 0)}` } } } } });
       }
@@ -1622,9 +1641,9 @@
       function renderCashier() {
         restoreSaleProductDraft();
         ensureSaleDraft();
-        const cashierSales = state.sales.filter(isCashierSale);
+        const cashierSales = visibleReportRows("cashierView", "sales", state.sales.filter(isCashierSale));
         document.getElementById("cashierView").innerHTML = `
-          <div class="page-header"><div><p class="eyebrow">Kasir</p><h2>Penjualan dan Retur</h2></div><div class="header-actions"><button class="btn btn-outline-primary" id="refreshCashierProductsBtn"><i class="bi bi-arrow-repeat"></i> Sinkron Produk</button><button class="btn btn-outline-secondary" id="saleCancelBtn"><i class="bi bi-x-circle"></i> Batal</button><button class="btn btn-outline-secondary" id="salePendingBtn"><i class="bi bi-pause-circle"></i> Pending</button><button class="btn btn-primary" id="salePayBtn"><i class="bi bi-cash-coin"></i> Simpan & Bayar</button></div></div>
+          <div class="page-header"><div><p class="eyebrow">Kasir</p><h2>Penjualan dan Retur</h2></div><div class="header-actions"><button class="btn btn-outline-secondary" id="saleCancelBtn"><i class="bi bi-x-circle"></i> Batal</button><button class="btn btn-outline-secondary" id="salePendingBtn"><i class="bi bi-pause-circle"></i> Pending</button><button class="btn btn-primary" id="salePayBtn"><i class="bi bi-cash-coin"></i> Simpan & Bayar</button></div></div>
           <div class="content-grid">
             <section class="panel">
               <div class="panel-header"><h3>Cari Barang</h3><span class="chip"><i class="bi bi-upc-scan"></i> Scan/Kode/Nama</span></div>
@@ -1668,7 +1687,6 @@
           <section class="panel mt-3"><div class="panel-header"><h3>Invoice Pending</h3><span class="chip">${state.pendingSales.length} pending</span></div>${pendingSalesTable()}</section>
           <section class="panel mt-3"><div class="panel-header"><div><h3>Laporan Pendapatan Kasir</h3><small class="text-secondary">Khusus transaksi penjualan yang dibuat melalui menu Kasir</small></div><button class="btn btn-outline-secondary btn-sm" data-export-table="cashier-sales"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${salesTable(cashierSales.slice(0, 12))}</section>`;
         document.getElementById("saleAddBtn").onclick = addSaleFromSearch;
-        document.getElementById("refreshCashierProductsBtn").onclick = () => manualRefreshBackend("products", "produk");
         document.getElementById("saleSku").oninput = selectSaleProductBySku;
         document.getElementById("saleSku").onchange = selectSaleProductBySku;
         document.getElementById("saleSku").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); selectSaleProductBySku(e); } };
@@ -1922,7 +1940,7 @@
 
       function renderPurchase() {
         ensurePurchaseDraft();
-        const purchaseTransactions = state.purchases.filter(isPurchaseTransaction);
+        const purchaseTransactions = visibleReportRows("purchaseView", "purchases", state.purchases.filter(isPurchaseTransaction));
         document.getElementById("purchaseView").innerHTML = `
           <div class="page-header"><div><p class="eyebrow">Purchase</p><h2>Pembelian ke Supplier</h2></div><div class="header-actions"><button class="btn btn-outline-secondary" id="purchaseCancelBtn"><i class="bi bi-x-circle"></i> Batal</button><button class="btn btn-outline-secondary" id="purchasePendingBtn"><i class="bi bi-pause-circle"></i> Pending</button><button class="btn btn-primary" id="purchasePayBtn"><i class="bi bi-cash-coin"></i> Simpan & Bayar</button></div></div>
           <div class="content-grid">
@@ -2136,7 +2154,7 @@
               <div class="owner-report-item"><span>Sisa Petty Cash</span><strong>${idr.format(pettyCashBalance)}</strong></div>
             </div>
           </section>
-          <section class="panel mt-3"><div class="panel-header"><h3>Laporan Transaksi Kas</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="cash"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${cashTable()}</section>`;
+          <section class="panel mt-3"><div class="panel-header"><h3>Laporan Transaksi Kas</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="cash"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${cashTable(visibleReportRows("financeView", "cashTx", state.cashTx))}</section>`;
         document.getElementById("addCashTxBtn").onclick = openCashTxModal;
         document.getElementById("financeDatabaseSearch").oninput = (event) => { financeDatabaseQuery = event.target.value; renderFinanceDatabaseSearch(); };
         document.getElementById("clearFinanceDatabaseSearch").onclick = () => { financeDatabaseQuery = ""; financeProductQuery = ""; financeBulkSelection.clear(); document.getElementById("financeDatabaseSearch").value = ""; renderFinanceDatabaseSearch(); document.getElementById("financeDatabaseSearch").focus(); };
@@ -2540,7 +2558,7 @@
           </div>
           <div class="audit-box mb-3"><strong>Rincian laba:</strong> penjualan barang ${idr.format(salesRevenue)} − HPP barang terjual ${idr.format(cogs)} = laba kotor ${idr.format(grossProfit)}; dikurangi biaya operasional ${idr.format(expenses)} = <strong>${idr.format(netProfit)}</strong>.</div>
           <div class="module-grid">${reports.map((report, i) => `<div class="module-card"><h4>${report.title}</h4><strong class="report-value">${report.value}</strong><p class="report-note">${report.note}</p><p class="small text-secondary mb-2">${report.rows.length} baris data siap diexport.</p><div class="d-flex gap-2 flex-wrap"><button class="btn btn-outline-primary btn-sm" data-report-index="${i}"><i class="bi bi-filetype-pdf"></i> PDF</button><button class="btn btn-outline-success btn-sm" data-report-excel-index="${i}"><i class="bi bi-file-earmark-excel"></i> Excel</button></div></div>`).join("")}</div>
-          <section class="panel mt-3" id="reportPrintable"><div class="panel-header"><h3>Preview Laporan Penjualan</h3><span class="chip">Penerimaan laporan</span></div>${salesTable(state.sales)}</section>`;
+          <section class="panel mt-3" id="reportPrintable"><div class="panel-header"><h3>Preview Laporan Penjualan</h3><span class="chip">Penerimaan laporan</span></div>${salesTable(visibleReportRows("reportsView", "sales", state.sales))}</section>`;
         document.querySelectorAll("[data-report-index]").forEach((btn) => btn.onclick = () => exportReportPdf(reports[btn.dataset.reportIndex].title, reports[btn.dataset.reportIndex].rows));
         document.querySelectorAll("[data-report-excel-index]").forEach((btn) => btn.onclick = () => exportReportExcel(reports[btn.dataset.reportExcelIndex].title, reports[btn.dataset.reportExcelIndex].rows));
         document.getElementById("exportAllReportsBtn").onclick = () => exportReportPdf("Semua Laporan MDD", reports.flatMap((report) => report.rows.map((r) => ({ laporan: report.title, nilaiRingkasan: report.value, catatan: report.note, ...r }))));
@@ -2564,13 +2582,12 @@
         ];
         const modules = allModules.filter(([title]) => canAccessMaster(title));
         document.getElementById("masterView").innerHTML = `
-          <div class="page-header"><div><p class="eyebrow">Master Dokumen</p><h2>Data Barang, Relasi, Kas, dan Stok</h2></div><div class="header-actions"><button id="refreshMasterBtn" class="btn btn-outline-primary"><i class="bi bi-arrow-repeat"></i> Sinkron Backend</button><button id="exportMasterBtn" class="btn btn-primary"><i class="bi bi-filetype-pdf"></i> PDF Master</button></div></div>
+          <div class="page-header"><div><p class="eyebrow">Master Dokumen</p><h2>Data Barang, Relasi, Kas, dan Stok</h2></div><div class="header-actions"><button id="exportMasterBtn" class="btn btn-primary"><i class="bi bi-filetype-pdf"></i> PDF Master</button></div></div>
           <div class="module-grid">${modules.map(([title, key, icon], i) => smallModule(title, `${state[key]?.length || 0} data`, `masterAction${i}`, icon)).join("") || `<div class="module-card"><h4>Akses belum tersedia</h4><p>Hubungi Owner untuk membuka akses master dokumen.</p></div>`}</div>
           ${masterDatabaseDashboard()}`;
         modules.forEach((m, i) => document.getElementById(`masterAction${i}`).onclick = m[3]);
         bindMasterDatabaseSearch();
         bindMasterDatabaseActions();
-        document.getElementById("refreshMasterBtn").onclick = () => manualRefreshBackend("master", "master dokumen");
         document.getElementById("exportMasterBtn").onclick = () => exportReportPdf("Laporan Master", masterExportRows());
       }
 
@@ -2736,8 +2753,8 @@
       function purchaseTable(rows) {
         return genericTable(purchaseReportRows(rows), ["tanggal", "no_po", "nama_sales", "nama_perusahaan", "whatsapp", "nama_barang", "qty", "metode_pembayaran", "jumlah_total", "jumlah_hutang_tersisa"]);
       }
-      function cashTable() {
-        return genericTable(state.cashTx.map((x) => ({ tanggal: x.date, jenis: x.type, kategori: x.category, kas: personName(state.cashAccounts, x.accountId), nominal: x.amount, catatan: x.note })), ["tanggal", "jenis", "kategori", "kas", "nominal", "catatan"]);
+      function cashTable(rows = state.cashTx) {
+        return genericTable(rows.map((x) => ({ tanggal: x.date, jenis: x.type, kategori: x.category, kas: personName(state.cashAccounts, x.accountId), nominal: x.amount, catatan: x.note })), ["tanggal", "jenis", "kategori", "kas", "nominal", "catatan"]);
       }
 
       function openModal(title, body, submit, submitLabel = "Simpan") {

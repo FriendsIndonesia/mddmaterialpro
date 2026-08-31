@@ -3,7 +3,7 @@ const OWNER_EMAIL = "friendsindonesia28@gmail.com";
 const GITHUB_REPO = "https://github.com/FriendsIndonesia/mddmaterialpro";
 
 const TABLES = [
-  { key: "products", sheet: "Products", fields: ["id", "code", "name", "category", "unit", "buy", "price", "price2", "stockIn", "stockOut", "stock", "stockAkhir", "min", "active"] },
+  { key: "products", sheet: "Products", fields: ["id", "code", "name", "category", "unit", "primaryUnit", "secondaryUnit", "conversionValue", "secondaryBarcode", "buy", "secondaryBuy", "price", "price2", "secondaryPrice", "secondaryPrice2", "stockIn", "stockOut", "stock", "stockAkhir", "min", "active"] },
   { key: "customers", sheet: "Customers", fields: ["id", "name", "phone", "type", "address", "deposit"] },
   { key: "suppliers", sheet: "Suppliers", aliases: ["Supliers"], fields: ["id", "company", "name", "phone", "address"] },
   { key: "employees", sheet: "Employees", fields: ["id", "name", "position", "startDate", "salary", "phone"] },
@@ -345,18 +345,28 @@ function ensureWorkbook_(ss) {
 
 function ensureSheet_(ss, name, headers) {
   const sheet = ss.getSheetByName(name) || ss.insertSheet(name);
-  const current = sheet.getRange(1, 1, 1, Math.max(headers.length, 1)).getValues()[0];
-  const needsHeader = headers.some((header, index) => current[index] !== header);
+  const oldColumnCount = Math.max(sheet.getLastColumn(), 1);
+  const oldHeaders = sheet.getRange(1, 1, 1, oldColumnCount).getDisplayValues()[0].map((value) => String(value || "").trim());
+  const current = headers.map((_, index) => oldHeaders[index] || "");
+  const needsHeader = headers.some((header, index) => current[index] !== header) || oldHeaders.filter(Boolean).length !== headers.length;
   if (needsHeader) {
-    sheet.clear();
+    // Migrasi kolom berdasarkan nama header. Data yang diinput langsung oleh
+    // pengguna tetap dipertahankan ketika aplikasi menambahkan field baru.
+    const oldRows = sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, oldColumnCount).getValues() : [];
+    const migratedRows = oldRows.map((row) => headers.map((header) => {
+      const oldIndex = oldHeaders.indexOf(header);
+      return oldIndex >= 0 ? row[oldIndex] : "";
+    }));
+    sheet.clearContents();
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    if (migratedRows.length) sheet.getRange(2, 1, migratedRows.length, headers.length).setValues(migratedRows);
     sheet.setFrozenRows(1);
     sheet.autoResizeColumns(1, headers.length);
   }
-  const plainNumberFields = ["stockIn", "stockOut", "stock", "stockAkhir", "min", "qty", "systemStock", "physicalStock", "difference"];
-  const textFields = ["id", "code", "invoiceNo", "number", "sku", "phone", "whatsapp"];
+  const plainNumberFields = ["conversionValue", "buy", "secondaryBuy", "price", "price2", "secondaryPrice", "secondaryPrice2", "stockIn", "stockOut", "stock", "stockAkhir", "min", "qty", "systemStock", "physicalStock", "difference"];
+  const textFields = ["id", "code", "secondaryBarcode", "invoiceNo", "number", "sku", "phone", "whatsapp"];
   headers.forEach((header, index) => {
-    if (plainNumberFields.indexOf(header) >= 0) sheet.getRange(2, index + 1, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat("0.###");
+    if (plainNumberFields.indexOf(header) >= 0) sheet.getRange(2, index + 1, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat("0.######");
     if (textFields.indexOf(header) >= 0) sheet.getRange(2, index + 1, Math.max(sheet.getMaxRows() - 1, 1), 1).setNumberFormat("@");
   });
   return sheet;

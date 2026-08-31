@@ -922,6 +922,10 @@
         });
         const deletedSales = new Set(data.deletionTombstones.sales);
         const deletedPurchases = new Set(data.deletionTombstones.purchases);
+        // Baris dari tab Hutang/Piutang adalah catatan manual backend. Jangan
+        // sembunyikan hanya karena cache lama pernah menyimpan tombstone.
+        const isLedgerDebtRow = (row) => String(row?.id || "").startsWith("HUT-") || String(row?.source || row?.status || "").toLowerCase() === "hutang";
+        const isLedgerReceivableRow = (row) => String(row?.id || "").startsWith("PIU-") || String(row?.source || row?.status || "").toLowerCase() === "piutang";
         data.sales = (data.sales || []).map((row) => {
           row.invoiceNo = String(row.invoiceNo ?? row.noFaktur ?? row.invoice ?? "").trim();
           row.customerName = String(row.customerName ?? row.pelanggan ?? row.customer ?? row.relation ?? "").trim();
@@ -931,7 +935,7 @@
           row.due = toNumber(row.due ?? row.remaining ?? row.sisaPiutang ?? row.sisa);
           if (!row.due && row.total > row.paid + row.returnAmount) row.due = Math.max(0, row.total - row.paid - row.returnAmount);
           return row;
-        }).filter((row) => !deletedSales.has(row.id));
+        }).filter((row) => isLedgerReceivableRow(row) || !deletedSales.has(row.id));
         data.purchases = (data.purchases || []).map((row) => {
           row.invoiceNo = String(row.invoiceNo ?? row.noFaktur ?? row.invoice ?? "").trim();
           row.salesName = String(row.salesName ?? row.supplierName ?? row.supplier ?? row.relation ?? "").trim();
@@ -942,7 +946,7 @@
           row.due = toNumber(row.due ?? row.remaining ?? row.sisaHutang ?? row.sisa);
           if (!row.due && row.total > row.paid + row.returnAmount) row.due = Math.max(0, row.total - row.paid - row.returnAmount);
           return row;
-        }).filter((row) => !deletedPurchases.has(row.id));
+        }).filter((row) => isLedgerDebtRow(row) || !deletedPurchases.has(row.id));
         return data;
       }
       function toNumber(value) {
@@ -1117,6 +1121,8 @@
           return;
         }
         if (activeView === "financeView") {
+          if (financeDatabaseQuery || document.activeElement?.id === "financeDatabaseSearch") renderFinanceDatabaseSearch();
+          else renderFinance();
           return;
         }
         const cashierEditing = activeView === "cashierView" && (

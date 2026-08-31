@@ -657,6 +657,26 @@
     [data-finance-bulk-check] { width:1.45rem; height:1.45rem; border:2px solid #164ec7; background-color:#fff; box-shadow:0 0 0 3px rgba(212,175,55,.25); cursor:pointer; }
     [data-finance-bulk-check]:checked { background-color:#164ec7; border-color:#d4af37; box-shadow:0 0 0 3px rgba(22,78,199,.2); }
     @media (max-width:900px) { .table { font-size:.62rem; } .table th,.table td { padding:.4rem .2rem; } }
+    /* Semua laporan memakai kartu transaksi agar label dan nilai tetap jelas
+       pada desktop, laptop, tablet, maupun ponsel. */
+    .mobile-card-table { overflow: visible !important; }
+    .mobile-card-table .table { display:block; width:100%; table-layout:auto; font-size:.86rem; }
+    .mobile-card-table .table thead { display:none; }
+    .mobile-card-table .table tbody { display:grid; gap:14px; }
+    .mobile-card-table .table tr { display:block; padding:14px 18px; border:1px solid #c9d8f3; border-left:5px solid #164ec7; border-radius:16px; background:#fff; box-shadow:0 8px 22px rgba(22,78,199,.09); }
+    .mobile-card-table .table td { display:grid; grid-template-columns:minmax(190px,28%) minmax(0,1fr); gap:16px; align-items:start; width:100%; padding:9px 0; border:0; border-bottom:1px dashed #dbe4f4; overflow-wrap:anywhere; text-align:left !important; font-size:.86rem; }
+    .mobile-card-table .table td:last-child { border-bottom:0; }
+    .mobile-card-table .table td::before { content:attr(data-label); color:#607194; font-size:.74rem; font-weight:800; line-height:1.4; text-transform:uppercase; }
+    .mobile-card-table .table td[data-label=""] { display:block; text-align:center !important; }
+    .mobile-card-table .table td[data-label=""]::before { display:none; }
+    .mobile-card-table .table td .d-flex { flex-wrap:wrap; justify-content:flex-start !important; gap:8px !important; }
+    .mobile-card-table .table td .btn { width:auto; min-width:92px; min-height:40px; padding:.5rem .75rem; font-size:.78rem; white-space:nowrap; }
+    @media (max-width:680px) {
+      .mobile-card-table .table { font-size:.84rem; }
+      .mobile-card-table .table tr { padding:10px 12px; border-left-width:4px; border-radius:14px; }
+      .mobile-card-table .table td { grid-template-columns:minmax(105px,42%) minmax(0,1fr); gap:10px; padding:7px 0; font-size:.84rem; }
+      .mobile-card-table .table td .btn { width:100%; }
+    }
   </style>
 </head>
 <body>
@@ -805,7 +825,7 @@
         ["historyView", "bi-clock-history", "History Transaksi"]
       ];
       const payMethods = ["Cash", "Transfer", "Debit Card", "Qris", "Credit Card", "Piutang", "Deposit", "Bonus", "Free"];
-      const unitOptions = ["Pcs", "Lbr", "Batang", "Zak", "Liter", "Dus", "Rol", "Klg", "Pl", "Gln", "Psg", "Meter", "M2", "M3", "m", "m²", "m³", "1/4", "SI", "Kg", "Ton"];
+      const unitOptions = ["Pcs", "Lbr", "Batang", "Zak", "Liter", "Dus", "Rol", "Klg", "Pl", "Gln", "Psg", "Kol", "Engkel", "Ember", "M2", "M3", "m", "m²", "m³", "1/4", "SI", "Kg", "Ton"];
       const materialCategories = ["Pondasi dan Beton", "Dinding dan Penyimpanan", "Struktur Rangka", "Penutup Atap", "Plafon", "Penutup Lantai dan Dinding", "Pengecatan", "Kaca dan Pelindung", "Sanitari dan Plambing", "Pengikat dan Perangkat Keras"];
       const masterAccessOptions = ["Master Pelanggan", "Master Supplier", "Master Kategori", "Master Barang", "Master Paket", "Stok Opname", "Master Cetak Barcode"];
       const defaultAccessRules = {
@@ -1413,7 +1433,7 @@
         const addBtn = document.getElementById("addProductFromProductsBtn");
         if (addBtn) addBtn.onclick = openProductModal;
         const convertBtn = document.getElementById("convertProductBtn");
-        if (convertBtn) convertBtn.onclick = openProductConversionModal;
+        if (convertBtn) convertBtn.onclick = () => openProductConversionModal();
         bindProductActions();
         if (productDatabaseQuery) renderProductDatabaseSearch();
       }
@@ -1761,7 +1781,7 @@
               <div id="saleCart" class="cart-list">${cartRows(activeCart, "sale")}</div>
               <div class="row g-2 mt-3">
                 <div class="col-md-4"><label class="form-label">Metode Bayar</label><select id="salePayMethod" class="form-select">${payMethods.map((m) => `<option ${m === saleDraft.method ? "selected" : ""}>${m}</option>`).join("")}</select></div>
-                <div class="col-md-4"><label class="form-label">Uang Diterima</label><input id="saleCashReceived" type="number" min="0" value="${saleDraft.cashReceived || 0}" class="form-control" ${isCashMethod(saleDraft.method) ? "" : "disabled"}></div>
+                <div class="col-md-4"><label class="form-label">Uang Diterima</label><input id="saleCashReceived" type="text" inputmode="numeric" value="${saleDraft.cashReceived || 0}" class="form-control" placeholder="Contoh: 100000 atau 100.000" ${isCashMethod(saleDraft.method) ? "" : "disabled"}></div>
                 <div class="col-md-4"><label class="form-label">Bank Charge</label><input id="saleBankCharge" type="number" min="0" value="${saleDraft.bankCharge || 0}" class="form-control"></div>
                 <div class="col-12"><label class="form-label">Note</label><input id="saleNote" value="${saleDraft.note || ""}" class="form-control" placeholder="Catatan faktur/surat jalan"></div>
               </div>
@@ -1955,9 +1975,9 @@
         addCartLine(activeCart, product, qty, "sale", overrides);
       }
       function updateSaleDraftTotals() {
-        saleDraft.ongkir = Number(document.getElementById("saleOngkir").value || 0);
-        saleDraft.bankCharge = Number(document.getElementById("saleBankCharge").value || 0);
-        saleDraft.cashReceived = Number(document.getElementById("saleCashReceived").value || 0);
+        saleDraft.ongkir = toNumber(document.getElementById("saleOngkir").value);
+        saleDraft.bankCharge = toNumber(document.getElementById("saleBankCharge").value);
+        saleDraft.cashReceived = toNumber(document.getElementById("saleCashReceived").value);
         document.getElementById("saleGrandTotal").textContent = idr.format(saleGrandTotal());
         document.getElementById("saleCashReceived").disabled = !isCashMethod(saleDraft.method);
         document.getElementById("saleChangeRow").classList.toggle("d-none", !isCashMethod(saleDraft.method));
@@ -2072,7 +2092,7 @@
                 <div class="col-md-6"><label class="form-label">No. Pembelian</label><div class="input-group"><input id="purchaseInvoiceNo" class="form-control" value="${purchaseDraft.invoiceNo}" readonly><button id="refreshPurchaseInvoiceBtn" class="btn btn-outline-secondary" type="button"><i class="bi bi-arrow-clockwise"></i></button></div></div>
                 <div class="col-md-6"><label class="form-label">Biaya Ongkir</label><input id="purchaseOngkir" type="number" min="0" value="${purchaseDraft.ongkir || 0}" class="form-control"></div>
               </div>
-              <div class="row g-2 mt-3"><div class="col-md-4"><label class="form-label">Metode Bayar</label><select id="purchasePayMethod" class="form-select">${payMethods.map((m) => `<option ${m === purchaseDraft.method ? "selected" : ""}>${m}</option>`).join("")}</select></div><div class="col-md-4"><label class="form-label">Uang Diterima</label><input id="purchaseCashReceived" type="number" min="0" value="${purchaseDraft.cashReceived || 0}" class="form-control" ${isCashMethod(purchaseDraft.method) ? "" : "disabled"}></div><div class="col-md-4"><label class="form-label">Bank Charge</label><input id="purchaseBankCharge" type="number" min="0" value="${purchaseDraft.bankCharge || 0}" class="form-control"></div><div class="col-12"><label class="form-label">Note</label><input id="purchaseNote" value="${purchaseDraft.note || ""}" class="form-control"></div></div>
+              <div class="row g-2 mt-3"><div class="col-md-4"><label class="form-label">Metode Bayar</label><select id="purchasePayMethod" class="form-select">${payMethods.map((m) => `<option ${m === purchaseDraft.method ? "selected" : ""}>${m}</option>`).join("")}</select></div><div class="col-md-4"><label class="form-label">Uang Diterima</label><input id="purchaseCashReceived" type="text" inputmode="numeric" value="${purchaseDraft.cashReceived || 0}" class="form-control" placeholder="Contoh: 100000 atau 100.000" ${isCashMethod(purchaseDraft.method) ? "" : "disabled"}></div><div class="col-md-4"><label class="form-label">Bank Charge</label><input id="purchaseBankCharge" type="number" min="0" value="${purchaseDraft.bankCharge || 0}" class="form-control"></div><div class="col-12"><label class="form-label">Note</label><input id="purchaseNote" value="${purchaseDraft.note || ""}" class="form-control"></div></div>
               <div class="total-box mt-3"><span>Total Transaksi</span><strong id="purchaseGrandTotal">${idr.format(purchaseGrandTotal())}</strong></div>
               <div id="purchaseChangeRow" class="total-box mt-2 ${isCashMethod(purchaseDraft.method) ? "" : "d-none"}"><span>Kembali</span><strong id="purchaseCashChange">${idr.format(purchaseCashChange())}</strong></div>
             </section>
@@ -2181,9 +2201,9 @@
         });
       }
       function updatePurchaseDraftTotals() {
-        purchaseDraft.ongkir = Number(document.getElementById("purchaseOngkir").value || 0);
-        purchaseDraft.bankCharge = Number(document.getElementById("purchaseBankCharge").value || 0);
-        purchaseDraft.cashReceived = Number(document.getElementById("purchaseCashReceived").value || 0);
+        purchaseDraft.ongkir = toNumber(document.getElementById("purchaseOngkir").value);
+        purchaseDraft.bankCharge = toNumber(document.getElementById("purchaseBankCharge").value);
+        purchaseDraft.cashReceived = toNumber(document.getElementById("purchaseCashReceived").value);
         document.getElementById("purchaseGrandTotal").textContent = idr.format(purchaseGrandTotal());
         document.getElementById("purchaseCashReceived").disabled = !isCashMethod(purchaseDraft.method);
         document.getElementById("purchaseChangeRow").classList.toggle("d-none", !isCashMethod(purchaseDraft.method));

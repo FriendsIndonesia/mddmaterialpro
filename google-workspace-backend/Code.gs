@@ -186,6 +186,7 @@ function readLedgerRows_(ss, sheetName, kind) {
     const relation = String(pick(row, kind === "debt" ? ["supplier", "namasupplier", "relasi"] : ["pelanggan", "customer", "namapelanggan", "relasi"]) || "").trim();
     const base = {
       id: (kind === "debt" ? "HUT-" : "PIU-") + (invoiceNo || String(index + 2)).replace(/[^A-Za-z0-9]/g, ""),
+      source: kind === "debt" ? "Hutang" : "Piutang",
       invoiceNo: invoiceNo || (kind === "debt" ? "HUTANG-" : "PIUTANG-") + (index + 2),
       date: ledgerDate_(pick(row, ["tanggal", "date"])),
       dueDate: ledgerDate_(pick(row, ["jatuhtempo", "duedate"])),

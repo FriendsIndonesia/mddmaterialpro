@@ -1656,7 +1656,6 @@
                 <div class="col-12"><label class="form-label">Note</label><input id="saleNote" value="${saleDraft.note || ""}" class="form-control" placeholder="Catatan faktur/surat jalan"></div>
               </div>
               <div class="total-box mt-3"><span>Total Transaksi</span><strong id="saleGrandTotal">${idr.format(saleGrandTotal())}</strong></div>
-              <div class="total-box mt-2"><span>Metode Pembayaran</span><strong id="salePaymentMethod">${esc(saleDraft.method)}</strong></div>
               <div id="saleChangeRow" class="total-box mt-2 ${isCashMethod(saleDraft.method) ? "" : "d-none"}"><span>Kembali</span><strong id="saleCashChange">${idr.format(saleCashChange())}</strong></div>
             </section>
           </div>
@@ -1834,7 +1833,6 @@
         saleDraft.bankCharge = Number(document.getElementById("saleBankCharge").value || 0);
         saleDraft.cashReceived = Number(document.getElementById("saleCashReceived").value || 0);
         document.getElementById("saleGrandTotal").textContent = idr.format(saleGrandTotal());
-        document.getElementById("salePaymentMethod").textContent = saleDraft.method;
         document.getElementById("saleCashReceived").disabled = !isCashMethod(saleDraft.method);
         document.getElementById("saleChangeRow").classList.toggle("d-none", !isCashMethod(saleDraft.method));
         document.getElementById("saleCashChange").textContent = idr.format(saleCashChange());
@@ -1948,7 +1946,6 @@
               </div>
               <div class="row g-2 mt-3"><div class="col-md-4"><label class="form-label">Metode Bayar</label><select id="purchasePayMethod" class="form-select">${payMethods.map((m) => `<option ${m === purchaseDraft.method ? "selected" : ""}>${m}</option>`).join("")}</select></div><div class="col-md-4"><label class="form-label">Uang Diterima</label><input id="purchaseCashReceived" type="number" min="0" value="${purchaseDraft.cashReceived || 0}" class="form-control" ${isCashMethod(purchaseDraft.method) ? "" : "disabled"}></div><div class="col-md-4"><label class="form-label">Bank Charge</label><input id="purchaseBankCharge" type="number" min="0" value="${purchaseDraft.bankCharge || 0}" class="form-control"></div><div class="col-12"><label class="form-label">Note</label><input id="purchaseNote" value="${purchaseDraft.note || ""}" class="form-control"></div></div>
               <div class="total-box mt-3"><span>Total Transaksi</span><strong id="purchaseGrandTotal">${idr.format(purchaseGrandTotal())}</strong></div>
-              <div class="total-box mt-2"><span>Metode Pembayaran</span><strong id="purchasePaymentMethod">${esc(purchaseDraft.method)}</strong></div>
               <div id="purchaseChangeRow" class="total-box mt-2 ${isCashMethod(purchaseDraft.method) ? "" : "d-none"}"><span>Kembali</span><strong id="purchaseCashChange">${idr.format(purchaseCashChange())}</strong></div>
             </section>
           </div>
@@ -2049,7 +2046,6 @@
         purchaseDraft.bankCharge = Number(document.getElementById("purchaseBankCharge").value || 0);
         purchaseDraft.cashReceived = Number(document.getElementById("purchaseCashReceived").value || 0);
         document.getElementById("purchaseGrandTotal").textContent = idr.format(purchaseGrandTotal());
-        document.getElementById("purchasePaymentMethod").textContent = purchaseDraft.method;
         document.getElementById("purchaseCashReceived").disabled = !isCashMethod(purchaseDraft.method);
         document.getElementById("purchaseChangeRow").classList.toggle("d-none", !isCashMethod(purchaseDraft.method));
         document.getElementById("purchaseCashChange").textContent = idr.format(purchaseCashChange());
@@ -2122,12 +2118,11 @@
             <div class="row g-3 align-items-end">
               <div class="col-md-9"><label class="form-label">Nama Orang/Perusahaan atau Nomor Faktur</label><input id="financeDatabaseSearch" list="financeDatabaseNames" class="form-control" value="${esc(financeDatabaseQuery)}" autocomplete="off" placeholder="Ketik nama supplier, perusahaan, pelanggan, atau nomor faktur"><datalist id="financeDatabaseNames">${financeRelationOptions().map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist></div>
               <div class="col-md-3 d-grid gap-2"><button id="clearFinanceDatabaseSearch" class="btn btn-outline-secondary" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button><button id="bulkFinancePaymentBtn" class="btn btn-primary" type="button" disabled><i class="bi bi-check2-square"></i> Bayar Terpilih</button></div>
-              <div class="col-12"><div id="financeDatabaseSearchResults" class="small text-secondary">Ketik nama/perusahaan, nomor faktur, atau produk untuk menampilkan hutang dan piutang aktif.</div></div>
               <div class="col-12"><div id="financeBulkSelectionSummary" class="audit-box"><strong>Jumlah Total Terpilih:</strong> Rp 0</div></div>
             </div>
           </section>
-          <section class="panel"><div class="panel-header"><h3>Pembayaran Hutang</h3><button id="inputDebtDataBtn" class="btn btn-outline-primary btn-sm" type="button"><i class="bi bi-plus-lg"></i> Input Data</button></div>${paymentDueTable([], "debt")}</section>
-          <section class="panel mt-3"><div class="panel-header"><h3>Pembayaran Piutang</h3><button id="inputReceivableDataBtn" class="btn btn-outline-primary btn-sm" type="button"><i class="bi bi-plus-lg"></i> Input Data</button></div>${paymentDueTable([], "receivable")}</section>
+          <section class="panel"><div class="panel-header"><h3>Pembayaran Hutang</h3><button id="inputDebtDataBtn" class="btn btn-outline-primary btn-sm" type="button"><i class="bi bi-plus-lg"></i> Input Data</button></div><div id="financeDebtSearchResults" class="small text-secondary">Ketik nama/perusahaan atau nomor faktur untuk menampilkan hutang aktif.</div></section>
+          <section class="panel mt-3"><div class="panel-header"><h3>Pembayaran Piutang</h3><button id="inputReceivableDataBtn" class="btn btn-outline-primary btn-sm" type="button"><i class="bi bi-plus-lg"></i> Input Data</button></div><div id="financeReceivableSearchResults" class="small text-secondary">Ketik nama/perusahaan atau nomor faktur untuk menampilkan piutang aktif.</div></section>
           <section class="panel mt-3"><div class="panel-header"><h3>Laporan Petty Cash</h3><span class="chip">Ringkasan kas kecil</span></div>
             <div class="owner-report-grid">
               <div class="owner-report-item"><span>Petty Cash Awal</span><strong>${idr.format(pettyCashStart)}</strong></div>
@@ -2201,11 +2196,13 @@
       }
       function renderFinanceDatabaseSearch() {
         const input = document.getElementById("financeDatabaseSearch");
-        const target = document.getElementById("financeDatabaseSearchResults");
-        if (!input || !target) return;
+        const debtTarget = document.getElementById("financeDebtSearchResults");
+        const receivableTarget = document.getElementById("financeReceivableSearchResults");
+        if (!input || !debtTarget || !receivableTarget) return;
         const query = String(financeDatabaseQuery || input.value || "").trim().toLowerCase();
         if (!query) {
-          target.innerHTML = "Ketik nama/perusahaan, nomor faktur, atau produk untuk menampilkan hutang dan piutang aktif.";
+          debtTarget.innerHTML = "Ketik nama/perusahaan atau nomor faktur untuk menampilkan hutang aktif.";
+          receivableTarget.innerHTML = "Ketik nama/perusahaan atau nomor faktur untuk menampilkan piutang aktif.";
           updateBulkFinancePaymentButton();
           return;
         }
@@ -2221,8 +2218,9 @@
           const relationMatch = financeTextMatches([row.invoiceNo, row.noFaktur, row.invoice, row.customerName, row.pelanggan, row.customer, row.relation, row.customerWhatsapp, customer.name, customer.phone, customer.address], query);
           return relationMatch;
         }).map((row) => ({ type: "Piutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.customerName || personName(state.customers, row.customerId), date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due }));
-        const matches = [...debtMatches, ...receivableMatches];
-        target.innerHTML = matches.length ? `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th><i class="bi bi-check2-square"></i></th><th>Jenis</th><th>Nama/Perusahaan</th><th>No. Faktur</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="text-end">Total</th><th class="text-end">Sisa</th><th></th></tr></thead><tbody>${matches.map((row) => { const selectionKey = `${row.type === "Hutang" ? "debt" : "receivable"}:${row.id}`; return `<tr><td><input class="form-check-input" type="checkbox" data-finance-bulk-check="${selectionKey}" ${financeBulkSelection.has(selectionKey) ? "checked" : ""} aria-label="Pilih ${esc(row.invoice)}"></td><td><span class="soft-tag">${row.type}</span></td><td><strong>${esc(row.name)}</strong></td><td>${esc(row.invoice)}</td><td>${displayDate(row.date)}</td><td>${displayDate(row.dueDate)}</td><td class="text-end">${idr.format(row.total || 0)}</td><td class="text-end fw-bold">${idr.format(row.remaining || 0)}</td><td class="text-end"><button class="btn btn-sm btn-primary" data-finance-search-pay="${row.type === "Hutang" ? "debt" : "receivable"}" data-finance-search-id="${row.id}"><i class="bi bi-cash-coin"></i> Bayar</button></td></tr>`; }).join("")}</tbody></table></div>` : `<div class="text-center text-secondary py-3">Data hutang/piutang aktif tidak ditemukan.</div>`;
+        const resultTable = (rows, type) => rows.length ? `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th><i class="bi bi-check2-square"></i></th><th>Nama/Perusahaan</th><th>No. Faktur</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="text-end">Total</th><th class="text-end">Sisa</th><th></th></tr></thead><tbody>${rows.map((row) => { const selectionKey = `${type}:${row.id}`; return `<tr><td><input class="form-check-input" type="checkbox" data-finance-bulk-check="${selectionKey}" ${financeBulkSelection.has(selectionKey) ? "checked" : ""} aria-label="Pilih ${esc(row.invoice)}"></td><td><strong>${esc(row.name)}</strong></td><td>${esc(row.invoice)}</td><td>${displayDate(row.date)}</td><td>${displayDate(row.dueDate)}</td><td class="text-end">${idr.format(row.total || 0)}</td><td class="text-end fw-bold">${idr.format(row.remaining || 0)}</td><td class="text-end"><button class="btn btn-sm btn-primary" data-finance-search-pay="${type}" data-finance-search-id="${row.id}"><i class="bi bi-cash-coin"></i> Bayar</button></td></tr>`; }).join("")}</tbody></table></div>` : `<div class="text-center text-secondary py-3">Data ${type === "debt" ? "hutang" : "piutang"} aktif yang sesuai tidak ditemukan.</div>`;
+        debtTarget.innerHTML = resultTable(debtMatches, "debt");
+        receivableTarget.innerHTML = resultTable(receivableMatches, "receivable");
         document.querySelectorAll("[data-finance-search-pay]").forEach((button) => button.onclick = () => openPaymentModal(button.dataset.financeSearchPay, button.dataset.financeSearchId));
         document.querySelectorAll("[data-finance-bulk-check]").forEach((checkbox) => checkbox.onchange = () => { if (checkbox.checked) financeBulkSelection.add(checkbox.dataset.financeBulkCheck); else financeBulkSelection.delete(checkbox.dataset.financeBulkCheck); updateBulkFinancePaymentButton(); });
         updateBulkFinancePaymentButton();
@@ -3061,7 +3059,9 @@
         const printArea = document.getElementById("printArea");
         const bankAccounts = `<div class="thermal-bank-accounts"><div>BCA : 7361049555</div><div>BSI : 7215480709</div><div class="account-owner">A/N : TABNA</div><div>BRI : 224501000715564</div><div class="account-owner">A/N : KHAIRIYATUN NISA</div></div>`;
         const paymentMethod = String(doc.method || "Cash").toUpperCase();
-        const cashRows = isCashMethod(doc.method) ? `<span>UANG DITERIMA</span><span>:</span><span>${number.format(toNumber(doc.cashReceived))}</span><span>KEMBALI</span><span>:</span><span>${number.format(toNumber(doc.change))}</span>` : "";
+        const receivedCash = toNumber(doc.cashReceived) || toNumber(doc.total);
+        const cashChange = Math.max(0, toNumber(doc.change) || receivedCash - toNumber(doc.total));
+        const cashRows = isCashMethod(doc.method) ? `<span>UANG DITERIMA</span><span>:</span><span>${number.format(receivedCash)}</span><span>KEMBALI</span><span>:</span><span>${number.format(cashChange)}</span>` : "";
         const completeCopy = `<section class="receipt-copy">${meta("LEMBAR 1 - LENGKAP") }<div class="thermal-items">${pricedItems}</div><div class="thermal-separator"></div><div class="thermal-totals">${chargeRows}<span>TOTAL TRANSAKSI</span><span>:</span><span>${number.format(doc.total)}</span><span>METODE BAYAR</span><span>:</span><span>${paymentMethod}</span>${cashRows}</div><div class="thermal-separator"></div><div class="thermal-thanks">Terima Kasih</div>${bankAccounts}</section>`;
         const deliveryCopy = `<section class="receipt-copy">${meta("LEMBAR 2 - TANPA HARGA") }<div class="thermal-items">${deliveryItems}</div><div class="thermal-separator"></div><div class="thermal-thanks">Terima Kasih</div>${bankAccounts}</section>`;
         printArea.innerHTML = copyStage === 1 ? completeCopy : deliveryCopy;
@@ -3291,4 +3291,3 @@
   </script>
 </body>
 </html>
-

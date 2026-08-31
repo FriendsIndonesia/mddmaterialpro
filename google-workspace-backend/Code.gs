@@ -56,31 +56,24 @@ function doPost(e) {
     writeProfile_(ss, data);
     // New clients send row-level changes. This preserves records entered or
     // edited directly in Google Sheets instead of replacing every table.
-    let preferCanonicalFinancialTables = { purchases: false, sales: false };
     if (payload.changes && payload.changes.tables && Number(payload.syncProtocol || 0) >= 2) {
       const purchaseChange = payload.changes.tables.purchases || {};
       const salesChange = payload.changes.tables.sales || {};
-      const purchaseDeletes = purchaseChange.deletes || [];
-      const salesDeletes = salesChange.deletes || [];
-      const purchaseUpserts = purchaseChange.upserts || [];
-      const salesUpserts = salesChange.upserts || [];
-      // Perubahan transaksi yang benar-benar dikirim aplikasi menjadi sumber
-      // utama. Tanpa delta transaksi, edit manual pada ledger tetap dipelihara.
-      preferCanonicalFinancialTables = {
-        purchases: purchaseDeletes.length > 0 || purchaseUpserts.length > 0,
-        sales: salesDeletes.length > 0 || salesUpserts.length > 0
-      };
+      const purchasesBefore = readTableDefinition_(ss, TABLES.find((table) => table.key === "purchases"));
+      const salesBefore = readTableDefinition_(ss, TABLES.find((table) => table.key === "sales"));
       TABLES.forEach((table) => applyTableChanges_(ss, table, payload.changes.tables[table.key]));
+      // Ledger yang dapat diedit manual tidak pernah ditulis ulang secara penuh.
+      // Hanya baris transaksi yang benar-benar berubah di aplikasi yang disentuh.
+      applyLedgerChangesSafely_(ss, "Hutang", "debt", purchaseChange, purchasesBefore);
+      applyLedgerChangesSafely_(ss, "Piutang", "receivable", salesChange, salesBefore);
     } else if (!payload.changes || !payload.changes.tables) {
       // Backward-compatible import: merge rows and never delete sheet-only data.
       TABLES.forEach((table) => mergeTable_(ss, table, data[table.key] || []));
     } else {
       // Abaikan delta dari aplikasi lama. Versi lama dapat memiliki snapshot
       // cache yang salah dan tidak boleh lagi menimpa input langsung di Sheet.
-      preferCanonicalFinancialTables = { purchases: false, sales: false };
     }
     writeRawState_(ss, payload);
-    syncFinancialLedgerSheets_(ss, preferCanonicalFinancialTables);
 
     return output_({
       ok: true,
@@ -240,6 +233,51 @@ function syncFinancialLedgerSheets_(ss, preferCanonical) {
   if (!preferCanonical.sales) data.sales = mergeLedgerRows_(data.sales, readLedgerRows_(ss, "Piutang", "receivable"));
   writeLedgerSheet_(ss, "Hutang", data.purchases, "debt");
   writeLedgerSheet_(ss, "Piutang", data.sales, "receivable");
+}
+
+// Terapkan delta aplikasi secara baris-per-baris. Fungsi ini sengaja tidak
+// memakai clearContent agar input manual di tab Hutang/Piutang tidak mungkin
+// hilang hanya karena snapshot aplikasi kosong atau tertinggal.
+function applyLedgerChangesSafely_(ss, sheetName, kind, change, canonicalBefore) {
+  if (!change) return;
+  const upserts = change.upserts || [];
+  const deletes = change.deletes || [];
+  if (!upserts.length && !deletes.length) return;
+  const headers = kind === "debt" ? ["Tanggal", "Jatuh Tempo", "No. Faktur", "Supplier", "Hutang Aktif", "Bayar", "Retur", "Sisa Hutang", "Metode", "Catatan"] : ["Tanggal", "Jatuh Tempo", "No. Faktur", "Pelanggan", "Piutang Aktif", "Bayar", "Retur", "Sisa Piutang", "Metode", "Catatan"];
+  const sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
+  const currentHeaders = sheet.getRange(1, 1, 1, headers.length).getDisplayValues()[0];
+  if (JSON.stringify(currentHeaders) !== JSON.stringify(headers)) sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  const beforeById = {};
+  (canonicalBefore || []).forEach((row) => { if (row && row.id) beforeById[String(row.id)] = row; });
+  const invoiceRows = () => {
+    const map = {};
+    if (sheet.getLastRow() < 2) return map;
+    sheet.getRange(2, 3, sheet.getLastRow() - 1, 1).getDisplayValues().forEach((value, index) => {
+      const key = String(value[0] || "").trim().toLowerCase();
+      if (key && !map[key]) map[key] = index + 2;
+    });
+    return map;
+  };
+  // Penghapusan hanya boleh menyentuh transaksi yang sebelumnya memang ada
+  // di tabel aplikasi. Baris manual yang belum pernah menjadi canonical aman.
+  deletes.forEach((id) => {
+    const previous = beforeById[String(id)];
+    if (!previous) return;
+    const key = String(previous.invoiceNo || previous.id || "").trim().toLowerCase();
+    const rowNumber = invoiceRows()[key];
+    if (rowNumber) sheet.deleteRow(rowNumber);
+  });
+  upserts.forEach((row) => {
+    if (!row) return;
+    const invoice = String(row.invoiceNo || row.id || "").trim();
+    if (!invoice) return;
+    const values = [[ledgerDateValue_(row.date), ledgerDateValue_(row.dueDate), invoice, kind === "debt" ? (row.salesName || row.company || "-") : (row.customerName || "-"), Number(row.total || 0), Number(row.paid || 0), Number(row.returnAmount || 0), Number(row.due || 0), row.method || "Tempo", row.note || ""]];
+    const rowNumber = invoiceRows()[invoice.toLowerCase()] || sheet.getLastRow() + 1;
+    sheet.getRange(rowNumber, 1, 1, headers.length).setValues(values);
+    sheet.getRange(rowNumber, 1, 1, 2).setNumberFormat("dd/MM/yyyy");
+    sheet.getRange(rowNumber, 5, 1, 4).setNumberFormat("#,##0");
+  });
+  sheet.setFrozenRows(1);
 }
 
 function writeLedgerSheet_(ss, sheetName, rows, kind) {
@@ -560,4 +598,3 @@ function output_(value, callback) {
   const mime = callback ? ContentService.MimeType.JAVASCRIPT : ContentService.MimeType.JSON;
   return ContentService.createTextOutput(body).setMimeType(mime);
 }
-

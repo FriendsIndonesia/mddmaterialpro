@@ -46,7 +46,7 @@ Repository:
 
 ## Login Awal
 
-- Owner: `owner` / `owner123`
+- Akun dan kode akses dikelola Owner melalui menu **Setting → Kode Akses** dan tidak dipublikasikan di repository.
 - Kasir: `kasir` / `kasir123`
 - Gudang: `gudang` / `gudang123`
 

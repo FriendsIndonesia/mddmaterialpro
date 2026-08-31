@@ -768,8 +768,8 @@
       const today = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jakarta", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
       const displayDate = (value) => {
         if (!value) return "-";
-        const text = String(value).slice(0, 10);
-        const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        const text = String(value).trim();
+        const match = text.match(/(\d{4})-(\d{2})-(\d{2})/);
         return match ? `${match[3]}/${match[2]}/${match[1]}` : value;
       };
       const idr = new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 });
@@ -829,7 +829,7 @@
       let syncTimer = null;
       let syncPending = false;
       let autoPullTimer = null;
-      let refreshPullCount = 0;
+      let lastBackendRevision = "";
       let isSyncing = false;
       let isPulling = false;
       const REPORT_DISPLAY_STORAGE_KEY = "mdd_report_display_hidden_v1";
@@ -1057,13 +1057,21 @@
         return { tables };
       }
 
+      function buildSyncSettings() {
+        const base = lastSyncedSnapshot || {};
+        return SYNC_SETTING_KEYS.reduce((changes, key) => {
+          if (JSON.stringify(state[key]) !== JSON.stringify(base[key])) changes[key] = state[key];
+          return changes;
+        }, {});
+      }
+
       function hasLocalSyncChanges() {
         if (Object.keys(buildSyncChanges().tables).length > 0) return true;
         if (!lastSyncedSnapshot) return false;
         return SYNC_SETTING_KEYS.some((key) => JSON.stringify(state[key]) !== JSON.stringify(lastSyncedSnapshot[key]));
       }
 
-      function loadGoogleWorkspaceJsonp(action = "state") {
+      function requestGoogleWorkspaceJsonp(action = "state") {
         return new Promise((resolve) => {
           if (!state.profile?.onlineMode || !state.profile?.googleEndpoint) return resolve(false);
           const callbackName = `mddBackendState${Date.now()}${Math.random().toString(36).slice(2)}`;
@@ -1079,9 +1087,8 @@
           }, action === "products" || action === "master" ? 12000 : 7000);
           window[callbackName] = (response) => {
             clearTimeout(timer);
-            const changed = action === "state" ? mergeStateFromBackend(response?.data) : mergeSubsetFromBackend(response?.data);
             cleanup();
-            resolve(changed);
+            resolve(response || false);
           };
           script.onerror = () => {
             clearTimeout(timer);
@@ -1090,6 +1097,20 @@
           };
           script.src = `${state.profile.googleEndpoint}${separator}action=${action}&callback=${callbackName}&_=${Date.now()}`;
           document.head.appendChild(script);
+        });
+      }
+      async function loadGoogleWorkspaceJsonp(action = "state") {
+        const response = await requestGoogleWorkspaceJsonp(action);
+        if (!response) return false;
+        return action === "state" ? mergeStateFromBackend(response?.data) : mergeSubsetFromBackend(response?.data);
+      }
+
+      function syncChangesConfirmed(remoteData, changes) {
+        if (!remoteData || !changes?.tables) return false;
+        return Object.entries(changes.tables).every(([key, change]) => {
+          const remoteRows = Array.isArray(remoteData[key]) ? remoteData[key] : [];
+          const remoteIds = new Set(remoteRows.map((row) => rowIdentity(key, row)).filter(Boolean));
+          return (change.upserts || []).every((row) => remoteIds.has(rowIdentity(key, row))) && (change.deletes || []).every((id) => !remoteIds.has(String(id)));
         });
       }
 
@@ -1114,10 +1135,15 @@
         if (isSyncing || syncPending || isPulling || document.hidden) return;
         isPulling = true;
         try {
-          refreshPullCount += 1;
-          const action = ["finance", "masterlite", "products"][(refreshPullCount - 1) % 3];
-          const changed = await loadGoogleWorkspaceState(action);
-          if (changed) renderSyncedState();
+          const status = await requestGoogleWorkspaceJsonp("revision");
+          if (!status?.ok || !status.revision || status.revision === lastBackendRevision) return;
+          const results = await Promise.all([
+            loadGoogleWorkspaceState("finance"),
+            loadGoogleWorkspaceState("masterlite"),
+            loadGoogleWorkspaceState("products")
+          ]);
+          lastBackendRevision = status.revision;
+          if (results.some(Boolean)) renderSyncedState();
         } finally {
           isPulling = false;
         }
@@ -1219,8 +1245,13 @@
         setTimeout(() => {
           if (!hasLocalSyncChanges()) loadGoogleWorkspaceState("products").then((loaded) => { if (loaded) renderSyncedState(); });
         }, 100);
+        requestGoogleWorkspaceJsonp("revision").then((result) => {
+          if (result?.ok && result.revision) lastBackendRevision = result.revision;
+        }).catch(() => {});
         clearInterval(autoPullTimer);
-        autoPullTimer = setInterval(refreshGoogleWorkspaceState, 1500);
+        // Lima detik cukup responsif untuk tiga perangkat, tetapi jauh lebih aman
+        // terhadap kuota Apps Script dibanding polling setiap 1,5 detik.
+        autoPullTimer = setInterval(refreshGoogleWorkspaceState, 5000);
         window.onfocus = refreshGoogleWorkspaceState;
         window.ononline = () => { queueGoogleWorkspaceSync(); refreshGoogleWorkspaceState(); };
       }
@@ -2777,12 +2808,15 @@
         return `<div class="table-responsive"><table class="table table-hover align-middle"><thead><tr>${keys.map((k) => `<th>${k}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${keys.map((k) => `<td>${formatCell(r[k], k)}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="${keys.length}" class="text-center text-secondary">Belum ada data.</td></tr>`}</tbody></table></div>`;
       }
       function formatCell(value, key = "") {
-        const plainNumberKeys = new Set(["kode", "code", "qty", "item", "stock", "stock_awal", "stock_masuk", "stock_keluar", "stock_akhir", "min", "systemStock", "physicalStock", "difference"]);
+        const identifierKeys = new Set(["kode", "code", "sku", "barcode", "phone", "telepon", "telp", "whatsapp", "invoice", "invoiceNo", "no_po", "no_faktur"]);
+        const plainNumberKeys = new Set(["qty", "item", "stock", "stock_awal", "stock_masuk", "stock_keluar", "stock_akhir", "min", "systemStock", "physicalStock", "difference"]);
+        if (key === "aksi") return value || "";
         if (/date|tanggal|jatuh|tempo/i.test(String(key))) return displayDate(value);
+        if (identifierKeys.has(key)) return esc(value ?? "-");
         if (typeof value === "number") return plainNumberKeys.has(key) ? number.format(value) : idr.format(value);
         if (Array.isArray(value)) return `${value.length} item`;
         if (typeof value === "boolean") return value ? "Aktif" : "Nonaktif";
-        return value ?? "-";
+        return esc(value ?? "-");
       }
       function esc(value) {
         return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
@@ -3326,12 +3360,6 @@
           renderAll();
         });
       }
-      function refreshProducts() {
-        const before = state.products.length;
-        state.products = state.products.filter((p) => p.active !== false);
-        saveState(`Refresh data barang: ${before - state.products.length} discontinue dihapus`);
-        renderAll();
-      }
       function backupDatabase() {
         const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
         const a = document.createElement("a");
@@ -3365,29 +3393,25 @@
         syncPending = false;
         try {
           const changes = buildSyncChanges();
-          await fetch(state.profile.googleEndpoint, { method: "POST", mode: "no-cors", body: JSON.stringify({ app: "MDD Material Pro", syncProtocol: 2, account: state.profile.googleAccount || "friendsindonesia28@gmail.com", githubRepo: state.profile.githubRepo || "https://github.com/FriendsIndonesia/mddmaterialpro", sentAt: new Date().toISOString(), queue: state.syncQueue, changes, data: state }) });
+          if (!Object.keys(changes.tables).length && !hasLocalSyncChanges()) return;
+          const settings = buildSyncSettings();
+          await fetch(state.profile.googleEndpoint, { method: "POST", mode: "no-cors", body: JSON.stringify({ app: "MDD Material Pro", syncProtocol: 2, account: state.profile.googleAccount || "friendsindonesia28@gmail.com", githubRepo: state.profile.githubRepo || "https://github.com/FriendsIndonesia/mddmaterialpro", sentAt: new Date().toISOString(), queue: state.syncQueue, changes, settings }) });
+          const verifiedResponse = await requestGoogleWorkspaceJsonp("state");
+          if (!verifiedResponse || !syncChangesConfirmed(verifiedResponse.data, changes)) throw new Error("Backend belum mengonfirmasi perubahan.");
+          mergeStateFromBackend(verifiedResponse.data);
           state.syncQueue = [];
           localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
           lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
-          toast("Sinkron dua arah berhasil dikirim ke Google Workspace.");
-          setTimeout(() => {
-            Promise.all([loadGoogleWorkspaceState("finance"), loadGoogleWorkspaceState("masterlite")]).then((results) => {
-              if (results.some(Boolean)) renderSyncedState();
-            });
-          }, 800);
+          renderSyncedState();
+          toast("Sinkron dua arah berhasil dan telah dikonfirmasi backend.");
         } catch {
-          toast("Gagal sinkron. Data tetap aman di mode offline.");
+          syncPending = true;
+          clearTimeout(syncTimer);
+          syncTimer = setTimeout(syncGoogleWorkspace, 2500);
+          toast("Sinkron belum dikonfirmasi. Data lokal tetap aman dan akan dicoba kembali otomatis.");
         } finally {
           isSyncing = false;
-          syncPending = false;
         }
-      }
-      function clearReports() {
-        if (session.role !== "Owner") return toast("Hanya owner yang dapat menghapus laporan.");
-        if (!confirm("Hapus semua transaksi dan laporan? Master data tetap disimpan.")) return;
-        Object.assign(state, { sales: [], purchases: [], stockMoves: [], payments: [], cashTx: [], returns: [], pendingSales: [], pendingPurchases: [], history: [] });
-        saveState("Data laporan dihapus owner");
-        renderAll();
       }
       async function exportElementPdf(elementId, filename) {
         if (!window.jspdf || !window.html2canvas) {

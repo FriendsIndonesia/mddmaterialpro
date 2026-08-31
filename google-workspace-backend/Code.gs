@@ -16,7 +16,7 @@ const TABLES = [
   { key: "cashTx", sheet: "CashTransactions", fields: ["id", "date", "type", "category", "accountId", "amount", "note"] },
   { key: "payments", sheet: "Payments", fields: ["id", "date", "refId", "invoiceNo", "relation", "type", "amount", "remaining", "method", "note"] },
   { key: "stockMoves", sheet: "StockMoves", fields: ["id", "number", "date", "productId", "sku", "productName", "unit", "type", "systemStock", "physicalStock", "difference", "qty", "note"] },
-  { key: "returns", sheet: "Returns", fields: ["id", "module", "date", "refId", "invoiceNo", "productId", "product", "qty", "amount", "total", "method", "note"] },
+  { key: "returns", sheet: "Returns", fields: ["id", "module", "date", "refId", "invoiceNo", "productId", "product", "qty", "unit", "primaryQty", "amount", "total", "method", "note"] },
   { key: "pendingSales", sheet: "PendingSales", fields: ["id", "invoiceNo", "date", "customerId", "customerName", "customerType", "customerAddress", "customerWhatsapp", "method", "items", "ongkir", "bankCharge", "cashReceived", "change", "total", "note"] },
   { key: "pendingPurchases", sheet: "PendingPurchases", fields: ["id", "invoiceNo", "date", "dueDate", "supplierId", "salesName", "company", "whatsapp", "method", "items", "ongkir", "bankCharge", "cashReceived", "change", "total", "note"] },
   { key: "history", sheet: "History", fields: ["id", "date", "user", "action"] },
@@ -29,7 +29,8 @@ function doGet(e) {
   const action = String((e && e.parameter && e.parameter.action) || "status").toLowerCase();
   const callback = e && e.parameter && e.parameter.callback;
   let payload;
-  if (action === "state") payload = readState_(ss);
+  if (action === "revision") payload = { ok: true, revision: getRevision_() };
+  else if (action === "state") payload = readState_(ss);
   else if (action === "auth") payload = { ok: true, app: APP_NAME, source: "Sheets", data: readProfile_(ss) };
   else if (action === "finance") payload = readSubsetState_(ss, ["purchases", "sales", "payments", "cashAccounts", "cashTx", "returns", "pendingSales", "pendingPurchases"]);
   else if (action === "masterlite") payload = readSubsetState_(ss, ["customers", "suppliers", "employees", "categories", "discounts", "cashAccounts", "packages", "stockMoves"]);
@@ -53,7 +54,8 @@ function doPost(e) {
     ensureWorkbook_(ss);
 
     writeMetadata_(ss, payload, data);
-    writeProfile_(ss, data);
+    if (payload.changes && Number(payload.syncProtocol || 0) >= 2) writeProfile_(ss, payload.settings || {});
+    else writeProfile_(ss, data);
     // New clients send row-level changes. This preserves records entered or
     // edited directly in Google Sheets instead of replacing every table.
     if (payload.changes && payload.changes.tables && Number(payload.syncProtocol || 0) >= 2) {
@@ -74,6 +76,7 @@ function doPost(e) {
       // cache yang salah dan tidak boleh lagi menimpa input langsung di Sheet.
     }
     writeRawState_(ss, payload);
+    touchRevision_();
 
     return output_({
       ok: true,
@@ -106,7 +109,8 @@ function statusPayload_(ss) {
     githubRepo: GITHUB_REPO,
     spreadsheetId: ss.getId(),
     spreadsheetUrl: ss.getUrl(),
-    message: "Backend Google Workspace siap menerima dan mengirim database MDD Material Pro."
+    message: "Backend Google Workspace siap menerima dan mengirim database MDD Material Pro.",
+    revision: getRevision_()
   };
 }
 
@@ -132,6 +136,9 @@ function readSubsetState_(ss, keys) {
   (keys || []).forEach((key) => wanted[key] = true);
   const data = {};
   TABLES.filter((table) => wanted[table.key]).forEach((table) => data[table.key] = readTableDefinition_(ss, table));
+  // Scope master juga membawa konfigurasi agar perubahan yang dilakukan
+  // langsung pada tab Profile mengalir ke perangkat tanpa full-state pull.
+  if (wanted.customers) Object.assign(data, readProfile_(ss));
   overlayFinancialLedgers_(ss, data);
   return {
     ok: true,
@@ -388,9 +395,12 @@ function writeMetadata_(ss, payload, data) {
 }
 
 function writeProfile_(ss, data) {
-  const rows = [];
-  ["profile", "hardware", "accessCodes", "accessRules", "userAccounts", "deletionTombstones"].forEach((key) => rows.push([key, normalizeValue_(data[key] || {})]));
-  writeKeyValue_(ss, "Profile", rows);
+  const allowed = ["profile", "hardware", "accessCodes", "accessRules", "userAccounts", "deletionTombstones"];
+  const rows = allowed.filter((key) => Object.prototype.hasOwnProperty.call(data || {}, key)).map((key) => [key, normalizeValue_(data[key] || {})]);
+  if (!rows.length) return;
+  const existing = readKeyValue_(ss, "Profile");
+  rows.forEach((row) => { existing[row[0]] = row[1]; });
+  writeKeyValue_(ss, "Profile", Object.keys(existing).map((key) => [key, existing[key]]));
 }
 
 function readProfile_(ss) {
@@ -443,35 +453,41 @@ function writeTable_(ss, sheetName, fields, rows) {
 
 function mergeTable_(ss, table, incomingRows) {
   if (!Array.isArray(incomingRows) || incomingRows.length === 0) return;
-  const current = readTableDefinition_(ss, table);
-  const keyField = table.fields.indexOf("id") >= 0 ? "id" : table.fields[0];
-  const merged = {};
-  current.forEach((row) => {
-    const key = String(row[keyField] || "").trim();
-    if (key) merged[key] = row;
-  });
-  incomingRows.forEach((row) => {
-    const key = String(row && row[keyField] || "").trim();
-    if (key) merged[key] = row;
-  });
-  writeTable_(ss, table.sheet, table.fields, Object.keys(merged).map((key) => merged[key]));
+  // Klien lama tetap hanya melakukan upsert per baris. Jangan pernah menulis
+  // ulang seluruh sheet karena pengguna bisa sedang mengetik langsung di sana.
+  applyTableChanges_(ss, table, { upserts: incomingRows, deletes: [] });
 }
 
 function applyTableChanges_(ss, table, change) {
   if (!change) return;
-  const current = readTableDefinition_(ss, table);
+  const sheet = ensureSheet_(ss, table.sheet, table.fields);
   const keyField = table.fields.indexOf("id") >= 0 ? "id" : table.fields[0];
-  const rowsById = {};
-  current.forEach((row) => {
-    const key = String(row[keyField] || "").trim();
-    if (key) rowsById[key] = row;
-  });
-  (change.deletes || []).forEach((id) => delete rowsById[String(id)]);
+  const keyIndex = table.fields.indexOf(keyField);
+  const rowById = {};
+  if (sheet.getLastRow() > 1) {
+    sheet.getRange(2, keyIndex + 1, sheet.getLastRow() - 1, 1).getDisplayValues().forEach((row, index) => {
+      const id = String(row[0] || "").trim();
+      if (id) rowById[id] = index + 2;
+    });
+  }
+  // Hapus dari bawah ke atas agar nomor baris yang belum diproses tidak bergeser.
+  (change.deletes || []).map((id) => rowById[String(id)]).filter(Boolean).sort((a, b) => b - a).forEach((rowNumber) => sheet.deleteRow(rowNumber));
+  // Bangun ulang indeks setelah delete, lalu sentuh hanya baris yang berubah.
+  const refreshedRowById = {};
+  if (sheet.getLastRow() > 1) {
+    sheet.getRange(2, keyIndex + 1, sheet.getLastRow() - 1, 1).getDisplayValues().forEach((row, index) => {
+      const id = String(row[0] || "").trim();
+      if (id) refreshedRowById[id] = index + 2;
+    });
+  }
   (change.upserts || []).forEach((row) => {
     const key = String(row && row[keyField] || "").trim();
-    if (key) rowsById[key] = row;
+    if (!key) return;
+    const values = table.fields.map((field) => normalizeValue_(row[field]));
+    const rowNumber = refreshedRowById[key] || sheet.getLastRow() + 1;
+    sheet.getRange(rowNumber, 1, 1, table.fields.length).setValues([values]);
+    refreshedRowById[key] = rowNumber;
   });
-  writeTable_(ss, table.sheet, table.fields, Object.keys(rowsById).map((key) => rowsById[key]));
 }
 
 // Installable edit trigger: validates manual rows and gives missing records a
@@ -489,6 +505,17 @@ function onSpreadsheetEdit(e) {
     const prefix = table.sheet.replace(/[^A-Za-z]/g, "").slice(0, 3).toUpperCase() || "ROW";
     idCell.setValue(prefix + "-" + Utilities.getUuid().slice(0, 12).toUpperCase());
   }
+  touchRevision_();
+}
+
+function getRevision_() {
+  return PropertiesService.getScriptProperties().getProperty("DATA_REVISION") || "0";
+}
+
+function touchRevision_() {
+  const revision = String(Date.now()) + "-" + Utilities.getUuid().slice(0, 8);
+  PropertiesService.getScriptProperties().setProperty("DATA_REVISION", revision);
+  return revision;
 }
 
 function installTwoWaySyncTrigger() {
@@ -546,18 +573,26 @@ function readTable_(ss, sheetName) {
 
 function writeRawState_(ss, payload) {
   const sheet = ensureSheet_(ss, "RawState", ["syncedAt", "payloadJson"]);
-  const json = JSON.stringify(payload);
-  const compactPayload = json.length > 45000 ? {
+  // Simpan audit teknis yang ringkas saja. Snapshot lengkap dapat berisi kode
+  // akses dan akan memperbesar spreadsheet tanpa manfaat operasional.
+  const changes = payload.changes && payload.changes.tables ? payload.changes.tables : {};
+  const compactPayload = {
     app: payload.app || APP_NAME,
     account: payload.account || OWNER_EMAIL,
     githubRepo: payload.githubRepo || GITHUB_REPO,
     sentAt: payload.sentAt || new Date().toISOString(),
     storageMode: "tables",
-    message: "Payload besar disimpan di sheet tabel terstruktur, bukan di satu cell RawState.",
-    counts: tableCounts_(payload.data || {})
-  } : payload;
+    counts: tableCounts_(payload.data || {}),
+    changes: Object.keys(changes).reduce((result, key) => {
+      result[key] = {
+        upserts: Array.isArray(changes[key].upserts) ? changes[key].upserts.length : 0,
+        deletes: Array.isArray(changes[key].deletes) ? changes[key].deletes.length : 0
+      };
+      return result;
+    }, {})
+  };
   sheet.appendRow([new Date().toISOString(), JSON.stringify(compactPayload)]);
-  const maxRows = 100;
+  const maxRows = 20;
   const extraRows = sheet.getLastRow() - maxRows - 1;
   if (extraRows > 0) sheet.deleteRows(2, extraRows);
 }

@@ -587,6 +587,19 @@
       .cart-row { grid-template-columns: 1fr 70px 1fr; }
       .cart-row .remove-line { grid-column: 3; }
       .owner-report-grid { grid-template-columns: 1fr; }
+      .mobile-card-table { overflow: visible !important; }
+      .mobile-card-table .table { display: block; table-layout: auto; width: 100%; font-size: .84rem; }
+      .mobile-card-table .table thead { display: none; }
+      .mobile-card-table .table tbody { display: grid; gap: 12px; }
+      .mobile-card-table .table tr { display: block; padding: 10px 12px; border: 1px solid #c9d8f3; border-left: 4px solid #164ec7; border-radius: 14px; background: #fff; box-shadow: 0 7px 18px rgba(22,78,199,.09); }
+      .mobile-card-table .table td { display: grid; grid-template-columns: minmax(105px, 42%) minmax(0, 1fr); gap: 10px; align-items: start; width: 100%; padding: 7px 0; border: 0; border-bottom: 1px dashed #dbe4f4; overflow-wrap: anywhere; text-align: left !important; }
+      .mobile-card-table .table td:last-child { border-bottom: 0; }
+      .mobile-card-table .table td::before { content: attr(data-label); color: #607194; font-size: .72rem; font-weight: 800; line-height: 1.35; text-transform: uppercase; }
+      .mobile-card-table .table td[data-label=""] { display: block; text-align: center !important; }
+      .mobile-card-table .table td[data-label=""]::before { display: none; }
+      .mobile-card-table .table td .btn, .mobile-card-table .table td .d-flex { width: 100%; }
+      .mobile-card-table .table td .d-flex { flex-wrap: wrap; justify-content: flex-start !important; }
+      .mobile-card-table .table td .btn { min-height: 40px; font-size: .78rem; white-space: nowrap; }
     }
     @media print {
       @page { margin: 0; size: auto; }
@@ -1177,6 +1190,7 @@
       function init() {
         renderNav();
         bind();
+        new MutationObserver(() => makeTablesMobileFriendly(document.getElementById("appShell"))).observe(document.getElementById("appShell"), { childList: true, subtree: true });
         const saved = sessionStorage.getItem("mdd_session");
         if (saved) session = JSON.parse(saved);
         if (session) showApp(); else {
@@ -1300,6 +1314,20 @@
         };
         (renderers[active] || renderDashboard)();
         injectClearReportButton(active);
+        makeTablesMobileFriendly(document.getElementById(active));
+      }
+
+      function makeTablesMobileFriendly(root = document) {
+        root?.querySelectorAll?.(".table-responsive").forEach((wrapper) => {
+          const table = wrapper.querySelector("table");
+          if (!table) return;
+          const labels = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
+          if (!labels.length) return;
+          wrapper.classList.add("mobile-card-table");
+          table.querySelectorAll("tbody tr").forEach((row) => {
+            [...row.children].forEach((cell, index) => cell.dataset.label = labels[index] || "");
+          });
+        });
       }
 
       function injectClearReportButton(view) {
@@ -2854,6 +2882,7 @@
         document.getElementById("modalBody").innerHTML = body;
         document.querySelector("#modalSubmitBtn span").textContent = submitLabel;
         modalSubmit = submit;
+        makeTablesMobileFriendly(document.getElementById("modalBody"));
         bootstrap.Modal.getOrCreateInstance(document.getElementById("formModal")).show();
       }
       function closeModal() {
@@ -2881,7 +2910,7 @@
         openModal("Konversi Produk", `
           <div class="p-3 rounded-4 border" style="border-color:#d9b35f!important;background:linear-gradient(135deg,#f8fbff,#fffaf0)">
             <div class="row g-3">
-              <div class="col-12"><label class="form-label">Pilih Produk</label><select id="conversionProductId" name="productId" class="form-select">${state.products.filter((p) => p.active !== false).map((p) => `<option value="${p.id}" ${p.id === initial.id ? "selected" : ""}>${esc(p.code)} — ${esc(p.name)}</option>`).join("")}</select></div>
+              <div class="col-12"><label class="form-label">Pilih Produk</label><input id="conversionProductSearch" class="form-control" autocomplete="off" placeholder="Ketik nama, barcode/SKU, kategori, atau satuan produk" value="${productId ? esc(`${initial.code} — ${initial.name}`) : ""}"><input id="conversionProductId" name="productId" type="hidden" value="${productId ? esc(initial.id) : ""}"><div id="conversionProductResults" class="search-results mt-2"></div><div class="form-text">Ketik minimal satu huruf. Semua produk yang sesuai akan ditampilkan.</div></div>
               <div class="col-12"><label class="form-label d-block">Format Data</label><div class="d-flex gap-4"><label><input type="radio" name="unitMode" value="one"> Satu Satuan [F1]</label><label><input type="radio" name="unitMode" value="two"> Dua Satuan [F2]</label></div></div>
               <div class="col-md-6"><label class="form-label">Nama Barang</label><input id="conversionName" class="form-control" readonly></div>
               <div class="col-md-3"><label class="form-label">Barcode Utama</label><input id="conversionPrimaryBarcode" name="code" class="form-control" required></div>
@@ -2910,8 +2939,9 @@
           saveState(`Konversi produk ${product.name} diperbarui`);
           closeModal(); renderAll(); toast(`Konversi tersimpan: ${conversionLabel(product)}.`);
         });
-        const fillConversionForm = () => {
-          const product = findProduct(document.getElementById("conversionProductId").value) || initial;
+        const fillConversionForm = (fallbackToInitial = false) => {
+          const product = findProduct(document.getElementById("conversionProductId").value) || (fallbackToInitial ? initial : null);
+          if (!product) return;
           const two = productHasConversion(product);
           document.querySelector(`input[name="unitMode"][value="${two ? "two" : "one"}"]`).checked = true;
           document.getElementById("conversionName").value = product.name || "";
@@ -2928,6 +2958,27 @@
           document.getElementById("conversionSecondaryPrice2").value = product.secondaryPrice2 || 0;
           updateConversionPreview();
         };
+        const renderConversionProductResults = () => {
+          const input = document.getElementById("conversionProductSearch");
+          const results = document.getElementById("conversionProductResults");
+          const query = input.value.trim().toLowerCase();
+          if (!query) {
+            results.innerHTML = "";
+            return;
+          }
+          const rows = state.products.filter((product) => product.active !== false && [product.name, product.code, product.category, product.primaryUnit || product.unit, product.secondaryUnit, product.secondaryBarcode].some((value) => String(value || "").toLowerCase().includes(query))).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "id"));
+          results.innerHTML = rows.length
+            ? `<div class="d-flex justify-content-between align-items-center mb-1"><strong>${number.format(rows.length)} produk ditemukan</strong><span class="small text-secondary">Seluruh hasil ditampilkan</span></div>${rows.map((product) => `<button class="search-result" type="button" data-conversion-product-id="${esc(product.id)}"><strong>${esc(product.name)}</strong><br><span class="text-secondary">${esc(product.code || "-")} | ${esc(product.category || "-")} | ${esc(product.primaryUnit || product.unit || "-")} | Stok ${number.format(stockAkhirProduk(product))} | ${esc(conversionLabel(product))}</span></button>`).join("")}`
+            : `<div class="text-center text-secondary py-3">Produk yang sesuai tidak ditemukan.</div>`;
+          results.querySelectorAll("[data-conversion-product-id]").forEach((button) => button.onclick = () => {
+            const product = findProduct(button.dataset.conversionProductId);
+            if (!product) return;
+            document.getElementById("conversionProductId").value = product.id;
+            input.value = `${product.code || "-"} — ${product.name}`;
+            results.innerHTML = "";
+            fillConversionForm();
+          });
+        };
         const updateConversionPreview = () => {
           const two = document.querySelector('input[name="unitMode"]:checked')?.value === "two";
           const primary = document.getElementById("conversionPrimaryUnit").value;
@@ -2938,10 +2989,14 @@
           document.getElementById("conversionSecondaryBuy").value = two && value > 0 ? MDDConversion.calculateSecondaryCost(hpp, value) : "";
           document.getElementById("conversionExplanation").textContent = two && secondary && value > 0 ? `1 ${primary} = ${number.format(value)} ${secondary} • HPP ${secondary}: ${idr.format(MDDConversion.calculateSecondaryCost(hpp, value))}` : `Produk memakai satu satuan: ${primary}`;
         };
-        document.getElementById("conversionProductId").onchange = fillConversionForm;
+        document.getElementById("conversionProductSearch").oninput = () => {
+          document.getElementById("conversionProductId").value = "";
+          renderConversionProductResults();
+        };
+        document.getElementById("conversionProductSearch").onfocus = renderConversionProductResults;
         document.querySelectorAll('input[name="unitMode"]').forEach((input) => input.onchange = updateConversionPreview);
         ["conversionPrimaryUnit", "conversionSecondaryUnit", "conversionValue", "conversionPrimaryBuy"].forEach((id) => document.getElementById(id).oninput = updateConversionPreview);
-        fillConversionForm();
+        if (productId) fillConversionForm(true);
       }
       function openProductModal(productId = "") {
         const editing = state.products.find((p) => p.id === productId);

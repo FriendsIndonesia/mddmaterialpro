@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v72-payment-change-sync";
+const CACHE_NAME = "mdd-material-pro-v73-finance-search-sections";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
@@ -45,4 +45,3 @@ self.addEventListener("fetch", (event) => {
     )
   );
 });
-

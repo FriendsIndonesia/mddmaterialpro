@@ -824,7 +824,7 @@
         ["settingsView", "bi-gear", "Setting"],
         ["historyView", "bi-clock-history", "History Transaksi"]
       ];
-      const payMethods = ["Cash", "Transfer", "Debit Card", "Qris", "Credit Card", "Piutang", "Deposit", "Bonus", "Free"];
+      const payMethods = ["Cash", "DP (Uang Muka)", "Transfer", "Debit Card", "Qris", "Credit Card", "Piutang", "Deposit", "Bonus", "Free"];
       const purchasePayMethods = ["Cash", "Transfer", "Debit Card", "Qris", "Credit Card", "Hutang"];
       const unitOptions = ["Pcs", "Lbr", "Batang", "Zak", "Liter", "Dus", "Rol", "Klg", "Gln", "Psg", "Kol", "Engkel", "Ember", "Bks", "Lusin", "Gr", "Pel", "Set", "Box", "Ikat", "Pack", "Btl", "m", "m²", "m³", "1/4", "SI", "Kg", "Ton"];
       const materialCategories = ["Pondasi dan Beton", "Dinding dan Penyimpanan", "Struktur Rangka", "Penutup Atap", "Plafon", "Penutup Lantai dan Dinding", "Pengecatan", "Kaca dan Pelindung", "Sanitari dan Plambing", "Pengikat dan Perangkat Keras"];
@@ -1562,6 +1562,10 @@
       }
       function ensureSaleDraft() {
         if (!saleDraft.invoiceNo) saleDraft.invoiceNo = nextInvoiceNo();
+        if (toNumber(saleDraft.dp) > 0 && saleDraft.method === "Piutang") {
+          saleDraft.method = "DP (Uang Muka)";
+          saleDraft.cashReceived = toNumber(saleDraft.dp);
+        }
         return saleDraft;
       }
       const SALE_PRODUCT_DRAFT_KEY = "mdd_sale_product_draft";
@@ -1610,8 +1614,19 @@
       function isCashMethod(method) {
         return String(method || "").trim().toLowerCase() === "cash";
       }
+      function isDownPaymentMethod(method) {
+        return String(method || "").trim().toLowerCase() === "dp (uang muka)";
+      }
+      function usesReceivedAmount(method) {
+        return isCashMethod(method) || isDownPaymentMethod(method);
+      }
       function saleCashChange() {
-        return isCashMethod(saleDraft.method) ? Math.max(0, toNumber(saleDraft.cashReceived) - Math.max(0, saleGrandTotal() - toNumber(saleDraft.dp))) : 0;
+        return isCashMethod(saleDraft.method) ? Math.max(0, toNumber(saleDraft.cashReceived) - saleGrandTotal()) : 0;
+      }
+      function saleRemainingPayment() {
+        if (isDownPaymentMethod(saleDraft.method)) return Math.max(0, saleGrandTotal() - toNumber(saleDraft.cashReceived));
+        if (saleDraft.method === "Piutang") return saleGrandTotal();
+        return 0;
       }
       function purchaseCashChange() {
         return isCashMethod(purchaseDraft.method) ? Math.max(0, toNumber(purchaseDraft.cashReceived) - purchaseGrandTotal()) : 0;
@@ -1781,12 +1796,12 @@
               </div>
               <div id="saleCart" class="cart-list">${cartRows(activeCart, "sale")}</div>
               <div class="row g-2 mt-3">
-                <div class="col-md-4"><label class="form-label">Metode Bayar</label><select id="salePayMethod" class="form-select">${payMethods.map((m) => `<option ${m === saleDraft.method ? "selected" : ""}>${m}</option>`).join("")}</select></div>
-                <div class="col-md-4"><label class="form-label">Uang Diterima</label><div class="input-group"><input id="saleCashReceived" type="text" inputmode="numeric" value="${saleDraft.cashReceived || 0}" class="form-control" placeholder="Contoh: 100000" ${isCashMethod(saleDraft.method) ? "" : "disabled"}><button id="saleExactCashBtn" class="btn btn-outline-primary" type="button" ${isCashMethod(saleDraft.method) ? "" : "disabled"}>Bayar Pas</button></div></div>
-                <div class="col-md-4"><label class="form-label">DP (Uang Muka)</label><input id="saleDp" type="text" inputmode="numeric" value="${saleDraft.dp || 0}" class="form-control" placeholder="Masukkan uang muka"></div>
+                <div class="col-12 col-lg-4"><label class="form-label">Metode Bayar</label><select id="salePayMethod" class="form-select">${payMethods.map((m) => `<option ${m === saleDraft.method ? "selected" : ""}>${m}</option>`).join("")}</select></div>
+                <div class="col-12 col-lg-8"><label class="form-label">Uang Diterima</label><div class="input-group flex-nowrap"><input id="saleCashReceived" type="text" inputmode="numeric" value="${saleDraft.cashReceived || 0}" class="form-control flex-grow-1 fw-bold" style="min-width:180px;font-size:1.05rem" placeholder="Masukkan nominal pembayaran" ${usesReceivedAmount(saleDraft.method) ? "" : "disabled"}><button id="saleExactCashBtn" class="btn btn-outline-primary text-nowrap px-3" type="button" ${isCashMethod(saleDraft.method) ? "" : "disabled"}>Bayar Pas</button></div></div>
                 <div class="col-12"><label class="form-label">Note</label><input id="saleNote" value="${saleDraft.note || ""}" class="form-control" placeholder="Catatan faktur/surat jalan"></div>
               </div>
               <div class="total-box mt-3"><span>Total Transaksi</span><strong id="saleGrandTotal">${idr.format(saleGrandTotal())}</strong></div>
+              <div class="total-box mt-2"><span>Sisa Pembayaran</span><strong id="saleRemainingPayment">${idr.format(saleRemainingPayment())}</strong></div>
               <div id="saleChangeRow" class="total-box mt-2 ${isCashMethod(saleDraft.method) ? "" : "d-none"}"><span>Kembali</span><strong id="saleCashChange">${idr.format(saleCashChange())}</strong></div>
             </section>
           </div>
@@ -1811,9 +1826,8 @@
         document.getElementById("saleCustomerWhatsapp").oninput = (e) => { saleDraft.customerWhatsapp = e.target.value; };
         document.getElementById("salePayMethod").onchange = (e) => { saleDraft.method = e.target.value; updateSaleDraftTotals(); };
         document.getElementById("saleCashReceived").oninput = updateSaleDraftTotals;
-        document.getElementById("saleExactCashBtn").onclick = () => { if (!isCashMethod(saleDraft.method)) return; saleDraft.cashReceived = Math.max(0, saleGrandTotal() - toNumber(saleDraft.dp)); document.getElementById("saleCashReceived").value = saleDraft.cashReceived; updateSaleDraftTotals(); };
+        document.getElementById("saleExactCashBtn").onclick = () => { if (!isCashMethod(saleDraft.method)) return; saleDraft.cashReceived = saleGrandTotal(); document.getElementById("saleCashReceived").value = saleDraft.cashReceived; updateSaleDraftTotals(); };
         document.getElementById("saleOngkir").oninput = updateSaleDraftTotals;
-        document.getElementById("saleDp").oninput = updateSaleDraftTotals;
         document.getElementById("saleNote").oninput = (e) => { saleDraft.note = e.target.value; };
         document.getElementById("refreshInvoiceBtn").onclick = () => { saleDraft.invoiceNo = nextInvoiceNo(); renderAll(); };
         document.getElementById("saleCancelBtn").onclick = () => { activeCart = []; editingSaleId = ""; resetSaleDraft(); renderAll(); toast("Transaksi dibatalkan."); };
@@ -1877,7 +1891,7 @@
         const pending = state.pendingSales.find((p) => p.id === id);
         if (!pending) return toast("Invoice pending tidak ditemukan.");
         activeCart = structuredClone(pending.items || []);
-        saleDraft = { invoiceNo: pending.invoiceNo, ongkir: pending.ongkir || 0, dp: pending.dp || 0, cashReceived: pending.cashReceived || 0, note: pending.note || "", method: pending.method || "Cash", customerId: pending.customerId || "", customerName: pending.customerName || "", customerType: pending.customerType || "", customerAddress: pending.customerAddress || "", customerWhatsapp: pending.customerWhatsapp || "" };
+        saleDraft = { invoiceNo: pending.invoiceNo, ongkir: pending.ongkir || 0, dp: pending.dp || 0, cashReceived: pending.dp || pending.cashReceived || 0, note: pending.note || "", method: toNumber(pending.dp) > 0 ? "DP (Uang Muka)" : (pending.method || "Cash"), customerId: pending.customerId || "", customerName: pending.customerName || "", customerType: pending.customerType || "", customerAddress: pending.customerAddress || "", customerWhatsapp: pending.customerWhatsapp || "" };
         state.pendingSales = state.pendingSales.filter((p) => p.id !== id);
         saveState(`${payNow ? "Lanjut bayar" : "Edit"} invoice pending ${pending.invoiceNo || id}`);
         renderAll();
@@ -1906,7 +1920,7 @@
         if (!sale) return toast("Transaksi tidak ditemukan.");
         editingSaleId = sale.id;
         activeCart = structuredClone(sale.items || []);
-        saleDraft = { invoiceNo: sale.invoiceNo || sale.id, date: String(sale.date || today()).slice(0, 10), ongkir: sale.ongkir || 0, dp: sale.dp || 0, cashReceived: sale.cashReceived || 0, note: sale.note || "", method: sale.method || "Cash", customerId: sale.customerId || "", customerName: sale.customerName || "", customerType: sale.customerType || "", customerAddress: sale.customerAddress || "", customerWhatsapp: sale.customerWhatsapp || "" };
+        saleDraft = { invoiceNo: sale.invoiceNo || sale.id, date: String(sale.date || today()).slice(0, 10), ongkir: sale.ongkir || 0, dp: sale.dp || 0, cashReceived: sale.dp || sale.cashReceived || 0, note: sale.note || "", method: toNumber(sale.dp) > 0 ? "DP (Uang Muka)" : (sale.method || "Cash"), customerId: sale.customerId || "", customerName: sale.customerName || "", customerType: sale.customerType || "", customerAddress: sale.customerAddress || "", customerWhatsapp: sale.customerWhatsapp || "" };
         renderAll();
         document.getElementById("saleDate")?.scrollIntoView({ behavior: "smooth", block: "center" });
         toast(`Invoice ${sale.invoiceNo || sale.id} siap diedit. Klik Simpan & Bayar untuk menyimpan perubahan.`);
@@ -1978,12 +1992,13 @@
       }
       function updateSaleDraftTotals() {
         saleDraft.ongkir = toNumber(document.getElementById("saleOngkir").value);
-        saleDraft.dp = Math.max(0, Math.min(saleGrandTotal(), toNumber(document.getElementById("saleDp").value)));
         saleDraft.cashReceived = toNumber(document.getElementById("saleCashReceived").value);
+        saleDraft.dp = isDownPaymentMethod(saleDraft.method) ? Math.max(0, Math.min(saleGrandTotal(), saleDraft.cashReceived)) : 0;
         document.getElementById("saleGrandTotal").textContent = idr.format(saleGrandTotal());
-        document.getElementById("saleCashReceived").disabled = !isCashMethod(saleDraft.method);
+        document.getElementById("saleCashReceived").disabled = !usesReceivedAmount(saleDraft.method);
         document.getElementById("saleExactCashBtn").disabled = !isCashMethod(saleDraft.method);
         document.getElementById("saleChangeRow").classList.toggle("d-none", !isCashMethod(saleDraft.method));
+        document.getElementById("saleRemainingPayment").textContent = idr.format(saleRemainingPayment());
         document.getElementById("saleCashChange").textContent = idr.format(saleCashChange());
       }
       function openCartEditModal(item, cart, mode = "sale") {
@@ -2032,9 +2047,9 @@
         const customer = selectedSaleCustomerData();
         const method = saleDraft.method;
         const total = saleGrandTotal();
-        const dp = Math.max(0, Math.min(total, toNumber(saleDraft.dp)));
-        const remainingBeforeCash = Math.max(0, total - dp);
-        if (isCashMethod(method) && toNumber(saleDraft.cashReceived) < remainingBeforeCash) return toast("Uang diterima kurang dari sisa Total Transaksi setelah DP.");
+        const dp = isDownPaymentMethod(method) ? Math.max(0, Math.min(total, toNumber(saleDraft.cashReceived))) : 0;
+        if (isDownPaymentMethod(method) && dp <= 0) return toast("Masukkan nominal DP (Uang Muka) pada kolom Uang Diterima.");
+        if (isCashMethod(method) && toNumber(saleDraft.cashReceived) < total) return toast("Uang diterima kurang dari Total Transaksi.");
         const previousSale = editingSaleId ? state.sales.find((item) => item.id === editingSaleId) : null;
         if (previousSale) {
           (previousSale.items || []).forEach((item) => {
@@ -2045,8 +2060,8 @@
           state.payments = state.payments.filter((payment) => !(payment.refId === previousSale.id && payment.method === "DP Penjualan"));
           state.sales = state.sales.filter((item) => item.id !== previousSale.id);
         }
-        const due = method === "Piutang" ? remainingBeforeCash : 0;
-        const sale = { id: previousSale?.id || uid("SAL"), invoiceNo: previousSale?.invoiceNo || saleDraft.invoiceNo, date: document.getElementById("saleDate").value, customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, customerDeposit: customer.deposit, items: structuredClone(activeCart), method, ongkir: saleDraft.ongkir, dp, bankCharge: 0, cashReceived: isCashMethod(method) ? saleDraft.cashReceived : dp, change: saleCashChange(), note: saleDraft.note, status: due > 0 ? "Piutang" : "Lunas", total, due, paid: Math.max(0, total - due), depositRemaining: method === "Deposit" ? Math.max(0, customer.deposit - total) : customer.deposit };
+        const due = isDownPaymentMethod(method) ? Math.max(0, total - dp) : method === "Piutang" ? total : 0;
+        const sale = { id: previousSale?.id || uid("SAL"), invoiceNo: previousSale?.invoiceNo || saleDraft.invoiceNo, date: document.getElementById("saleDate").value, customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, customerDeposit: customer.deposit, items: structuredClone(activeCart), method, ongkir: saleDraft.ongkir, dp, bankCharge: 0, cashReceived: usesReceivedAmount(method) ? saleDraft.cashReceived : 0, change: saleCashChange(), note: saleDraft.note, status: due > 0 ? "Piutang" : "Lunas", total, due, paid: Math.max(0, total - due), depositRemaining: method === "Deposit" ? Math.max(0, customer.deposit - total) : customer.deposit };
         sale.items.forEach((item) => {
           const p = findProduct(item.productId);
           if (p) {

@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v84-finance-item-details-units";
+const CACHE_NAME = "mdd-material-pro-v85-dp-payment-method-layout";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

@@ -568,6 +568,44 @@ function installTwoWaySyncTrigger() {
   return statusPayload_(ss);
 }
 
+// Pembersihan audit 03/09/2026. Idempotent dan selalu membuat salinan baris
+// sebelum menghapus duplikat yang telah dikonfirmasi pemilik.
+function cleanupConfirmedDuplicates20260903() {
+  const ss = getSpreadsheet_();
+  const targets = {
+    Products: ["PRO-E755A7F3-281", "PRO-E21FB663-B20", "PRO-1133079A-755", "PRO-57141F52-1E5", "PRO-F4D8C17D-E05", "PRO-2C91B632-31C"],
+    Payments: ["PAY-IF6BQ", "PAY-910UR", "PAY-6OUT8"]
+  };
+  const backupName = "AuditBackup_20260903";
+  const backup = ss.getSheetByName(backupName) || ss.insertSheet(backupName);
+  if (backup.getLastRow() === 0) backup.appendRow(["deletedAt", "sourceSheet", "originalRow", "id", "rowJson"]);
+  const removed = [];
+  Object.keys(targets).forEach((sheetName) => {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet || sheet.getLastRow() < 2) return;
+    const values = sheet.getDataRange().getValues();
+    const headers = values[0].map(String);
+    const idIndex = headers.indexOf("id");
+    if (idIndex < 0) return;
+    const wanted = {};
+    targets[sheetName].forEach((id) => wanted[id] = true);
+    const matches = [];
+    values.slice(1).forEach((row, index) => {
+      const id = String(row[idIndex] || "").trim();
+      if (wanted[id]) matches.push({ rowNumber: index + 2, id: id, values: row });
+    });
+    matches.forEach((item) => backup.appendRow([new Date(), sheetName, item.rowNumber, item.id, JSON.stringify(item.values.map(normalizeValue_))]));
+    matches.sort((a, b) => b.rowNumber - a.rowNumber).forEach((item) => {
+      sheet.deleteRow(item.rowNumber);
+      removed.push(sheetName + ":" + item.id);
+    });
+  });
+  backup.setFrozenRows(1);
+  backup.autoResizeColumns(1, 5);
+  touchRevision_();
+  return { ok: true, backupSheet: backupName, removed: removed, count: removed.length };
+}
+
 function readTableDefinition_(ss, table) {
   const names = [table.sheet].concat(table.aliases || []);
   const rowsById = {};

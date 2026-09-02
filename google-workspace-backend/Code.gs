@@ -159,17 +159,31 @@ function overlayFinancialLedgers_(ss, data) {
 }
 
 function mergeLedgerRows_(canonicalRows, ledgerRows) {
-  const rows = {};
-  (canonicalRows || []).forEach((row) => {
-    const key = String(row.invoiceNo || row.id || "").trim().toLowerCase();
-    if (key) rows[key] = row;
+  const result = (canonicalRows || []).map((row) => Object.assign({}, row));
+  const matched = {};
+  (ledgerRows || []).forEach((ledger) => {
+    const invoice = String(ledger.invoiceNo || "").trim().toLowerCase();
+    const exactIndex = result.findIndex((row, index) => !matched[index] && String(row.invoiceNo || "").trim().toLowerCase() === invoice && ledgerMatchSignature_(row) === ledgerMatchSignature_(ledger));
+    const invoiceCandidates = result.map((row, index) => ({ row: row, index: index })).filter((item) => !matched[item.index] && String(item.row.invoiceNo || "").trim().toLowerCase() === invoice);
+    const targetIndex = exactIndex >= 0 ? exactIndex : (invoiceCandidates.length === 1 ? invoiceCandidates[0].index : -1);
+    if (targetIndex >= 0) {
+      // Pertahankan ID canonical aplikasi, tetapi baca nilai terbaru dari ledger.
+      result[targetIndex] = Object.assign({}, result[targetIndex], ledger, { id: result[targetIndex].id });
+      matched[targetIndex] = true;
+    } else {
+      result.push(ledger);
+    }
   });
-  (ledgerRows || []).forEach((row) => {
-    const key = String(row.invoiceNo || row.id || "").trim().toLowerCase();
-    if (!key) return;
-    rows[key] = Object.assign({}, rows[key] || {}, row);
-  });
-  return Object.keys(rows).map((key) => rows[key]);
+  return result;
+}
+
+function ledgerMatchSignature_(row) {
+  const relation = row.salesName || row.company || row.customerName || row.relation || "";
+  return JSON.stringify([
+    String(relation).trim().toLowerCase(),
+    ledgerDate_(row.date), Number(row.total || 0), Number(row.paid || 0),
+    Number(row.returnAmount || 0), Number(row.due || 0)
+  ]);
 }
 
 function readLedgerRows_(ss, sheetName, kind) {
@@ -192,7 +206,9 @@ function readLedgerRows_(ss, sheetName, kind) {
     const remaining = ledgerNumber_(pick(row, kind === "debt" ? ["sisahutang", "sisa"] : ["sisapiutang", "sisa"]));
     const relation = String(pick(row, kind === "debt" ? ["supplier", "namasupplier", "relasi"] : ["pelanggan", "customer", "namapelanggan", "relasi"]) || "").trim();
     const base = {
-      id: (kind === "debt" ? "HUT-" : "PIU-") + (invoiceNo || String(index + 2)).replace(/[^A-Za-z0-9]/g, ""),
+      // Nomor faktur warisan boleh sama. Suffix baris hanya menjadi ID internal
+      // dan tidak pernah mengubah nomor faktur yang dilihat pengguna.
+      id: (kind === "debt" ? "HUT-" : "PIU-") + (invoiceNo || "ROW").replace(/[^A-Za-z0-9]/g, "") + "-R" + (index + 2),
       source: kind === "debt" ? "Hutang" : "Piutang",
       invoiceNo: invoiceNo || (kind === "debt" ? "HUTANG-" : "PIUTANG-") + (index + 2),
       date: ledgerDate_(pick(row, ["tanggal", "date"])),
@@ -484,6 +500,9 @@ function applyTableChanges_(ss, table, change) {
     const key = String(row && row[keyField] || "").trim();
     if (!key) return;
     const rowNumber = refreshedRowById[key] || sheet.getLastRow() + 1;
+    const isNewRow = !refreshedRowById[key];
+    if (isNewRow && table.key === "products") row.code = reserveUniqueProductCode_(sheet, table.fields, row.code);
+    if (isNewRow && (table.key === "sales" || table.key === "purchases")) row.invoiceNo = reserveUniqueVisibleValue_(sheet, table.fields, "invoiceNo", row.invoiceNo);
     const currentValues = refreshedRowById[key]
       ? sheet.getRange(rowNumber, 1, 1, table.fields.length).getValues()[0]
       : table.fields.map(() => "");
@@ -511,6 +530,40 @@ function applyTableChanges_(ss, table, change) {
     sheet.getRange(rowNumber, 1, 1, table.fields.length).setValues([values]);
     refreshedRowById[key] = rowNumber;
   });
+}
+
+function reserveUniqueProductCode_(sheet, fields, requested) {
+  const codeIndex = fields.indexOf("code");
+  if (codeIndex < 0) return requested;
+  const used = sheet.getLastRow() > 1 ? sheet.getRange(2, codeIndex + 1, sheet.getLastRow() - 1, 1).getDisplayValues().map((row) => String(row[0] || "").trim().toLowerCase()) : [];
+  const wanted = String(requested || "").trim();
+  if (wanted && used.indexOf(wanted.toLowerCase()) < 0) return wanted;
+  let largest = 0;
+  used.forEach((code) => {
+    const match = code.match(/^899-mdd-(\d+)$/i);
+    if (match) largest = Math.max(largest, Number(match[1]) || 0);
+  });
+  let candidate;
+  do {
+    largest += 1;
+    candidate = "899-MDD-" + ("0000" + largest).slice(-4);
+  } while (used.indexOf(candidate.toLowerCase()) >= 0);
+  return candidate;
+}
+
+function reserveUniqueVisibleValue_(sheet, fields, field, requested) {
+  const fieldIndex = fields.indexOf(field);
+  if (fieldIndex < 0) return requested;
+  const used = sheet.getLastRow() > 1 ? sheet.getRange(2, fieldIndex + 1, sheet.getLastRow() - 1, 1).getDisplayValues().map((row) => String(row[0] || "").trim().toLowerCase()) : [];
+  const base = String(requested || "DOC").trim();
+  if (used.indexOf(base.toLowerCase()) < 0) return base;
+  let sequence = 2;
+  let candidate = base + "-R" + sequence;
+  while (used.indexOf(candidate.toLowerCase()) >= 0) {
+    sequence += 1;
+    candidate = base + "-R" + sequence;
+  }
+  return candidate;
 }
 
 function sameValue_(left, right) {

@@ -1456,7 +1456,6 @@
           <div class="page-header">
             <div><p class="eyebrow">Produk</p><h2>Database Produk Material</h2><div class="text-secondary fw-semibold mt-1">Bersumber dari form input Master Barang.</div></div>
             <div class="header-actions">
-              ${canAccessMaster("Master Barang") ? `<button id="addProductFromProductsBtn" class="btn btn-primary"><i class="bi bi-plus-lg"></i> Barang</button>` : ""}
               ${canAccessMaster("Master Barang") ? `<button id="convertProductBtn" class="btn btn-outline-primary"><i class="bi bi-arrow-left-right"></i> Konversi Produk</button>` : ""}
               <button id="exportProductsBtn" class="btn btn-outline-primary"><i class="bi bi-filetype-pdf"></i> PDF Produk</button>
             </div>
@@ -1474,8 +1473,6 @@
         document.getElementById("exportProductsBtn").onclick = () => exportReportPdf("Database Produk Material", productRows(activeProducts));
         document.getElementById("productDatabaseSearch").oninput = (event) => { productDatabaseQuery = event.target.value; renderProductDatabaseSearch(); };
         document.getElementById("clearProductDatabaseSearch").onclick = () => { productDatabaseQuery = ""; document.getElementById("productDatabaseSearch").value = ""; renderProductDatabaseSearch(); document.getElementById("productDatabaseSearch").focus(); };
-        const addBtn = document.getElementById("addProductFromProductsBtn");
-        if (addBtn) addBtn.onclick = openProductModal;
         const convertBtn = document.getElementById("convertProductBtn");
         if (convertBtn) convertBtn.onclick = () => openProductConversionModal();
         bindProductActions();
@@ -2461,18 +2458,16 @@
           return;
         }
         const debtMatches = state.purchases.filter((row) => {
-          if (toNumber(row.due) <= 0) return false;
           const supplier = selectedSupplierData(row.supplierId);
           const relationMatch = financeTextMatches([row.invoiceNo, row.noFaktur, row.invoice, row.salesName, row.supplierName, row.supplier, row.relation, row.company, row.namaPerusahaan, row.whatsapp, supplier.name, supplier.company, supplier.phone], query);
           return relationMatch;
-        }).map((row) => ({ type: "Hutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.company || selectedSupplierData(row.supplierId).company || row.salesName || selectedSupplierData(row.supplierId).name || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due, items: row.items }));
+        }).map((row) => { const supplier = selectedSupplierData(row.supplierId); return { type: "Hutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.company || supplier.company || row.salesName || supplier.name || "-", address: row.address || row.supplierAddress || supplier.address || "-", whatsapp: row.whatsapp || row.phone || supplier.phone || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due, items: row.items }; });
         const receivableMatches = state.sales.filter((row) => {
-          if (toNumber(row.due) <= 0) return false;
           const customer = state.customers.find((item) => item.id === row.customerId) || {};
           const relationMatch = financeTextMatches([row.invoiceNo, row.noFaktur, row.invoice, row.customerName, row.pelanggan, row.customer, row.relation, row.customerWhatsapp, customer.name, customer.phone, customer.address], query);
           return relationMatch;
-        }).map((row) => ({ type: "Piutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.customerName || personName(state.customers, row.customerId), date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due, items: row.items }));
-        const resultTable = (rows, type) => rows.length ? `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th><i class="bi bi-check2-square"></i></th><th>Nama/Perusahaan</th><th>No. Faktur</th><th>Rincian Produk/Barang</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="text-end">Total</th><th class="text-end">Sisa</th><th></th></tr></thead><tbody>${rows.map((row) => { const selectionKey = `${type}:${row.id}`; return `<tr><td><input class="form-check-input" type="checkbox" data-finance-bulk-check="${selectionKey}" ${financeBulkSelection.has(selectionKey) ? "checked" : ""} aria-label="Pilih ${esc(row.invoice)}"></td><td><strong>${esc(row.name)}</strong></td><td>${esc(row.invoice)}</td><td>${transactionItemDetails(row)}</td><td>${displayDate(row.date)}</td><td>${displayDate(row.dueDate)}</td><td class="text-end">${idr.format(row.total || 0)}</td><td class="text-end fw-bold">${idr.format(row.remaining || 0)}</td><td class="text-end"><button class="btn btn-sm btn-primary" data-finance-search-pay="${type}" data-finance-search-id="${row.id}"><i class="bi bi-cash-coin"></i> Bayar</button></td></tr>`; }).join("")}</tbody></table></div>` : `<div class="text-center text-secondary py-3">Data ${type === "debt" ? "hutang" : "piutang"} aktif yang sesuai tidak ditemukan.</div>`;
+        }).map((row) => { const customer = state.customers.find((item) => item.id === row.customerId) || {}; return { type: "Piutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.customerName || customer.name || "-", address: row.customerAddress || row.address || customer.address || "-", whatsapp: row.customerWhatsapp || row.whatsapp || customer.phone || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due, items: row.items }; });
+        const resultTable = (rows, type) => rows.length ? `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th><i class="bi bi-check2-square"></i></th><th>Nama/Perusahaan</th><th>Alamat</th><th>WhatsApp</th><th>No. Faktur</th><th>Rincian Produk/Barang</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="text-end">Total Hutang/Piutang</th><th class="text-end">Sisa Pembayaran</th><th></th></tr></thead><tbody>${rows.map((row) => { const selectionKey = `${type}:${row.id}`; return `<tr><td><input class="form-check-input" type="checkbox" data-finance-bulk-check="${selectionKey}" ${financeBulkSelection.has(selectionKey) ? "checked" : ""} aria-label="Pilih ${esc(row.invoice)}"></td><td><strong>${esc(row.name)}</strong></td><td>${esc(row.address)}</td><td>${esc(row.whatsapp)}</td><td>${esc(row.invoice)}</td><td>${transactionItemDetails(row)}</td><td>${displayDate(row.date)}</td><td>${displayDate(row.dueDate)}</td><td class="text-end">${idr.format(row.total || 0)}</td><td class="text-end fw-bold">${idr.format(row.remaining || 0)}</td><td class="text-end"><button class="btn btn-sm btn-primary" data-finance-search-pay="${type}" data-finance-search-id="${row.id}" ${toNumber(row.remaining) <= 0 ? "disabled" : ""}><i class="bi bi-cash-coin"></i> ${toNumber(row.remaining) > 0 ? "Bayar" : "Lunas"}</button></td></tr>`; }).join("")}</tbody></table></div>` : `<div class="text-center text-secondary py-3">Data ${type === "debt" ? "hutang" : "piutang"} yang sesuai tidak ditemukan.</div>`;
         debtTarget.innerHTML = resultTable(debtMatches, "debt");
         receivableTarget.innerHTML = resultTable(receivableMatches, "receivable");
         document.querySelectorAll("[data-finance-search-pay]").forEach((button) => button.onclick = () => openPaymentModal(button.dataset.financeSearchPay, button.dataset.financeSearchId));
@@ -3181,6 +3176,14 @@
         ["conversionPrimaryUnit", "conversionSecondaryUnit", "conversionValue", "conversionPrimaryBuy"].forEach((id) => document.getElementById(id).oninput = updateConversionPreview);
         if (productId) fillConversionForm(true);
       }
+      function nextProductCode() {
+        const prefix = "899-MDD-";
+        const largest = state.products.reduce((max, product) => {
+          const match = String(product.code || "").trim().match(/^899-MDD-(\d+)$/i);
+          return match ? Math.max(max, Number(match[1]) || 0) : max;
+        }, 0);
+        return `${prefix}${String(largest + 1).padStart(4, "0")}`;
+      }
       function openProductModal(productId = "") {
         const editing = state.products.find((p) => p.id === productId);
         const stockInValue = toNumber(editing?.stockIn ?? editing?.stock ?? 0);
@@ -3188,9 +3191,9 @@
         const stockAkhirValue = stockAkhirProduk(editing) || Math.max(0, stockInValue - stockOutValue);
         openModal(editing ? "Edit Master Barang" : "Master Barang", `
           <div class="row g-3">
-            <div class="col-md-4"><label class="form-label">Barcode/SKU</label><input name="code" class="form-control" value="${editing?.code || `899-MDD-${String(state.products.length + 1).padStart(3, "0")}`}" required></div>
+            <div class="col-md-4"><label class="form-label">Barcode/SKU</label><input name="code" class="form-control" value="${esc(editing?.code || nextProductCode())}" ${editing ? "" : "readonly"} required></div>
             <div class="col-md-8"><label class="form-label">Nama Barang</label><input name="name" class="form-control" value="${editing?.name || ""}" required></div>
-            <div class="col-md-4"><label class="form-label">Kategori</label><select name="category" class="form-select">${categoryOptions(editing?.category || "")}</select></div>
+            <div class="col-md-4"><label class="form-label">Kategori</label><input name="category" list="masterProductCategories" class="form-control" value="${esc(editing?.category || "")}" placeholder="Ketik atau pilih kategori"><datalist id="masterProductCategories">${[...new Set([...materialCategories, ...state.categories.map((c) => c.name).filter(Boolean)])].map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist></div>
             <div class="col-md-2"><label class="form-label">Satuan</label><select name="unit" class="form-select">${unitOptions.map((u) => `<option ${u === normalizeUnit(editing?.unit) ? "selected" : ""}>${u}</option>`).join("")}</select></div>
             <div class="col-md-3"><label class="form-label">Harga Beli</label><input name="buy" type="number" class="form-control" value="${editing?.buy || 0}" required></div>
             <div class="col-md-3"><label class="form-label">Harga Jual 1</label><input name="price" type="number" class="form-control" value="${editing?.price || 0}" required></div>

@@ -1244,7 +1244,7 @@
           location.reload();
         });
         try {
-          const registration = await navigator.serviceWorker.register("service-worker.js?v=88", { updateViaCache: "none" });
+          const registration = await navigator.serviceWorker.register("service-worker.js?v=89", { updateViaCache: "none" });
           await registration.update();
         } catch (error) {
           console.warn("Pemeriksaan pembaruan aplikasi belum berhasil.", error);
@@ -2137,7 +2137,7 @@
         ensurePurchaseDraft();
         const purchaseTransactions = visibleReportRows("purchaseView", "purchases", state.purchases.filter(isPurchaseTransaction));
         document.getElementById("purchaseView").innerHTML = `
-          <div class="page-header"><div><p class="eyebrow">Purchase</p><h2>Pembelian ke Supplier</h2></div><div class="header-actions"><button class="btn btn-outline-secondary" id="purchaseCancelBtn"><i class="bi bi-x-circle"></i> Batal</button><button class="btn btn-outline-secondary" id="purchasePendingBtn"><i class="bi bi-pause-circle"></i> Pending</button><button class="btn btn-primary" id="purchasePayBtn"><i class="bi bi-cash-coin"></i> Simpan & Bayar</button></div></div>
+          <div class="page-header"><div><p class="eyebrow">Purchase</p><h2>Pembelian ke Supplier</h2></div><div class="header-actions"><button class="btn btn-outline-secondary" id="purchaseCancelBtn"><i class="bi bi-x-circle"></i> Batal</button><button class="btn btn-outline-secondary" id="purchasePendingBtn"><i class="bi bi-pause-circle"></i> Pending</button><button class="btn btn-outline-primary" id="purchaseSaveBtn"><i class="bi bi-floppy"></i> Simpan</button><button class="btn btn-primary" id="purchasePayBtn"><i class="bi bi-printer"></i> Bayar</button></div></div>
           <div class="content-grid">
             <section class="panel"><div class="panel-header"><h3>Cari Barang</h3><button id="quickNewProductBtn" class="btn btn-outline-primary btn-sm"><i class="bi bi-plus-lg"></i> Barang Baru</button></div>
               <div class="row g-3 align-items-end">
@@ -2192,6 +2192,7 @@
         document.getElementById("quickNewProductBtn").onclick = () => openProductModal();
         document.getElementById("purchaseCancelBtn").onclick = () => { purchaseCart = []; resetPurchaseDraft(); renderAll(); toast("Pembelian dibatalkan."); };
         document.getElementById("purchasePendingBtn").onclick = pendingPurchase;
+        document.getElementById("purchaseSaveBtn").onclick = () => checkoutPurchase(false);
         document.getElementById("purchasePayBtn").onclick = () => checkoutPurchase(true);
         document.getElementById("purchaseReturnBtn").onclick = () => openReturnModal("Pembelian");
         document.getElementById("exportPurchasePdf").onclick = () => exportReportPdf("Laporan Pembelian", purchaseReportRows(purchaseTransactions));
@@ -2290,7 +2291,9 @@
         saveState("Pending pembelian dibuat");
         renderAll();
       }
-      function checkoutPurchase(markPaid = false) {
+      let purchaseCheckoutBusy = false;
+      function checkoutPurchase(printAfterSave = false) {
+        if (purchaseCheckoutBusy) return toast("Transaksi pembelian sedang diproses.");
         if (!purchaseCart.length) return toast("Keranjang pembelian kosong.");
         updatePurchaseDraftTotals();
         purchaseDraft.method = document.getElementById("purchasePayMethod").value;
@@ -2302,8 +2305,9 @@
         const method = purchaseDraft.method;
         const total = purchaseGrandTotal();
         const isDebtPurchase = method === "Hutang";
-        const isPaidPurchase = markPaid && !isDebtPurchase;
+        const isPaidPurchase = !isDebtPurchase;
         if (isPaidPurchase && isCashMethod(method) && toNumber(purchaseDraft.cashReceived) < total) return toast("Uang diterima kurang dari Total Transaksi.");
+        purchaseCheckoutBusy = true;
         const purchase = { id: uid("PUR"), invoiceNo: purchaseDraft.invoiceNo, date: document.getElementById("purchaseDate").value, dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", items: structuredClone(purchaseCart), method, ongkir: purchaseDraft.ongkir, bankCharge: purchaseDraft.bankCharge, cashReceived: isCashMethod(method) ? purchaseDraft.cashReceived : (isPaidPurchase ? total : 0), change: purchaseCashChange(), note: purchaseDraft.note, status: isPaidPurchase ? "Lunas" : "Hutang", total, due: isPaidPurchase ? 0 : total, paid: isPaidPurchase ? total : 0, returnAmount: 0 };
         purchase.items.forEach((item) => {
           const p = findProduct(item.productId);
@@ -2326,7 +2330,9 @@
         resetPurchaseDraft();
         saveState(`Pembelian ${purchase.id} disimpan`);
         renderAll();
-        printDoc("Faktur Pembelian", purchase, "purchases");
+        purchaseCheckoutBusy = false;
+        if (printAfterSave) printDoc("Faktur Pembelian", purchase, "purchases");
+        else toast(`Pembelian ${purchase.invoiceNo || purchase.id} tersimpan tanpa mencetak invoice.`);
       }
 
       function renderFinance() {

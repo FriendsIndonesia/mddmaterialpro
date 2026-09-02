@@ -1244,7 +1244,7 @@
           location.reload();
         });
         try {
-          const registration = await navigator.serviceWorker.register("service-worker.js?v=89", { updateViaCache: "none" });
+          const registration = await navigator.serviceWorker.register("service-worker.js?v=90", { updateViaCache: "none" });
           await registration.update();
         } catch (error) {
           console.warn("Pemeriksaan pembaruan aplikasi belum berhasil.", error);
@@ -3282,9 +3282,8 @@
       function openStockAdjustModal() { openStockMoveModal("Penyesuaian"); }
       function openStockMoveModal(type) {
         if (type === "Opname") {
-          const firstProduct = state.products.find((p) => p.active) || state.products[0] || {};
-          const firstStockAkhir = stockAkhirProduk(firstProduct);
-          if (!firstProduct.id) {
+          const availableProducts = state.products.filter((p) => p.active !== false);
+          if (!availableProducts.length) {
             openProductModal();
             toast("Tambahkan Master Barang terlebih dahulu sebelum Stok Opname.");
             return;
@@ -3292,21 +3291,22 @@
           openModal("Stok Opname", `<div class="row g-3">
             <div class="col-md-3"><label class="form-label">Nomor</label><input name="number" class="form-control" value="OPN-${today().replaceAll("-", "")}-${String(state.stockMoves.filter((m) => m.type === "Opname").length + 1).padStart(3, "0")}" required></div>
             <div class="col-md-3"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div>
-            <div class="col-md-3"><label class="form-label">Kode Barang (SKU)</label><input id="opnameSku" name="sku" class="form-control" value="${firstProduct.code || ""}" readonly></div>
-            <div class="col-md-3"><label class="form-label">Satuan</label><select id="opnameUnit" name="unit" class="form-select">${unitOptions.map((u) => `<option ${u === normalizeUnit(firstProduct.unit) ? "selected" : ""}>${u}</option>`).join("")}</select></div>
-            <div class="col-md-6"><label class="form-label">Nama Barang</label><select id="opnameProduct" name="productId" class="form-select">${state.products.filter((p) => p.active).map((p) => `<option value="${p.id}">${p.name}</option>`).join("")}</select></div>
-            <div class="col-md-3"><label class="form-label">Stock Sistem</label><input id="opnameSystem" name="systemStock" type="number" class="form-control" value="${firstStockAkhir}" readonly></div>
-            <div class="col-md-3"><label class="form-label">Stock Fisik</label><input id="opnamePhysical" name="physicalStock" type="number" class="form-control" value="${firstStockAkhir}" required></div>
+            <div class="col-md-3"><label class="form-label">Kode Barang (SKU)</label><input id="opnameSku" name="sku" class="form-control" value="" readonly></div>
+            <div class="col-md-3"><label class="form-label">Satuan</label><input id="opnameUnit" name="unit" class="form-control" value="" readonly></div>
+            <div class="col-md-6"><label class="form-label">Nama Barang</label><input id="opnameProductSearch" class="form-control" value="" autocomplete="off" placeholder="Ketik nama barang, SKU, kategori, atau satuan"><input id="opnameProduct" name="productId" type="hidden" value=""><div id="opnameProductResults" class="search-results mt-2"></div></div>
+            <div class="col-md-3"><label class="form-label">Stock Sistem</label><input id="opnameSystem" name="systemStock" type="number" class="form-control" value="" readonly></div>
+            <div class="col-md-3"><label class="form-label">Stock Fisik</label><input id="opnamePhysical" name="physicalStock" type="number" class="form-control" value="" required disabled></div>
             <div class="col-md-3"><label class="form-label">Selisih</label><input id="opnameDiff" name="difference" type="number" class="form-control" value="0" readonly></div>
             <div class="col-md-9"><label class="form-label">Keterangan / Catatan</label><input name="note" class="form-control"></div>
           </div>`, (fd) => {
             const product = findProduct(fd.get("productId"));
+            if (!product) return toast("Pilih barang dari hasil pencarian terlebih dahulu.");
             const old = stockAkhirProduk(product);
             const physical = Number(fd.get("physicalStock"));
             const diff = physical - old;
-            product.stockIn = toNumber(product.stockIn ?? product.stock ?? physical);
-            product.stockOut = Math.max(0, product.stockIn - physical);
-            product.stock = stockAkhirProduk(product);
+            if (diff >= 0) product.stockIn = toNumber(product.stockIn) + diff;
+            else product.stockOut = toNumber(product.stockOut) + Math.abs(diff);
+            product.stock = Math.max(0, physical);
             product.stockAkhir = product.stock;
             state.stockMoves.unshift({ id: uid("STK"), number: fd.get("number"), date: fd.get("date"), productId: product.id, sku: product.code, productName: product.name, unit: fd.get("unit") || product.unit, type, systemStock: old, physicalStock: physical, difference: diff, qty: diff, note: fd.get("note") });
             saveState(`Opname stok ${product.name}`);
@@ -3322,13 +3322,38 @@
             document.getElementById("opnameSystem").value = systemStock;
             document.getElementById("opnameDiff").value = physical - systemStock;
           };
-          document.getElementById("opnameProduct").addEventListener("change", () => {
-            const product = findProduct(document.getElementById("opnameProduct").value);
-            document.getElementById("opnamePhysical").value = stockAkhirProduk(product);
-            updateOpname();
-          });
+          const renderOpnameProductResults = () => {
+            const input = document.getElementById("opnameProductSearch");
+            const target = document.getElementById("opnameProductResults");
+            const query = String(input.value || "").trim().toLowerCase();
+            document.getElementById("opnameProduct").value = "";
+            document.getElementById("opnameSku").value = "";
+            document.getElementById("opnameUnit").value = "";
+            document.getElementById("opnameSystem").value = "";
+            document.getElementById("opnamePhysical").value = "";
+            document.getElementById("opnamePhysical").disabled = true;
+            document.getElementById("opnameDiff").value = 0;
+            if (!query) { target.innerHTML = ""; return; }
+            const matches = availableProducts.filter((product) => [product.name, product.code, product.category, product.unit, product.primaryUnit, product.secondaryUnit].some((value) => String(value || "").toLowerCase().includes(query))).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "id"));
+            target.innerHTML = matches.length ? `<div class="small text-secondary px-2 py-1"><strong>${number.format(matches.length)} barang ditemukan</strong></div>${matches.map((product) => `<button class="search-result" type="button" data-opname-product-id="${esc(product.id)}"><strong>${esc(product.name)}</strong><br><span class="text-secondary">${esc(product.code || "-")} | ${esc(product.category || "-")} | ${esc(product.primaryUnit || product.unit || "-")} | Stock ${number.format(stockAkhirProduk(product))}</span></button>`).join("")}` : `<div class="small text-secondary px-2 py-2">Barang yang sesuai tidak ditemukan.</div>`;
+            target.querySelectorAll("[data-opname-product-id]").forEach((button) => button.onclick = () => {
+              const product = findProduct(button.dataset.opnameProductId);
+              if (!product) return;
+              document.getElementById("opnameProduct").value = product.id;
+              input.value = product.name || product.code || "";
+              document.getElementById("opnameSku").value = product.code || "";
+              document.getElementById("opnameUnit").value = normalizeUnit(product.primaryUnit || product.unit);
+              document.getElementById("opnameSystem").value = stockAkhirProduk(product);
+              document.getElementById("opnamePhysical").value = stockAkhirProduk(product);
+              document.getElementById("opnamePhysical").disabled = false;
+              target.innerHTML = "";
+              updateOpname();
+            });
+          };
+          document.getElementById("opnameProductSearch").addEventListener("input", renderOpnameProductResults);
+          document.getElementById("opnameProductSearch").addEventListener("focus", renderOpnameProductResults);
           document.getElementById("opnamePhysical").addEventListener("input", updateOpname);
-          updateOpname();
+          document.getElementById("opnameProductSearch").focus();
           return;
         }
         openModal(`${type} Stok`, `<div class="row g-3"><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div><div class="col-md-5"><label class="form-label">Produk</label><select name="productId" class="form-select">${productOptions()}</select></div><div class="col-md-3"><label class="form-label">Stok Baru</label><input name="qty" type="number" class="form-control" required></div><div class="col-12"><label class="form-label">Catatan</label><input name="note" class="form-control"></div></div>`, (fd) => {

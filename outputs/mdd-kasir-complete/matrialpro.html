@@ -940,6 +940,7 @@
         });
         data.products = (data.products || []).map((product) => {
           product.code = String(product.code ?? product.kode ?? "").trim();
+          const hasExplicitStock = product.stock !== undefined && product.stock !== null && product.stock !== "";
           const rawStock = toNumber(product.stock);
           const hasExplicitStockAkhir = product.stockAkhir !== undefined && product.stockAkhir !== null && product.stockAkhir !== "";
           const rawStockAkhir = toNumber(product.stockAkhir);
@@ -957,7 +958,9 @@
           product.secondaryBuy = product.secondaryUnit && product.conversionValue > 0 ? MDDConversion.calculateSecondaryCost(product.buy, product.conversionValue) : 0;
           product.stockIn = rawStockIn;
           product.stockOut = rawStockOut;
-          product.stock = Math.max(0, hasExplicitStockAkhir ? rawStockAkhir : product.stockAwal + product.stockIn - product.stockOut);
+          // Kolom Stock di backend memang boleh diedit langsung. Dahulukan nilai
+          // itu daripada stockAkhir lama agar edit pengguna tidak kembali menjadi 0.
+          product.stock = Math.max(0, hasExplicitStock ? rawStock : (hasExplicitStockAkhir ? rawStockAkhir : product.stockAwal + product.stockIn - product.stockOut));
           product.stockAkhir = product.stock;
           product.active = product.active !== false && String(product.active).toLowerCase() !== "false";
           return product;
@@ -1025,8 +1028,22 @@
         }, 250);
       }
 
-      function mergeStateFromBackend(remoteData) {
+      function reapplyPendingChanges(pending) {
+        Object.entries(pending?.tables || {}).forEach(([key, change]) => {
+          if (!Array.isArray(state[key])) return;
+          const deleted = new Set((change.deletes || []).map(String));
+          const localById = new Map((change.upserts || []).map((row) => [rowIdentity(key, row), row]));
+          const rows = state[key].filter((row) => !deleted.has(rowIdentity(key, row)) && !localById.has(rowIdentity(key, row)));
+          state[key] = rows.concat([...localById.values()]);
+        });
+        Object.assign(state, pending?.settings || {});
+        normalizeState(state);
+      }
+
+      function mergeStateFromBackend(remoteData, options = {}) {
         if (!remoteData || typeof remoteData !== "object") return false;
+        const preserveLocal = options.preserveLocal !== false;
+        const pending = preserveLocal ? { ...buildSyncChanges(), settings: buildSyncSettings() } : null;
         const localTombstones = state.deletionTombstones || { sales: [], purchases: [] };
         const merged = normalizeState(Object.assign(defaultState(), remoteData));
         merged.deletionTombstones = {
@@ -1036,13 +1053,15 @@
         normalizeState(merged);
         Object.keys(state).forEach((key) => delete state[key]);
         Object.assign(state, merged);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
+        if (pending) reapplyPendingChanges(pending);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         return true;
       }
 
       function mergeSubsetFromBackend(remoteData) {
         if (!remoteData || typeof remoteData !== "object") return false;
+        const pending = { ...buildSyncChanges(), settings: buildSyncSettings() };
         if (remoteData.deletionTombstones) {
           remoteData.deletionTombstones = {
             sales: [...new Set([...(state.deletionTombstones?.sales || []), ...(remoteData.deletionTombstones.sales || [])])],
@@ -1060,9 +1079,10 @@
           }
         });
         normalizeState(state);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         if (!lastSyncedSnapshot) lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
         else Object.keys(remoteData).forEach((key) => { lastSyncedSnapshot[key] = JSON.parse(JSON.stringify(state[key] || [])); });
+        reapplyPendingChanges(pending);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         return changedKeys.length > 0;
       }
 
@@ -1086,7 +1106,14 @@
           const deletes = [];
           baseById.forEach((_row, id) => { if (!currentById.has(id)) deletes.push(id); });
           if (key === "sales" || key === "purchases") (state.deletionTombstones?.[key] || []).forEach((id) => { if (!deletes.includes(id)) deletes.push(id); });
-          if (upserts.length || deletes.length) tables[key] = { upserts, deletes };
+          if (upserts.length || deletes.length) {
+            const baseRowsForChange = {};
+            upserts.forEach((row) => {
+              const id = rowIdentity(key, row);
+              if (id && baseById.has(id)) baseRowsForChange[id] = baseById.get(id);
+            });
+            tables[key] = { upserts, deletes, baseRows: baseRowsForChange };
+          }
         });
         return { tables };
       }
@@ -1217,7 +1244,7 @@
           location.reload();
         });
         try {
-          const registration = await navigator.serviceWorker.register("service-worker.js?v=86", { updateViaCache: "none" });
+          const registration = await navigator.serviceWorker.register("service-worker.js?v=87", { updateViaCache: "none" });
           await registration.update();
         } catch (error) {
           console.warn("Pemeriksaan pembaruan aplikasi belum berhasil.", error);
@@ -1570,11 +1597,19 @@
       function isPurchaseTransaction(row) {
         return Boolean(row && Array.isArray(row.items) && row.items.length > 0);
       }
+      function deviceDocumentSuffix() {
+        let suffix = localStorage.getItem("mdd_device_suffix");
+        if (!suffix) {
+          suffix = Math.random().toString(36).slice(2, 5).toUpperCase();
+          localStorage.setItem("mdd_device_suffix", suffix);
+        }
+        return suffix;
+      }
       function nextInvoiceNo() {
         const stamp = today().split("-").reverse().join("");
         const all = [...state.sales, ...state.pendingSales];
-        const last = all.map((sale) => Number(String(sale.invoiceNo || sale.id || "").match(new RegExp(`INV-${stamp}-(\\d+)$`))?.[1] || 0)).reduce((max, value) => Math.max(max, value), 0);
-        return `INV-${stamp}-${String(last + 1).padStart(4, "0")}`;
+        const last = all.map((sale) => Number(String(sale.invoiceNo || sale.id || "").match(new RegExp(`INV-${stamp}-(\\d+)`))?.[1] || 0)).reduce((max, value) => Math.max(max, value), 0);
+        return `INV-${stamp}-${String(last + 1).padStart(4, "0")}-${deviceDocumentSuffix()}`;
       }
       function ensureSaleDraft() {
         if (!saleDraft.invoiceNo) saleDraft.invoiceNo = nextInvoiceNo();
@@ -1607,8 +1642,8 @@
       function nextPurchaseNo() {
         const stamp = today().split("-").reverse().join("");
         const all = [...state.purchases, ...state.pendingPurchases];
-        const last = all.map((purchase) => Number(String(purchase.invoiceNo || purchase.id || "").match(new RegExp(`PO-${stamp}-(\\d+)$`))?.[1] || 0)).reduce((max, value) => Math.max(max, value), 0);
-        return `PO-${stamp}-${String(last + 1).padStart(4, "0")}`;
+        const last = all.map((purchase) => Number(String(purchase.invoiceNo || purchase.id || "").match(new RegExp(`PO-${stamp}-(\\d+)`))?.[1] || 0)).reduce((max, value) => Math.max(max, value), 0);
+        return `PO-${stamp}-${String(last + 1).padStart(4, "0")}-${deviceDocumentSuffix()}`;
       }
       function ensurePurchaseDraft() {
         if (!purchaseDraft.invoiceNo) purchaseDraft.invoiceNo = nextPurchaseNo();
@@ -2081,11 +2116,11 @@
         sale.items.forEach((item) => {
           const p = findProduct(item.productId);
           if (p) {
-            p.stockIn = toNumber(p.stockIn ?? p.stock ?? 0);
+            const previousStock = stockAkhirProduk(p);
             const primaryQty = productQuantityInPrimary(p, item.qty, item.unit);
             item.primaryQty = primaryQty;
             p.stockOut = toNumber(p.stockOut) + primaryQty;
-            p.stock = stockAkhirProduk(p);
+            p.stock = Math.max(0, previousStock - primaryQty);
             p.stockAkhir = p.stock;
           }
           state.stockMoves.unshift({ id: uid("STK"), date: sale.date, productId: item.productId, productName: p?.name || item.name, unit: item.unit, type: "Keluar", qty: item.primaryQty ?? item.qty, note: `Penjualan ${sale.id}: ${item.qty} ${item.unit}` });
@@ -2276,11 +2311,12 @@
         purchase.items.forEach((item) => {
           const p = findProduct(item.productId);
           if (p) {
+            const previousStock = stockAkhirProduk(p);
             const primaryQty = productQuantityInPrimary(p, item.qty, item.unit);
             item.primaryQty = primaryQty;
-            p.stockIn = toNumber(p.stockIn ?? p.stock ?? 0) + primaryQty;
+            p.stockIn = toNumber(p.stockIn) + primaryQty;
             p.stockOut = toNumber(p.stockOut);
-            p.stock = stockAkhirProduk(p);
+            p.stock = previousStock + primaryQty;
             p.stockAkhir = p.stock;
             p.buy = item.baseBuy || item.buy || item.price;
             p.price = item.price1 || p.price;
@@ -3604,7 +3640,7 @@
           await fetch(state.profile.googleEndpoint, { method: "POST", mode: "no-cors", body: JSON.stringify({ app: "MDD Material Pro", syncProtocol: 2, account: state.profile.googleAccount || "friendsindonesia28@gmail.com", githubRepo: state.profile.githubRepo || "https://github.com/FriendsIndonesia/mddmaterialpro", sentAt: new Date().toISOString(), queue: state.syncQueue, changes, settings }) });
           const verifiedResponse = await requestGoogleWorkspaceJsonp("state");
           if (!verifiedResponse || !syncChangesConfirmed(verifiedResponse.data, changes)) throw new Error("Backend belum mengonfirmasi perubahan.");
-          mergeStateFromBackend(verifiedResponse.data);
+          mergeStateFromBackend(verifiedResponse.data, { preserveLocal: false });
           state.syncQueue = [];
           localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
           lastSyncedSnapshot = JSON.parse(JSON.stringify(state));

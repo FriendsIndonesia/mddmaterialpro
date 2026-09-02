@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v86-installed-app-auto-update";
+const CACHE_NAME = "mdd-material-pro-v87-safe-sync";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

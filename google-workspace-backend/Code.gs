@@ -483,11 +483,39 @@ function applyTableChanges_(ss, table, change) {
   (change.upserts || []).forEach((row) => {
     const key = String(row && row[keyField] || "").trim();
     if (!key) return;
-    const values = table.fields.map((field) => normalizeValue_(row[field]));
     const rowNumber = refreshedRowById[key] || sheet.getLastRow() + 1;
+    const currentValues = refreshedRowById[key]
+      ? sheet.getRange(rowNumber, 1, 1, table.fields.length).getValues()[0]
+      : table.fields.map(() => "");
+    const base = change.baseRows && change.baseRows[key];
+    const values = table.fields.map((field, index) => {
+      if (!Object.prototype.hasOwnProperty.call(row, field)) return currentValues[index];
+      if (!base || !Object.prototype.hasOwnProperty.call(base, field)) return normalizeValue_(row[field]);
+      const incoming = normalizeValue_(row[field]);
+      const original = normalizeValue_(base[field]);
+      const current = normalizeValue_(currentValues[index]);
+      // Three-way merge: perubahan manual di Sheet pada kolom lain tidak boleh
+      // tertimpa oleh snapshot lama dari salah satu perangkat.
+      if (sameValue_(incoming, original)) return currentValues[index];
+      if (!sameValue_(current, original) && !sameValue_(current, incoming)) {
+        // Stok adalah counter bersama. Jika Sheet dan aplikasi mengubahnya
+        // bersamaan, terapkan selisih aplikasi di atas nilai terbaru Sheet.
+        if (table.key === "products" && ["stockIn", "stockOut", "stock", "stockAkhir"].indexOf(field) >= 0) {
+          const mergedNumber = Number(current || 0) + (Number(incoming || 0) - Number(original || 0));
+          return Math.max(0, mergedNumber);
+        }
+        return currentValues[index];
+      }
+      return incoming;
+    });
     sheet.getRange(rowNumber, 1, 1, table.fields.length).setValues([values]);
     refreshedRowById[key] = rowNumber;
   });
+}
+
+function sameValue_(left, right) {
+  if (left instanceof Date && right instanceof Date) return left.getTime() === right.getTime();
+  return JSON.stringify(left == null ? "" : left) === JSON.stringify(right == null ? "" : right);
 }
 
 // Installable edit trigger: validates manual rows and gives missing records a
@@ -495,6 +523,19 @@ function applyTableChanges_(ss, table, change) {
 function onSpreadsheetEdit(e) {
   if (!e || !e.range) return;
   const sheet = e.range.getSheet();
+  // Tab laporan Hutang/Piutang memang tidak memiliki kolom ID. Setiap edit
+  // manual tetap harus menaikkan revision agar seluruh perangkat segera pull.
+  if (["Hutang", "Piutang"].indexOf(sheet.getName()) >= 0) {
+    if (e.range.getRow() > 1) {
+      const lastRow = sheet.getLastRow();
+      if (lastRow > 1) {
+        sheet.getRange(2, 1, lastRow - 1, 2).setNumberFormat("dd/MM/yyyy");
+        sheet.getRange(2, 5, lastRow - 1, 4).setNumberFormat("#,##0");
+      }
+      touchRevision_();
+    }
+    return;
+  }
   const table = TABLES.find((item) => item.sheet === sheet.getName() || (item.aliases || []).indexOf(sheet.getName()) >= 0);
   if (!table || e.range.getRow() <= 1) return;
   const idColumn = table.fields.indexOf("id") + 1;

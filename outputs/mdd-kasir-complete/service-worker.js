@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v90-opname-search";
+const CACHE_NAME = "mdd-material-pro-v91-sync-stock-safety";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

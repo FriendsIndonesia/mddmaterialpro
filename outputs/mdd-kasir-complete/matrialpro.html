@@ -1091,11 +1091,11 @@
         return String(row.id || (key === "syncQueue" ? row.type : "") || "").trim();
       }
 
-      function buildSyncChanges() {
-        const base = lastSyncedSnapshot || {};
+      function buildSyncChanges(baseState = lastSyncedSnapshot || {}, currentState = state) {
+        const base = baseState || {};
         const tables = {};
         SYNC_TABLE_KEYS.forEach((key) => {
-          const currentRows = Array.isArray(state[key]) ? state[key] : [];
+          const currentRows = Array.isArray(currentState[key]) ? currentState[key] : [];
           const baseRows = Array.isArray(base[key]) ? base[key] : [];
           const currentById = new Map(currentRows.map((row) => [rowIdentity(key, row), row]).filter(([id]) => id));
           const baseById = new Map(baseRows.map((row) => [rowIdentity(key, row), row]).filter(([id]) => id));
@@ -1105,7 +1105,7 @@
           });
           const deletes = [];
           baseById.forEach((_row, id) => { if (!currentById.has(id)) deletes.push(id); });
-          if (key === "sales" || key === "purchases") (state.deletionTombstones?.[key] || []).forEach((id) => { if (!deletes.includes(id)) deletes.push(id); });
+          if (key === "sales" || key === "purchases") (currentState.deletionTombstones?.[key] || []).forEach((id) => { if (!deletes.includes(id)) deletes.push(id); });
           if (upserts.length || deletes.length) {
             const baseRowsForChange = {};
             upserts.forEach((row) => {
@@ -1118,10 +1118,10 @@
         return { tables };
       }
 
-      function buildSyncSettings() {
-        const base = lastSyncedSnapshot || {};
+      function buildSyncSettings(baseState = lastSyncedSnapshot || {}, currentState = state) {
+        const base = baseState || {};
         return SYNC_SETTING_KEYS.reduce((changes, key) => {
-          if (JSON.stringify(state[key]) !== JSON.stringify(base[key])) changes[key] = state[key];
+          if (JSON.stringify(currentState[key]) !== JSON.stringify(base[key])) changes[key] = currentState[key];
           return changes;
         }, {});
       }
@@ -1132,7 +1132,7 @@
         return SYNC_SETTING_KEYS.some((key) => JSON.stringify(state[key]) !== JSON.stringify(lastSyncedSnapshot[key]));
       }
 
-      function requestGoogleWorkspaceJsonp(action = "state") {
+      function requestGoogleWorkspaceJsonp(action = "state", params = {}) {
         return new Promise((resolve) => {
           if (!state.profile?.onlineMode || !state.profile?.googleEndpoint) return resolve(false);
           const callbackName = `mddBackendState${Date.now()}${Math.random().toString(36).slice(2)}`;
@@ -1156,7 +1156,8 @@
             cleanup();
             resolve(false);
           };
-          script.src = `${state.profile.googleEndpoint}${separator}action=${action}&callback=${callbackName}&_=${Date.now()}`;
+          const query = new URLSearchParams({ action, callback: callbackName, _: String(Date.now()), ...params });
+          script.src = `${state.profile.googleEndpoint}${separator}${query.toString()}`;
           document.head.appendChild(script);
         });
       }
@@ -1173,6 +1174,16 @@
           const remoteIds = new Set(remoteRows.map((row) => rowIdentity(key, row)).filter(Boolean));
           return (change.upserts || []).every((row) => remoteIds.has(rowIdentity(key, row))) && (change.deletes || []).every((id) => !remoteIds.has(String(id)));
         });
+      }
+
+      function syncRequestId(changes, settings) {
+        const source = JSON.stringify({ changes, settings });
+        let hash = 2166136261;
+        for (let index = 0; index < source.length; index += 1) {
+          hash ^= source.charCodeAt(index);
+          hash = Math.imul(hash, 16777619);
+        }
+        return `SYNC-${(hash >>> 0).toString(16).padStart(8, "0")}-${source.length}`;
       }
 
       async function loadGoogleWorkspaceState(action = "state") {
@@ -1244,7 +1255,7 @@
           location.reload();
         });
         try {
-          const registration = await navigator.serviceWorker.register("service-worker.js?v=90", { updateViaCache: "none" });
+          const registration = await navigator.serviceWorker.register("service-worker.js?v=91", { updateViaCache: "none" });
           await registration.update();
         } catch (error) {
           console.warn("Pemeriksaan pembaruan aplikasi belum berhasil.", error);
@@ -1518,8 +1529,9 @@
       }
       function stockAkhirProduk(product) {
         if (!product) return 0;
-        if (product.stockAwal !== undefined || product.stockIn !== undefined || product.stockOut !== undefined) return Math.max(0, toNumber(product.stockAwal) + toNumber(product.stockIn) - toNumber(product.stockOut));
-        return toNumber(product.stock ?? product.stockAkhir ?? 0);
+        // `stock` adalah saldo berjalan tunggal. stockIn/stockOut hanya audit
+        // pergerakan dan tidak boleh menghitung ulang saldo yang sudah tersimpan.
+        return Math.max(0, toNumber(product.stock ?? product.stockAkhir ?? 0));
       }
       function productHasConversion(product) { return Boolean(product?.secondaryUnit && toNumber(product?.conversionValue) > 0); }
       function productUnitOptions(product, selected = "") {
@@ -1593,6 +1605,9 @@
       }
       function isPurchaseTransaction(row) {
         return Boolean(row && Array.isArray(row.items) && row.items.length > 0);
+      }
+      function paymentIsType(row, type) {
+        return String(row?.type || "").trim().toLowerCase() === String(type || "").trim().toLowerCase();
       }
       function deviceDocumentSuffix() {
         let suffix = localStorage.getItem("mdd_device_suffix");
@@ -1736,13 +1751,15 @@
         if (storeNameEl) storeNameEl.textContent = state.profile.name || "Nama Toko Material";
         if (storeContactEl) storeContactEl.textContent = `${state.profile.address || "Alamat toko belum diisi"} | Telp & WhatsApp : ${state.profile.phone || "Nomor belum diisi"}`;
         const salesTotal = state.sales.reduce((s, x) => s + toNumber(x.total), 0);
-        const todaySales = state.sales.filter((x) => isToday(x.date));
-        const todayPurchases = state.purchases.filter((x) => isToday(x.date));
-        const todayPaymentsReceivable = state.payments.filter((x) => isToday(x.date) && x.type === "Piutang").reduce((sum, x) => sum + toNumber(x.amount), 0);
-        const todayPaymentsDebt = state.payments.filter((x) => isToday(x.date) && x.type === "Hutang").reduce((sum, x) => sum + toNumber(x.amount), 0);
+        const todaySales = state.sales.filter((x) => isCashierSale(x) && isToday(x.date));
+        const todayPurchases = state.purchases.filter((x) => isPurchaseTransaction(x) && isToday(x.date));
+        const todayPaymentsReceivable = state.payments.filter((x) => isToday(x.date) && paymentIsType(x, "Piutang")).reduce((sum, x) => sum + toNumber(x.amount), 0);
+        const todayPaymentsDebt = state.payments.filter((x) => isToday(x.date) && paymentIsType(x, "Hutang")).reduce((sum, x) => sum + toNumber(x.amount), 0);
+        const allPaymentsReceivable = state.payments.filter((x) => paymentIsType(x, "Piutang")).reduce((sum, x) => sum + toNumber(x.amount), 0);
+        const allPaymentsDebt = state.payments.filter((x) => paymentIsType(x, "Hutang")).reduce((sum, x) => sum + toNumber(x.amount), 0);
         const todayPettyCash = state.cashTx.filter((x) => isToday(x.date) && x.category === "Petty Cash").reduce((sum, x) => sum + (x.type === "Masuk" ? toNumber(x.amount) : -toNumber(x.amount)), 0);
         const activeProducts = state.products.filter((p) => p.active !== false);
-        const stockValue = state.products.reduce((sum, product) => sum + (toNumber(product.buy) * toNumber(product.stockAkhir)), 0);
+        const stockValue = state.products.reduce((sum, product) => sum + (toNumber(product.buy) * stockAkhirProduk(product)), 0);
         const receivable = state.sales.filter((s) => toNumber(s.due) > 0).reduce((sum, s) => sum + toNumber(s.due), 0);
         const payable = state.purchases.filter((p) => toNumber(p.due) > 0).reduce((sum, p) => sum + toNumber(p.due), 0);
         const cashBalance = state.cashAccounts.reduce((s, a) => s + toNumber(a.balance), 0);
@@ -1766,6 +1783,8 @@
           reportBox.innerHTML = [
             ["Jumlah Piutang Tersisa", idr.format(receivable)],
             ["Jumlah Hutang Tersisa", idr.format(payable)],
+            ["Total Pembayaran Piutang Tercatat", idr.format(allPaymentsReceivable)],
+            ["Total Pembayaran Hutang Tercatat", idr.format(allPaymentsDebt)],
             ["Petty Cash Hari Ini", idr.format(todayPettyCash)],
             ["Selisih Stock", number.format(stockDifference)],
             ["Nilai Aset Bersih", idr.format(netAssetValue)],
@@ -1785,7 +1804,7 @@
         const margin = salesItemRevenue - transactionCogs;
         const advice = document.getElementById("businessAdvice");
         if (advice) advice.textContent = `${fast} Margin barang berdasarkan harga jual transaksi dikurangi HPP tersimpan: ${idr.format(margin)}.`;
-        drawSalesChart(isReportViewCleared("dashboardView") ? [] : state.sales);
+        drawSalesChart(isReportViewCleared("dashboardView") ? [] : state.sales.filter(isCashierSale));
       }
       function renderDashboardWarningSearch(lowStockRows) {
         const input = document.getElementById("dashboardWarningSearch");
@@ -2083,7 +2102,9 @@
         renderAll();
         toast("Pesanan penjualan disimpan sebagai pending.");
       }
+      let saleCheckoutBusy = false;
       function checkoutSale() {
+        if (saleCheckoutBusy) return toast("Transaksi penjualan sedang diproses.");
         if (!activeCart.length) return toast("Keranjang masih kosong.");
         updateSaleDraftTotals();
         saleDraft.method = document.getElementById("salePayMethod").value;
@@ -2098,18 +2119,24 @@
         const dp = isDownPaymentMethod(method) ? Math.max(0, Math.min(total, toNumber(saleDraft.cashReceived))) : 0;
         if (isDownPaymentMethod(method) && dp <= 0) return toast("Masukkan nominal DP (Uang Muka) pada kolom Uang Diterima.");
         if (isCashMethod(method) && toNumber(saleDraft.cashReceived) < total) return toast("Uang diterima kurang dari Total Transaksi.");
+        saleCheckoutBusy = true;
         const previousSale = editingSaleId ? state.sales.find((item) => item.id === editingSaleId) : null;
         if (previousSale) {
           (previousSale.items || []).forEach((item) => {
             const product = findProduct(item.productId);
-            if (product) product.stockOut = Math.max(0, toNumber(product.stockOut) - toNumber(item.primaryQty ?? productQuantityInPrimary(product, item.qty, item.unit)));
+            if (product) {
+              const restoredQty = toNumber(item.primaryQty ?? productQuantityInPrimary(product, item.qty, item.unit));
+              product.stockOut = Math.max(0, toNumber(product.stockOut) - restoredQty);
+              product.stock = stockAkhirProduk(product) + restoredQty;
+              product.stockAkhir = product.stock;
+            }
           });
-          state.stockMoves = state.stockMoves.filter((move) => move.note !== `Penjualan ${previousSale.id}`);
+          state.stockMoves = state.stockMoves.filter((move) => !String(move.note || "").startsWith(`Penjualan ${previousSale.id}`));
           state.payments = state.payments.filter((payment) => !(payment.refId === previousSale.id && payment.method === "DP Penjualan"));
           state.sales = state.sales.filter((item) => item.id !== previousSale.id);
         }
         const due = isDownPaymentMethod(method) ? Math.max(0, total - dp) : method === "Piutang" ? total : 0;
-        const sale = { id: previousSale?.id || uid("SAL"), invoiceNo: previousSale?.invoiceNo || saleDraft.invoiceNo, date: document.getElementById("saleDate").value, customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, customerDeposit: customer.deposit, items: structuredClone(activeCart), method, ongkir: saleDraft.ongkir, dp, bankCharge: 0, cashReceived: usesReceivedAmount(method) ? saleDraft.cashReceived : 0, change: saleCashChange(), note: saleDraft.note, status: due > 0 ? "Piutang" : "Lunas", total, due, paid: Math.max(0, total - due), depositRemaining: method === "Deposit" ? Math.max(0, customer.deposit - total) : customer.deposit };
+        const sale = { id: previousSale?.id || uid("SAL"), createdAt: previousSale?.createdAt || new Date().toISOString(), invoiceNo: previousSale?.invoiceNo || saleDraft.invoiceNo, date: document.getElementById("saleDate").value, customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, customerDeposit: customer.deposit, items: structuredClone(activeCart), method, ongkir: saleDraft.ongkir, dp, bankCharge: 0, cashReceived: usesReceivedAmount(method) ? saleDraft.cashReceived : 0, change: saleCashChange(), note: saleDraft.note, status: due > 0 ? "Piutang" : "Lunas", total, due, paid: Math.max(0, total - due), depositRemaining: method === "Deposit" ? Math.max(0, customer.deposit - total) : customer.deposit };
         sale.items.forEach((item) => {
           const p = findProduct(item.productId);
           if (p) {
@@ -2130,6 +2157,7 @@
         resetSaleDraft();
         saveState(`Penjualan ${sale.id} disimpan`);
         renderAll();
+        saleCheckoutBusy = false;
         printDoc("Faktur Penjualan", sale, "sales");
       }
 
@@ -2308,7 +2336,7 @@
         const isPaidPurchase = !isDebtPurchase;
         if (isPaidPurchase && isCashMethod(method) && toNumber(purchaseDraft.cashReceived) < total) return toast("Uang diterima kurang dari Total Transaksi.");
         purchaseCheckoutBusy = true;
-        const purchase = { id: uid("PUR"), invoiceNo: purchaseDraft.invoiceNo, date: document.getElementById("purchaseDate").value, dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", items: structuredClone(purchaseCart), method, ongkir: purchaseDraft.ongkir, bankCharge: purchaseDraft.bankCharge, cashReceived: isCashMethod(method) ? purchaseDraft.cashReceived : (isPaidPurchase ? total : 0), change: purchaseCashChange(), note: purchaseDraft.note, status: isPaidPurchase ? "Lunas" : "Hutang", total, due: isPaidPurchase ? 0 : total, paid: isPaidPurchase ? total : 0, returnAmount: 0 };
+        const purchase = { id: uid("PUR"), createdAt: new Date().toISOString(), invoiceNo: purchaseDraft.invoiceNo, date: document.getElementById("purchaseDate").value, dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", items: structuredClone(purchaseCart), method, ongkir: purchaseDraft.ongkir, bankCharge: purchaseDraft.bankCharge, cashReceived: isCashMethod(method) ? purchaseDraft.cashReceived : (isPaidPurchase ? total : 0), change: purchaseCashChange(), note: purchaseDraft.note, status: isPaidPurchase ? "Lunas" : "Hutang", total, due: isPaidPurchase ? 0 : total, paid: isPaidPurchase ? total : 0, returnAmount: 0 };
         purchase.items.forEach((item) => {
           const p = findProduct(item.productId);
           if (p) {
@@ -2809,8 +2837,10 @@
       }
 
       function renderReports() {
-        const salesRevenue = state.sales.reduce((sum, sale) => sum + (sale.items || []).reduce((x, item) => x + (toNumber(item.price) * toNumber(item.qty) - toNumber(item.discount)), 0), 0);
-        const cogs = state.sales.reduce((sum, sale) => sum + (sale.items || []).reduce((x, item) => x + (toNumber(item.buy ?? findProduct(item.productId)?.buy) * toNumber(item.qty)), 0), 0);
+        const reportSales = state.sales.filter(isCashierSale);
+        const reportPurchases = state.purchases.filter(isPurchaseTransaction);
+        const salesRevenue = reportSales.reduce((sum, sale) => sum + (sale.items || []).reduce((x, item) => x + (toNumber(item.price) * toNumber(item.qty) - toNumber(item.discount)), 0), 0);
+        const cogs = reportSales.reduce((sum, sale) => sum + (sale.items || []).reduce((x, item) => x + (toNumber(item.buy ?? findProduct(item.productId)?.buy) * toNumber(item.qty)), 0), 0);
         const grossProfit = salesRevenue - cogs;
         const expenseCategories = ["Biaya Operasional", "Gaji Karyawan", "Lainnya"];
         const expenses = state.cashTx.filter((x) => x.type === "Keluar" && expenseCategories.includes(x.category)).reduce((s, x) => s + toNumber(x.amount), 0);
@@ -2837,9 +2867,9 @@
         }));
         const netProfit = grossProfit - expenses;
         const reports = [
-          { title: "Laporan Penjualan", rows: salesReportRows(state.sales), value: idr.format(state.sales.reduce((s, x) => s + toNumber(x.total), 0)), note: `${state.sales.length} invoice dari sheet Sales. Total transaksi mencakup nilai barang dan ongkir; DP dicatat sebagai pembayaran.` },
+          { title: "Laporan Penjualan", rows: salesReportRows(reportSales), value: idr.format(reportSales.reduce((s, x) => s + toNumber(x.total), 0)), note: `${reportSales.length} invoice penjualan yang memiliki rincian barang. Total transaksi mencakup nilai barang dan ongkir; DP dicatat sebagai pembayaran.` },
           { title: "Laporan Retur Penjualan", rows: salesReturn, value: `${number.format(salesReturn.reduce((s, x) => s + Number(x.qty || 0), 0))} item`, note: `${salesReturn.length} transaksi retur penjualan tercatat.` },
-          { title: "Laporan Pembelian", rows: purchaseReportRows(state.purchases), value: idr.format(state.purchases.reduce((s, x) => s + toNumber(x.total), 0)), note: `${state.purchases.length} transaksi dari sheet Purchases.` },
+          { title: "Laporan Pembelian", rows: purchaseReportRows(reportPurchases), value: idr.format(reportPurchases.reduce((s, x) => s + toNumber(x.total), 0)), note: `${reportPurchases.length} transaksi pembelian yang memiliki rincian barang.` },
           { title: "Laporan Retur Pembelian", rows: purchaseReturn, value: `${number.format(purchaseReturn.reduce((s, x) => s + Number(x.qty || 0), 0))} item`, note: `${purchaseReturn.length} transaksi retur pembelian tercatat.` },
           { title: "Laporan Transaksi Kas", rows: state.cashTx, value: idr.format(cashNet), note: `${state.cashTx.length} transaksi. Rumus: kas masuk ${idr.format(flow.cashIn)} − kas keluar ${idr.format(flow.cashOut)}.` },
           { title: "Laporan Hutang", rows: debtReport, value: idr.format(debtRows.reduce((s, x) => s + x.due, 0)), note: `${debtRows.length} hutang aktif. Kolom disamakan dengan form Pembayaran Hutang.` },
@@ -2852,14 +2882,14 @@
         document.getElementById("reportsView").innerHTML = `
           <div class="page-header"><div><p class="eyebrow">Laporan</p><h2>Semua Laporan dan Export PDF/Excel</h2></div><div class="header-actions"><button id="printReportsBtn" class="btn btn-outline-secondary"><i class="bi bi-printer"></i> Print</button><button id="exportAllReportsExcelBtn" class="btn btn-outline-success"><i class="bi bi-file-earmark-excel"></i> Export Semua Excel</button><button id="exportAllReportsBtn" class="btn btn-primary"><i class="bi bi-filetype-pdf"></i> Export Semua PDF</button></div></div>
           <div class="metrics-grid">
-            <div class="metric-card"><div class="metric-icon bg-green"><i class="bi bi-receipt"></i></div><div><span>Total Penjualan</span><strong>${idr.format(state.sales.reduce((s, x) => s + toNumber(x.total), 0))}</strong><small class="metric-source">Σ total seluruh invoice penjualan</small></div></div>
-            <div class="metric-card"><div class="metric-icon bg-cyan"><i class="bi bi-box-arrow-in-down"></i></div><div><span>Total Pembelian</span><strong>${idr.format(state.purchases.reduce((s, x) => s + toNumber(x.total), 0))}</strong><small class="metric-source">Σ total seluruh faktur pembelian</small></div></div>
+            <div class="metric-card"><div class="metric-icon bg-green"><i class="bi bi-receipt"></i></div><div><span>Total Penjualan</span><strong>${idr.format(reportSales.reduce((s, x) => s + toNumber(x.total), 0))}</strong><small class="metric-source">Σ invoice Kasir yang memiliki rincian barang</small></div></div>
+            <div class="metric-card"><div class="metric-icon bg-cyan"><i class="bi bi-box-arrow-in-down"></i></div><div><span>Total Pembelian</span><strong>${idr.format(reportPurchases.reduce((s, x) => s + toNumber(x.total), 0))}</strong><small class="metric-source">Σ faktur Purchase yang memiliki rincian barang</small></div></div>
             <div class="metric-card"><div class="metric-icon bg-blue"><i class="bi bi-graph-up"></i></div><div><span>Laba Kotor Barang</span><strong>${idr.format(grossProfit)}</strong><small class="metric-source">Penjualan item − HPP item terjual</small></div></div>
             <div class="metric-card"><div class="metric-icon bg-amber"><i class="bi bi-currency-exchange"></i></div><div><span>Laba Bersih Operasional</span><strong>${idr.format(netProfit)}</strong><small class="metric-source">Laba kotor barang − biaya operasional</small></div></div>
           </div>
           <div class="audit-box mb-3"><strong>Rincian laba:</strong> penjualan barang ${idr.format(salesRevenue)} − HPP barang terjual ${idr.format(cogs)} = laba kotor ${idr.format(grossProfit)}; dikurangi biaya operasional ${idr.format(expenses)} = <strong>${idr.format(netProfit)}</strong>.</div>
           <div class="module-grid">${reports.map((report, i) => `<div class="module-card"><h4>${report.title}</h4><strong class="report-value">${report.value}</strong><p class="report-note">${report.note}</p><p class="small text-secondary mb-2">${report.rows.length} baris data siap diexport.</p><div class="d-flex gap-2 flex-wrap"><button class="btn btn-outline-primary btn-sm" data-report-index="${i}"><i class="bi bi-filetype-pdf"></i> PDF</button><button class="btn btn-outline-success btn-sm" data-report-excel-index="${i}"><i class="bi bi-file-earmark-excel"></i> Excel</button></div></div>`).join("")}</div>
-          <section class="panel mt-3" id="reportPrintable"><div class="panel-header"><h3>Preview Laporan Penjualan</h3><span class="chip">Penerimaan laporan</span></div>${salesTable(visibleReportRows("reportsView", "sales", state.sales))}</section>`;
+          <section class="panel mt-3" id="reportPrintable"><div class="panel-header"><h3>Preview Laporan Penjualan</h3><span class="chip">Penerimaan laporan</span></div>${salesTable(visibleReportRows("reportsView", "sales", reportSales))}</section>`;
         document.querySelectorAll("[data-report-index]").forEach((btn) => btn.onclick = () => exportReportPdf(reports[btn.dataset.reportIndex].title, reports[btn.dataset.reportIndex].rows));
         document.querySelectorAll("[data-report-excel-index]").forEach((btn) => btn.onclick = () => exportReportExcel(reports[btn.dataset.reportExcelIndex].title, reports[btn.dataset.reportExcelIndex].rows));
         document.getElementById("exportAllReportsBtn").onclick = () => exportReportPdf("Semua Laporan MDD", reports.flatMap((report) => report.rows.map((r) => ({ laporan: report.title, nilaiRingkasan: report.value, catatan: report.note, ...r }))));
@@ -3204,14 +3234,24 @@
             <div class="col-md-3"><label class="form-label">Harga Beli</label><input name="buy" type="number" class="form-control" value="${editing?.buy || 0}" required></div>
             <div class="col-md-3"><label class="form-label">Harga Jual 1</label><input name="price" type="number" class="form-control" value="${editing?.price || 0}" required></div>
             <div class="col-md-3"><label class="form-label">Harga Jual 2</label><input name="price2" type="number" class="form-control" value="${editing?.price2 || 0}"></div>
-            <div class="col-md-3"><label class="form-label">Stock Masuk</label><input id="masterStockIn" name="stockIn" type="number" class="form-control" value="${stockInValue}"></div>
-            <div class="col-md-3"><label class="form-label">Stock Keluar</label><input id="masterStockOut" name="stockOut" type="number" class="form-control" value="${stockOutValue}"></div>
-            <div class="col-md-3"><label class="form-label">Stock Akhir</label><input id="masterStockFinal" name="stock" type="number" class="form-control" value="${stockAkhirValue}" readonly></div>
+            <div class="col-md-3"><label class="form-label">Stock Masuk (Histori)</label><input id="masterStockIn" name="stockIn" type="number" class="form-control" value="${stockInValue}" readonly></div>
+            <div class="col-md-3"><label class="form-label">Stock Keluar (Histori)</label><input id="masterStockOut" name="stockOut" type="number" class="form-control" value="${stockOutValue}" readonly></div>
+            <div class="col-md-3"><label class="form-label">Stock Akhir / Saat Ini</label><input id="masterStockFinal" name="stock" type="number" min="0" class="form-control" value="${stockAkhirValue}" required></div>
             <div class="col-md-3"><label class="form-label">Min. Stok</label><input name="min" type="number" class="form-control" value="${editing?.min ?? 5}"></div>
           </div>`, (fd) => {
-          const stockIn = Number(fd.get("stockIn"));
-          const stockOut = Number(fd.get("stockOut"));
-          const stockAkhir = Math.max(0, stockIn - stockOut);
+          let stockIn = toNumber(editing?.stockIn);
+          let stockOut = toNumber(editing?.stockOut);
+          const previousStock = stockAkhirProduk(editing);
+          const stockAkhir = Math.max(0, Number(fd.get("stock") || 0));
+          if (editing) {
+            const difference = stockAkhir - previousStock;
+            if (difference > 0) stockIn += difference;
+            if (difference < 0) stockOut += Math.abs(difference);
+            if (difference !== 0) state.stockMoves.unshift({ id: uid("STK"), date: today(), productId: editing.id, sku: editing.code, productName: fd.get("name"), unit: fd.get("unit"), type: "Edit Saldo Produk", systemStock: previousStock, physicalStock: stockAkhir, difference, qty: difference, note: "Perubahan Stock Akhir melalui Edit Master Barang" });
+          } else {
+            stockIn = stockAkhir;
+            stockOut = 0;
+          }
           const payload = { code: fd.get("code"), name: fd.get("name"), category: fd.get("category"), unit: fd.get("unit"), primaryUnit: fd.get("unit"), buy: Number(fd.get("buy")), price: Number(fd.get("price")), price2: Number(fd.get("price2")), stockIn, stockOut, stock: stockAkhir, stockAkhir, min: Number(fd.get("min")), active: true };
           if (editing) {
             Object.assign(editing, payload);
@@ -3223,14 +3263,6 @@
           closeModal();
           renderAll();
         });
-        const updateMasterStockFinal = () => {
-          const stockIn = Number(document.getElementById("masterStockIn").value || 0);
-          const stockOut = Number(document.getElementById("masterStockOut").value || 0);
-          document.getElementById("masterStockFinal").value = Math.max(0, stockIn - stockOut);
-        };
-        document.getElementById("masterStockIn").addEventListener("input", updateMasterStockFinal);
-        document.getElementById("masterStockOut").addEventListener("input", updateMasterStockFinal);
-        updateMasterStockFinal();
       }
       function openCustomerModal() { openSimpleMaster("Master Pelanggan", "customers", ["name:Nama", "phone:Whatsapp", "type:Tipe", "address:Alamat", "deposit:Jumlah Deposit"]); }
       function openSupplierModal() { openSimpleMaster("Master Supplier", "suppliers", ["company:Nama Perusahaan", "name:Nama Sales", "phone:Whatsapp", "address:Alamat"]); }
@@ -3284,9 +3316,7 @@
         if (type === "Opname") {
           const availableProducts = state.products.filter((p) => p.active !== false);
           if (!availableProducts.length) {
-            openProductModal();
-            toast("Tambahkan Master Barang terlebih dahulu sebelum Stok Opname.");
-            return;
+            return toast("Master Barang masih kosong. Isi produk terlebih dahulu sebelum Stok Opname.");
           }
           openModal("Stok Opname", `<div class="row g-3">
             <div class="col-md-3"><label class="form-label">Nomor</label><input name="number" class="form-control" value="OPN-${today().replaceAll("-", "")}-${String(state.stockMoves.filter((m) => m.type === "Opname").length + 1).padStart(3, "0")}" required></div>
@@ -3358,9 +3388,13 @@
         }
         openModal(`${type} Stok`, `<div class="row g-3"><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div><div class="col-md-5"><label class="form-label">Produk</label><select name="productId" class="form-select">${productOptions()}</select></div><div class="col-md-3"><label class="form-label">Stok Baru</label><input name="qty" type="number" class="form-control" required></div><div class="col-12"><label class="form-label">Catatan</label><input name="note" class="form-control"></div></div>`, (fd) => {
           const product = findProduct(fd.get("productId"));
-          const old = product.stock;
-          product.stock = Number(fd.get("qty"));
-          state.stockMoves.unshift({ id: uid("STK"), date: fd.get("date"), productId: product.id, type, qty: product.stock - old, note: fd.get("note") });
+          const old = stockAkhirProduk(product);
+          product.stock = Math.max(0, Number(fd.get("qty")));
+          product.stockAkhir = product.stock;
+          const difference = product.stock - old;
+          if (difference >= 0) product.stockIn = toNumber(product.stockIn) + difference;
+          else product.stockOut = toNumber(product.stockOut) + Math.abs(difference);
+          state.stockMoves.unshift({ id: uid("STK"), date: fd.get("date"), productId: product.id, productName: product.name, unit: product.unit, type, systemStock: old, physicalStock: product.stock, difference, qty: difference, note: fd.get("note") });
           saveState(`${type} stok ${product.name}`);
           closeModal();
           renderAll();
@@ -3382,12 +3416,18 @@
           <div class="col-md-9"><label class="form-label">Keterangan / Catatan</label><input name="note" class="form-control" value="${esc(editing.note || "")}"></div>
         </div>`, (fd) => {
           const product = findProduct(fd.get("productId"));
-          const systemStock = stockAkhirProduk(product);
+          if (!product || product.id !== editing.productId) return toast("Produk pada histori opname tidak boleh diganti. Buat Stok Opname baru untuk produk lain.");
+          const previousDifference = toNumber(editing.difference ?? editing.qty);
+          const currentStock = stockAkhirProduk(product);
+          const systemStock = Math.max(0, currentStock - previousDifference);
           const physical = Number(fd.get("physicalStock"));
-          Object.assign(editing, { number: fd.get("number"), date: fd.get("date"), productId: product.id, sku: product.code, productName: product.name, unit: fd.get("unit") || product.unit, type: "Opname", systemStock, physicalStock: physical, difference: physical - systemStock, qty: physical - systemStock, note: fd.get("note") });
-          product.stockIn = toNumber(product.stockIn ?? product.stock ?? physical);
-          product.stockOut = Math.max(0, product.stockIn - physical);
-          product.stock = stockAkhirProduk(product);
+          if (previousDifference >= 0) product.stockIn = Math.max(0, toNumber(product.stockIn) - previousDifference);
+          else product.stockOut = Math.max(0, toNumber(product.stockOut) - Math.abs(previousDifference));
+          const newDifference = physical - systemStock;
+          if (newDifference >= 0) product.stockIn = toNumber(product.stockIn) + newDifference;
+          else product.stockOut = toNumber(product.stockOut) + Math.abs(newDifference);
+          Object.assign(editing, { number: fd.get("number"), date: fd.get("date"), productId: product.id, sku: product.code, productName: product.name, unit: fd.get("unit") || product.unit, type: "Opname", systemStock, physicalStock: physical, difference: newDifference, qty: newDifference, note: fd.get("note") });
+          product.stock = Math.max(0, physical);
           product.stockAkhir = product.stock;
           saveState(`Stok opname ${product.name} diperbarui`);
           closeModal();
@@ -3671,15 +3711,21 @@
           const changes = buildSyncChanges();
           if (!Object.keys(changes.tables).length && !hasLocalSyncChanges()) return;
           const settings = buildSyncSettings();
-          await fetch(state.profile.googleEndpoint, { method: "POST", mode: "no-cors", body: JSON.stringify({ app: "MDD Material Pro", syncProtocol: 2, account: state.profile.googleAccount || "friendsindonesia28@gmail.com", githubRepo: state.profile.githubRepo || "https://github.com/FriendsIndonesia/mddmaterialpro", sentAt: new Date().toISOString(), queue: state.syncQueue, changes, settings }) });
+          const sentState = JSON.parse(JSON.stringify(state));
+          const requestId = syncRequestId(changes, settings);
+          await fetch(state.profile.googleEndpoint, { method: "POST", mode: "no-cors", body: JSON.stringify({ app: "MDD Material Pro", syncProtocol: 3, requestId, account: state.profile.googleAccount || "friendsindonesia28@gmail.com", githubRepo: state.profile.githubRepo || "https://github.com/FriendsIndonesia/mddmaterialpro", sentAt: new Date().toISOString(), queue: state.syncQueue, changes, settings }) });
+          const receipt = await requestGoogleWorkspaceJsonp("receipt", { requestId });
+          if (!receipt?.processed) throw new Error("Backend belum mengonfirmasi paket sinkronisasi.");
           const verifiedResponse = await requestGoogleWorkspaceJsonp("state");
-          if (!verifiedResponse || !syncChangesConfirmed(verifiedResponse.data, changes)) throw new Error("Backend belum mengonfirmasi perubahan.");
+          if (!verifiedResponse?.data) throw new Error("Backend belum mengirim keadaan terbaru.");
+          const pendingAfterSend = syncPending ? { ...buildSyncChanges(sentState, state), settings: buildSyncSettings(sentState, state) } : null;
           mergeStateFromBackend(verifiedResponse.data, { preserveLocal: false });
           state.syncQueue = [];
+          if (pendingAfterSend) reapplyPendingChanges(pendingAfterSend);
           localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-          lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
           renderSyncedState();
           toast("Sinkron dua arah berhasil dan telah dikonfirmasi backend.");
+          if (pendingAfterSend && (Object.keys(pendingAfterSend.tables || {}).length || Object.keys(pendingAfterSend.settings || {}).length)) queueGoogleWorkspaceSync();
         } catch {
           syncPending = true;
           clearTimeout(syncTimer);

@@ -854,6 +854,7 @@
       let saleProductDraft = { sku: "", search: "", unit: "", qty: 1, hpp: "", price1: "", price2: "", manualPrice: "", priceMode: "price1" };
       let selectedPurchaseProductId = "";
       let modalSubmit = null;
+      let modalSubmitting = false;
       let masterSearchSources = {};
       let productDatabaseQuery = "";
       let financeDatabaseQuery = "";
@@ -1176,14 +1177,29 @@
         });
       }
 
-      function syncRequestId(changes, settings) {
+      async function syncRequestId(changes, settings) {
         const source = JSON.stringify({ changes, settings });
+        if (window.crypto?.subtle && window.TextEncoder) {
+          const digest = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(source));
+          const hex = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+          return `SYNC-${hex}`;
+        }
         let hash = 2166136261;
         for (let index = 0; index < source.length; index += 1) {
           hash ^= source.charCodeAt(index);
           hash = Math.imul(hash, 16777619);
         }
         return `SYNC-${(hash >>> 0).toString(16).padStart(8, "0")}-${source.length}`;
+      }
+
+      function syncRefreshActions(changes, settings) {
+        if (Object.keys(settings || {}).length) return ["state"];
+        const keys = new Set(Object.keys(changes?.tables || {}));
+        const actions = [];
+        if (["products", "categories", "discounts"].some((key) => keys.has(key))) actions.push("products");
+        if (["sales", "purchases", "payments", "cashTx", "returns", "pendingSales", "pendingPurchases"].some((key) => keys.has(key))) actions.push("finance");
+        if (["customers", "suppliers", "employees", "cashAccounts", "packages"].some((key) => keys.has(key))) actions.push("masterlite");
+        return actions;
       }
 
       async function loadGoogleWorkspaceState(action = "state") {
@@ -1255,7 +1271,7 @@
           location.reload();
         });
         try {
-          const registration = await navigator.serviceWorker.register("service-worker.js?v=91", { updateViaCache: "none" });
+          const registration = await navigator.serviceWorker.register("service-worker.js?v=92", { updateViaCache: "none" });
           await registration.update();
         } catch (error) {
           console.warn("Pemeriksaan pembaruan aplikasi belum berhasil.", error);
@@ -1282,9 +1298,20 @@
         document.getElementById("logoutBtn").addEventListener("click", () => { sessionStorage.removeItem("mdd_session"); location.reload(); });
         document.getElementById("dashboardPdfBtn").addEventListener("click", () => exportElementPdf("dashboardCapture", "dashboard-utama-mdd.pdf"));
         document.querySelectorAll("[data-jump]").forEach((btn) => btn.addEventListener("click", () => setView(btn.dataset.jump)));
-        document.getElementById("modalForm").addEventListener("submit", (event) => {
+        document.getElementById("modalForm").addEventListener("submit", async (event) => {
           event.preventDefault();
-          if (modalSubmit) modalSubmit(new FormData(event.currentTarget));
+          if (!modalSubmit || modalSubmitting) return;
+          const button = document.getElementById("modalSubmitBtn");
+          modalSubmitting = true;
+          button.disabled = true;
+          try {
+            await modalSubmit(new FormData(event.currentTarget));
+          } finally {
+            setTimeout(() => {
+              modalSubmitting = false;
+              button.disabled = false;
+            }, 400);
+          }
         });
       }
       function login(event) {
@@ -2374,7 +2401,7 @@
         const totalReceivable = receivables.reduce((s, p) => s + toNumber(p.due), 0);
         const totalCash = state.cashAccounts.reduce((s, a) => s + toNumber(a.balance), 0);
         document.getElementById("financeView").innerHTML = `
-          <div class="page-header"><div><p class="eyebrow">Keuangan</p><h2>Hutang, Piutang, Kas, dan Cashflow</h2></div><button id="addCashTxBtn" class="btn btn-primary"><i class="bi bi-plus-lg"></i> Transaksi Kas</button></div>
+          <div class="page-header"><div><p class="eyebrow">Keuangan</p><h2>Hutang, Piutang, Kas, dan Cashflow</h2></div><div class="header-actions"><button id="clearFinanceCashReportBtn" data-clear-report="financeView" class="btn btn-outline-danger" type="button"><i class="bi bi-trash3"></i> Clear Laporan</button><button id="addCashTxBtn" class="btn btn-primary" type="button"><i class="bi bi-plus-lg"></i> Transaksi Kas</button></div></div>
           <div class="metrics-grid">
             <div class="metric-card"><div class="metric-icon bg-rose"><i class="bi bi-arrow-up-right"></i></div><div><span>Sisa Hutang</span><strong>${idr.format(totalDebt)}</strong><small class="metric-source">Sumber: ${debts.length} faktur pembelian dengan sisa tagihan</small></div></div>
             <div class="metric-card"><div class="metric-icon bg-green"><i class="bi bi-arrow-down-left"></i></div><div><span>Sisa Piutang</span><strong>${idr.format(totalReceivable)}</strong><small class="metric-source">Sumber: ${receivables.length} invoice penjualan dengan sisa tagihan</small></div></div>
@@ -2401,6 +2428,7 @@
           </section>
           <section class="panel mt-3"><div class="panel-header"><h3>Laporan Transaksi Kas</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="cash"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${cashTable(visibleReportRows("financeView", "cashTx", state.cashTx))}</section>`;
         document.getElementById("addCashTxBtn").onclick = openCashTxModal;
+        document.getElementById("clearFinanceCashReportBtn").onclick = () => clearCurrentViewReport("financeView");
         document.getElementById("financeDatabaseSearch").oninput = (event) => { financeDatabaseQuery = event.target.value; renderFinanceDatabaseSearch(); };
         document.getElementById("clearFinanceDatabaseSearch").onclick = () => { financeDatabaseQuery = ""; financeProductQuery = ""; financeBulkSelection.clear(); document.getElementById("financeDatabaseSearch").value = ""; renderFinanceDatabaseSearch(); document.getElementById("financeDatabaseSearch").focus(); };
         document.getElementById("bulkFinancePaymentBtn").onclick = openBulkFinancePaymentModal;
@@ -3092,6 +3120,8 @@
       }
 
       function openModal(title, body, submit, submitLabel = "Simpan") {
+        modalSubmitting = false;
+        document.getElementById("modalSubmitBtn").disabled = false;
         document.getElementById("modalTitle").textContent = title;
         document.getElementById("modalBody").innerHTML = body;
         document.querySelector("#modalSubmitBtn span").textContent = submitLabel;
@@ -3712,25 +3742,28 @@
           if (!Object.keys(changes.tables).length && !hasLocalSyncChanges()) return;
           const settings = buildSyncSettings();
           const sentState = JSON.parse(JSON.stringify(state));
-          const requestId = syncRequestId(changes, settings);
+          const requestId = await syncRequestId(changes, settings);
           await fetch(state.profile.googleEndpoint, { method: "POST", mode: "no-cors", body: JSON.stringify({ app: "MDD Material Pro", syncProtocol: 3, requestId, account: state.profile.googleAccount || "friendsindonesia28@gmail.com", githubRepo: state.profile.githubRepo || "https://github.com/FriendsIndonesia/mddmaterialpro", sentAt: new Date().toISOString(), queue: state.syncQueue, changes, settings }) });
           const receipt = await requestGoogleWorkspaceJsonp("receipt", { requestId });
           if (!receipt?.processed) throw new Error("Backend belum mengonfirmasi paket sinkronisasi.");
-          const verifiedResponse = await requestGoogleWorkspaceJsonp("state");
-          if (!verifiedResponse?.data) throw new Error("Backend belum mengirim keadaan terbaru.");
           const pendingAfterSend = syncPending ? { ...buildSyncChanges(sentState, state), settings: buildSyncSettings(sentState, state) } : null;
-          mergeStateFromBackend(verifiedResponse.data, { preserveLocal: false });
+          lastSyncedSnapshot = JSON.parse(JSON.stringify(sentState));
+          const refreshActions = syncRefreshActions(changes, settings);
+          for (const action of refreshActions) {
+            const verifiedResponse = await requestGoogleWorkspaceJsonp(action);
+            if (!verifiedResponse?.data) throw new Error(`Backend belum mengirim pembaruan ${action}.`);
+            if (action === "state") mergeStateFromBackend(verifiedResponse.data, { preserveLocal: true });
+            else mergeSubsetFromBackend(verifiedResponse.data);
+          }
           state.syncQueue = [];
           if (pendingAfterSend) reapplyPendingChanges(pendingAfterSend);
           localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
           renderSyncedState();
-          toast("Sinkron dua arah berhasil dan telah dikonfirmasi backend.");
           if (pendingAfterSend && (Object.keys(pendingAfterSend.tables || {}).length || Object.keys(pendingAfterSend.settings || {}).length)) queueGoogleWorkspaceSync();
         } catch {
           syncPending = true;
           clearTimeout(syncTimer);
           syncTimer = setTimeout(syncGoogleWorkspace, 2500);
-          toast("Sinkron belum dikonfirmasi. Data lokal tetap aman dan akan dicoba kembali otomatis.");
         } finally {
           isSyncing = false;
         }

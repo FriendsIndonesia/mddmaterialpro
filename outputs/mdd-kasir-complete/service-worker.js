@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v93-safe-active-forms";
+const CACHE_NAME = "mdd-material-pro-v94-rupiah-period-cleanup";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

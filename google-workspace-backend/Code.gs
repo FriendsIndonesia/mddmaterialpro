@@ -19,8 +19,7 @@ const TABLES = [
   { key: "returns", sheet: "Returns", fields: ["id", "module", "date", "refId", "invoiceNo", "productId", "product", "qty", "unit", "primaryQty", "amount", "total", "method", "note"] },
   { key: "pendingSales", sheet: "PendingSales", fields: ["id", "invoiceNo", "date", "customerId", "customerName", "customerType", "customerAddress", "customerWhatsapp", "method", "items", "ongkir", "dp", "bankCharge", "cashReceived", "change", "total", "note"] },
   { key: "pendingPurchases", sheet: "PendingPurchases", fields: ["id", "invoiceNo", "date", "dueDate", "supplierId", "salesName", "company", "whatsapp", "method", "items", "ongkir", "bankCharge", "cashReceived", "change", "total", "note"] },
-  { key: "history", sheet: "History", fields: ["id", "date", "user", "action"] },
-  { key: "syncQueue", sheet: "SyncQueue", fields: ["type", "id"] }
+  { key: "history", sheet: "History", fields: ["id", "date", "user", "action"] }
 ];
 
 function doGet(e) {
@@ -738,8 +737,9 @@ function recordProcessedSync_(ss, requestId) {
   const sheet = syncReceiptSheet_(ss);
   sheet.appendRow([requestId, new Date()]);
   CacheService.getScriptCache().put("SYNC_RECEIPT_" + requestId.slice(-64), "1", 21600);
-  // Cukup simpan 2.000 bukti terakhir agar pencarian tetap cepat.
-  const excess = sheet.getLastRow() - 2001;
+  // Bukti sinkronisasi hanya dibutuhkan untuk jendela retry aktif. Batas 500
+  // menjaga pemeriksaan idempoten tetap cepat tanpa mengurangi keamanan retry.
+  const excess = sheet.getLastRow() - 501;
   if (excess > 0) sheet.deleteRows(2, excess);
 }
 
@@ -795,9 +795,33 @@ function writeRawState_(ss, payload) {
     }, {})
   };
   sheet.appendRow([new Date().toISOString(), JSON.stringify(compactPayload)]);
-  const maxRows = 20;
+  const maxRows = 10;
   const extraRows = sheet.getLastRow() - maxRows - 1;
   if (extraRows > 0) sheet.deleteRows(2, extraRows);
+}
+
+/**
+ * Perawatan aman: hanya menghapus tab teknis lama yang kosong dan tidak lagi
+ * digunakan kode aktif. Fungsi sengaja menolak menghapus tab yang memiliki data.
+ */
+function cleanupUnusedBackendArtifacts() {
+  const ss = getSpreadsheet_();
+  const removable = ["Sheet1", "SyncQueue"];
+  const removed = [];
+  const retained = [];
+  removable.forEach((name) => {
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) return;
+    const hasOperationalData = sheet.getLastRow() > 1;
+    if (hasOperationalData || ss.getSheets().length <= 1) retained.push(name);
+    else {
+      ss.deleteSheet(sheet);
+      removed.push(name);
+    }
+  });
+  CacheService.getScriptCache().removeAll(["MDD_REVISION"]);
+  touchRevision_();
+  return { ok: true, removed: removed, retainedBecauseNotEmpty: retained };
 }
 
 function tableCounts_(data) {

@@ -723,15 +723,21 @@ function syncReceiptSheet_(ss) {
 
 function hasProcessedSync_(ss, requestId) {
   if (!requestId) return false;
+  const cache = CacheService.getScriptCache();
+  const cacheKey = "SYNC_RECEIPT_" + requestId.slice(-64);
+  if (cache.get(cacheKey) === "1") return true;
   const sheet = syncReceiptSheet_(ss);
   if (sheet.getLastRow() < 2) return false;
-  return sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues()
+  const found = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues()
     .some((row) => String(row[0] || "").trim() === requestId);
+  if (found) cache.put(cacheKey, "1", 21600);
+  return found;
 }
 
 function recordProcessedSync_(ss, requestId) {
   const sheet = syncReceiptSheet_(ss);
   sheet.appendRow([requestId, new Date()]);
+  CacheService.getScriptCache().put("SYNC_RECEIPT_" + requestId.slice(-64), "1", 21600);
   // Cukup simpan 2.000 bukti terakhir agar pencarian tetap cepat.
   const excess = sheet.getLastRow() - 2001;
   if (excess > 0) sheet.deleteRows(2, excess);

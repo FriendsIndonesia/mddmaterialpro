@@ -31,6 +31,7 @@ function doGet(e) {
   let payload;
   if (action === "revision") payload = { ok: true, revision: getRevision_() };
   else if (action === "state") payload = readState_(ss);
+  else if (action === "receipt") payload = { ok: true, processed: hasProcessedSync_(ss, String((e && e.parameter && e.parameter.requestId) || "")) };
   else if (action === "auth") payload = { ok: true, app: APP_NAME, source: "Sheets", data: readProfile_(ss) };
   else if (action === "finance") payload = readSubsetState_(ss, ["purchases", "sales", "payments", "cashAccounts", "cashTx", "returns", "pendingSales", "pendingPurchases"]);
   else if (action === "masterlite") payload = readSubsetState_(ss, ["customers", "suppliers", "employees", "categories", "discounts", "cashAccounts", "packages", "stockMoves"]);
@@ -52,6 +53,11 @@ function doPost(e) {
     const ss = getSpreadsheet_();
     normalizeCashAccountNames_(ss);
     ensureWorkbook_(ss);
+
+    const requestId = String(payload.requestId || "").trim();
+    if (requestId && hasProcessedSync_(ss, requestId)) {
+      return output_({ ok: true, duplicate: true, requestId: requestId, revision: getRevision_() });
+    }
 
     writeMetadata_(ss, payload, data);
     if (payload.changes && Number(payload.syncProtocol || 0) >= 2) writeProfile_(ss, payload.settings || {});
@@ -76,6 +82,7 @@ function doPost(e) {
       // cache yang salah dan tidak boleh lagi menimpa input langsung di Sheet.
     }
     writeRawState_(ss, payload);
+    if (requestId) recordProcessedSync_(ss, requestId);
     touchRevision_();
 
     return output_({
@@ -198,7 +205,7 @@ function readLedgerRows_(ss, sheetName, kind) {
     }
     return "";
   };
-  return values.filter((row) => row.some((value) => String(value || "").trim())).map((row, index) => {
+  const ledgerRows = values.filter((row) => row.some((value) => String(value || "").trim())).map((row, index) => {
     const invoiceNo = String(pick(row, ["nofaktur", "invoice", "invoiceno", "nomorfaktur"]) || "").trim();
     const total = ledgerNumber_(pick(row, kind === "debt" ? ["hutangaktif", "totalhutang", "total"] : ["piutangaktif", "totalpiutang", "total"]));
     const paid = ledgerNumber_(pick(row, ["bayar", "dibayar", "paid"]));
@@ -225,6 +232,7 @@ function readLedgerRows_(ss, sheetName, kind) {
     else base.customerName = relation;
     return base;
   });
+  return ledgerRows.reverse();
 }
 
 function normalizeLedgerHeader_(value) {
@@ -519,23 +527,29 @@ function applyTableChanges_(ss, table, change) {
       if (!sameValue_(current, original) && !sameValue_(current, incoming)) {
         // Stok adalah counter bersama. Jika Sheet dan aplikasi mengubahnya
         // bersamaan, terapkan selisih aplikasi di atas nilai terbaru Sheet.
-        if (table.key === "products" && ["stockIn", "stockOut", "stock", "stockAkhir"].indexOf(field) >= 0) {
+        if (table.key === "products" && ["stockIn", "stockOut", "stock"].indexOf(field) >= 0) {
           const mergedNumber = Number(current || 0) + (Number(incoming || 0) - Number(original || 0));
           return Math.max(0, mergedNumber);
         }
+        if (table.key === "products" && field === "stockAkhir") return currentValues[index];
         return currentValues[index];
       }
       return incoming;
     });
+    if (table.key === "products") {
+      const stockIndex = table.fields.indexOf("stock");
+      const stockAkhirIndex = table.fields.indexOf("stockAkhir");
+      if (stockIndex >= 0 && stockAkhirIndex >= 0) values[stockAkhirIndex] = values[stockIndex];
+    }
     sheet.getRange(rowNumber, 1, 1, table.fields.length).setValues([values]);
     refreshedRowById[key] = rowNumber;
   });
 }
 
-function reserveUniqueProductCode_(sheet, fields, requested) {
+function reserveUniqueProductCode_(sheet, fields, requested, excludeRow) {
   const codeIndex = fields.indexOf("code");
   if (codeIndex < 0) return requested;
-  const used = sheet.getLastRow() > 1 ? sheet.getRange(2, codeIndex + 1, sheet.getLastRow() - 1, 1).getDisplayValues().map((row) => String(row[0] || "").trim().toLowerCase()) : [];
+  const used = sheet.getLastRow() > 1 ? sheet.getRange(2, codeIndex + 1, sheet.getLastRow() - 1, 1).getDisplayValues().filter((_row, index) => index + 2 !== excludeRow).map((row) => String(row[0] || "").trim().toLowerCase()) : [];
   const wanted = String(requested || "").trim();
   if (wanted && used.indexOf(wanted.toLowerCase()) < 0) return wanted;
   let largest = 0;
@@ -551,10 +565,10 @@ function reserveUniqueProductCode_(sheet, fields, requested) {
   return candidate;
 }
 
-function reserveUniqueVisibleValue_(sheet, fields, field, requested) {
+function reserveUniqueVisibleValue_(sheet, fields, field, requested, excludeRow) {
   const fieldIndex = fields.indexOf(field);
   if (fieldIndex < 0) return requested;
-  const used = sheet.getLastRow() > 1 ? sheet.getRange(2, fieldIndex + 1, sheet.getLastRow() - 1, 1).getDisplayValues().map((row) => String(row[0] || "").trim().toLowerCase()) : [];
+  const used = sheet.getLastRow() > 1 ? sheet.getRange(2, fieldIndex + 1, sheet.getLastRow() - 1, 1).getDisplayValues().filter((_row, index) => index + 2 !== excludeRow).map((row) => String(row[0] || "").trim().toLowerCase()) : [];
   const base = String(requested || "DOC").trim();
   if (used.indexOf(base.toLowerCase()) < 0) return base;
   let sequence = 2;
@@ -595,9 +609,38 @@ function onSpreadsheetEdit(e) {
   if (idColumn <= 0) return;
   const row = e.range.getRow();
   const idCell = sheet.getRange(row, idColumn);
+  let createdId = false;
   if (!String(idCell.getValue() || "").trim()) {
     const prefix = table.sheet.replace(/[^A-Za-z]/g, "").slice(0, 3).toUpperCase() || "ROW";
     idCell.setValue(prefix + "-" + Utilities.getUuid().slice(0, 12).toUpperCase());
+    createdId = true;
+  }
+  if (createdId && table.key === "products") {
+    const codeIndex = table.fields.indexOf("code");
+    if (codeIndex >= 0) {
+      const codeCell = sheet.getRange(row, codeIndex + 1);
+      codeCell.setValue(reserveUniqueProductCode_(sheet, table.fields, codeCell.getDisplayValue(), row));
+    }
+  }
+  if (createdId && (table.key === "sales" || table.key === "purchases")) {
+    const invoiceIndex = table.fields.indexOf("invoiceNo");
+    if (invoiceIndex >= 0) {
+      const invoiceCell = sheet.getRange(row, invoiceIndex + 1);
+      invoiceCell.setValue(reserveUniqueVisibleValue_(sheet, table.fields, "invoiceNo", invoiceCell.getDisplayValue(), row));
+    }
+  }
+  if (table.key === "products") {
+    const firstColumn = e.range.getColumn();
+    const lastColumn = e.range.getLastColumn();
+    const stockColumn = table.fields.indexOf("stock") + 1;
+    const stockAkhirColumn = table.fields.indexOf("stockAkhir") + 1;
+    for (let rowNumber = e.range.getRow(); rowNumber <= e.range.getLastRow(); rowNumber += 1) {
+      if (stockColumn >= firstColumn && stockColumn <= lastColumn) {
+        sheet.getRange(rowNumber, stockAkhirColumn).setValue(sheet.getRange(rowNumber, stockColumn).getValue());
+      } else if (stockAkhirColumn >= firstColumn && stockAkhirColumn <= lastColumn) {
+        sheet.getRange(rowNumber, stockColumn).setValue(sheet.getRange(rowNumber, stockAkhirColumn).getValue());
+      }
+    }
   }
   touchRevision_();
 }
@@ -669,7 +712,29 @@ function readTableDefinition_(ss, table) {
       if (key) rowsById[key] = row;
     });
   });
-  return Object.keys(rowsById).map((key) => rowsById[key]);
+  const result = Object.keys(rowsById).map((key) => rowsById[key]);
+  const newestFirstTables = ["sales", "purchases", "cashTx", "payments", "stockMoves", "returns", "pendingSales", "pendingPurchases", "history"];
+  return newestFirstTables.indexOf(table.key) >= 0 ? result.reverse() : result;
+}
+
+function syncReceiptSheet_(ss) {
+  return ensureSheet_(ss, "SyncReceipts", ["requestId", "processedAt"]);
+}
+
+function hasProcessedSync_(ss, requestId) {
+  if (!requestId) return false;
+  const sheet = syncReceiptSheet_(ss);
+  if (sheet.getLastRow() < 2) return false;
+  return sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues()
+    .some((row) => String(row[0] || "").trim() === requestId);
+}
+
+function recordProcessedSync_(ss, requestId) {
+  const sheet = syncReceiptSheet_(ss);
+  sheet.appendRow([requestId, new Date()]);
+  // Cukup simpan 2.000 bukti terakhir agar pencarian tetap cepat.
+  const excess = sheet.getLastRow() - 2001;
+  if (excess > 0) sheet.deleteRows(2, excess);
 }
 
 function readTable_(ss, sheetName) {

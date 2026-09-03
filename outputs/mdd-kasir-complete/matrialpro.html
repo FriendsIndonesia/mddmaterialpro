@@ -1239,6 +1239,7 @@
 
       function renderSyncedState() {
         const activeView = document.querySelector(".view-section.active")?.id;
+        if (document.getElementById("formModal")?.classList.contains("show")) return;
         if (activeView === "productsView" && (productDatabaseQuery || document.activeElement?.id === "productDatabaseSearch")) {
           return;
         }
@@ -1251,7 +1252,12 @@
           selectedSaleProductId || saleProductDraft.sku || saleProductDraft.search ||
           document.activeElement?.closest?.("#cashierView")
         );
-        if (!cashierEditing) renderAll();
+        const purchaseEditing = activeView === "purchaseView" && (
+          purchaseCart.length || selectedPurchaseProductId ||
+          document.activeElement?.closest?.("#purchaseView")
+        );
+        const activeInput = activeView && document.activeElement?.closest?.(`#${activeView}`);
+        if (!cashierEditing && !purchaseEditing && !activeInput) renderAll();
       }
 
       async function manualRefreshBackend(action, label) {
@@ -1271,7 +1277,7 @@
           location.reload();
         });
         try {
-          const registration = await navigator.serviceWorker.register("service-worker.js?v=92", { updateViaCache: "none" });
+          const registration = await navigator.serviceWorker.register("service-worker.js?v=93", { updateViaCache: "none" });
           await registration.update();
         } catch (error) {
           console.warn("Pemeriksaan pembaruan aplikasi belum berhasil.", error);

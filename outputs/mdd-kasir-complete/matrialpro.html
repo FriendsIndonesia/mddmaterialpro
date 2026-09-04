@@ -1557,7 +1557,7 @@
         if (!input || !target) return;
         const query = String(productDatabaseQuery || input.value || "").trim().toLowerCase();
         const matches = query ? state.products.filter((product) => product.active !== false && [product.code, product.secondaryBarcode, product.name, product.category, product.unit, product.secondaryUnit].some((value) => String(value || "").toLowerCase().includes(query))).slice(0, 100) : [];
-        target.innerHTML = productsTable(matches, { actions: canAccessMaster("Master Barang") });
+        target.innerHTML = (matches.some(productHasConversion) ? '<p class="small text-secondary">Satuan utama dan kedua adalah stok barang yang sama, bukan stok tambahan. Stok satuan kedua = stok utama × rasio konversi.</p>' : "") + productsTable(matches, { actions: canAccessMaster("Master Barang"), conversions: true });
         bindProductActions();
       }
 
@@ -3168,14 +3168,27 @@
         return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
       }
       function productRows(rows = state.products, options = {}) {
-        return rows.map((p) => {
+        return rows.flatMap((p) => {
           const row = { kode: p.code, nama: p.name, kategori: p.category, satuan: p.unit, harga_jual_1: p.price, harga_jual_2: p.price2 || Math.round((p.price || 0) * 1.05), stock_awal: p.stockAwal || 0, stock_masuk: p.stockIn || 0, stock_keluar: p.stockOut || 0, stock_akhir: stockAkhirProduk(p) };
+          if (options.conversions) {
+            row.satuan = p.primaryUnit || p.unit;
+            row.harga_jual_2 = p.price2 ?? 0;
+            row.konversi = productHasConversion(p) ? conversionLabel(p) : "Tanpa konversi";
+            row.jenis_satuan = "Satuan utama";
+          }
           if (options.actions) row.aksi = `<div class="d-flex gap-1 justify-content-end"><button class="btn btn-outline-secondary btn-icon btn-sm" type="button" data-edit-product="${p.id}" title="Edit produk"><i class="bi bi-pencil-square"></i></button><button class="btn btn-outline-danger btn-icon btn-sm" type="button" data-delete-product="${p.id}" title="Delete produk"><i class="bi bi-trash"></i></button></div>`;
+          if (options.conversions && productHasConversion(p)) {
+            const secondary = { ...row, kode: p.secondaryBarcode || p.code, satuan: p.secondaryUnit, jenis_satuan: "Satuan kedua (stok setara)", harga_jual_1: p.secondaryPrice ?? 0, harga_jual_2: p.secondaryPrice2 ?? 0 };
+            for (const field of ["stock_awal", "stock_masuk", "stock_keluar", "stock_akhir"]) secondary[field] = MDDConversion.convertPrimaryToSecondary(row[field], p.conversionValue);
+            if (options.actions) secondary.aksi = "";
+            return [row, secondary];
+          }
           return row;
         });
       }
       function productsTable(rows = state.products, options = {}) {
         const keys = ["kode", "nama", "kategori", "satuan", "harga_jual_1", "harga_jual_2", "stock_awal", "stock_masuk", "stock_keluar", "stock_akhir"];
+        if (options.conversions) keys.splice(4, 0, "jenis_satuan", "konversi");
         if (options.actions) keys.push("aksi");
         return genericTable(productRows(rows, options), keys);
       }

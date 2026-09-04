@@ -1014,6 +1014,7 @@
       function enhanceRupiahInputs(root = document) {
         const selectors = ["#salePrice1", "#salePrice2", "#saleManualPrice", "#saleOngkir", "#saleCashReceived", "#purchaseHpp", "#purchasePrice1", "#purchaseManualPrice", "#purchaseOngkir", "#purchaseBankCharge", "#purchaseCashReceived", ".cart-price", "input[name='buy']", "input[name='price']", "input[name='price2']", "input[name='secondaryBuy']", "input[name='secondaryPrice']", "input[name='secondaryPrice2']", "input[name='amount']", "input[name='paid']", "input[name='total']", "input[name='returnAmount']", "input[name='balance']", "input[name='salary']", "input[name='deposit']"].join(",");
         root?.querySelectorAll?.(selectors).forEach((input) => {
+          if (input.id.startsWith("conversion")) return; // Preserve decimal precision in conversion prices.
           if (input.dataset.rupiahInput === "true") return;
           input.dataset.rupiahInput = "true";
           input.type = "text";
@@ -3254,11 +3255,26 @@
           const twoUnits = fd.get("unitMode") === "two";
           const primaryUnit = fd.get("primaryUnit");
           const secondaryUnit = twoUnits ? fd.get("secondaryUnit") : "";
-          const conversionValue = twoUnits ? toNumber(fd.get("conversionValue")) : 0;
+          const conversionValue = twoUnits ? Number(fd.get("conversionValue")) : 0;
+          if (twoUnits && !secondaryUnit) return toast("Pilih satuan kedua untuk mode Dua Satuan.");
+          if (normalizeUnit(primaryUnit) !== normalizeUnit(product.primaryUnit || product.unit)) return toast("Satuan utama produk lama tidak boleh diganti melalui Konversi karena akan mengubah arti stok dan histori. Gunakan satuan utama yang sudah tercatat.");
+          const code = String(fd.get("code") || "").trim();
+          const secondaryBarcode = twoUnits ? String(fd.get("secondaryBarcode") || "").trim() : "";
+          if (!code) return toast("Barcode utama wajib diisi.");
+          const barcodeKey = (value) => String(value || "").trim().toLowerCase();
+          if (secondaryBarcode && barcodeKey(code) === barcodeKey(secondaryBarcode)) return toast("Barcode utama dan kedua tidak boleh sama.");
+          const newCodes = [code !== String(product.code || "").trim() ? code : "", secondaryBarcode !== String(product.secondaryBarcode || "").trim() ? secondaryBarcode : ""].filter(Boolean).map(barcodeKey);
+          if (state.products.some((other) => other.id !== product.id && [other.code, other.secondaryBarcode].some((value) => value && newCodes.includes(barcodeKey(value))))) return toast("Barcode sudah digunakan produk lain. Gunakan barcode yang berbeda.");
+          const conversionChanged = secondaryUnit !== (product.secondaryUnit || "") || conversionValue !== toNumber(product.conversionValue);
+          if (conversionChanged && [...activeCart, ...purchaseCart].some((item) => item.productId === product.id)) return toast("Selesaikan atau keluarkan produk ini dari keranjang Kasir/Purchase sebelum mengubah konversinya.");
+          for (const field of ["buy", "price", "price2", "min", ...(twoUnits ? ["secondaryPrice", "secondaryPrice2"] : [])]) {
+            const value = String(fd.get(field) ?? "").trim();
+            if (!value || !Number.isFinite(Number(value)) || Number(value) < 0) return toast("Harga dan stok minimal wajib berupa angka nol atau positif.");
+          }
           try { MDDConversion.validateConversion(primaryUnit, secondaryUnit, conversionValue); } catch (error) { return toast(error.message); }
-          Object.assign(product, { code: fd.get("code"), secondaryBarcode: twoUnits ? fd.get("secondaryBarcode") : "", primaryUnit, unit: primaryUnit, secondaryUnit, conversionValue, buy: toNumber(fd.get("buy")), secondaryBuy: twoUnits ? MDDConversion.calculateSecondaryCost(fd.get("buy"), conversionValue) : 0, price: toNumber(fd.get("price")), price2: toNumber(fd.get("price2")), secondaryPrice: twoUnits ? toNumber(fd.get("secondaryPrice")) : 0, secondaryPrice2: twoUnits ? toNumber(fd.get("secondaryPrice2")) : 0, min: toNumber(fd.get("min")) });
+          Object.assign(product, { code, secondaryBarcode: secondaryBarcode, primaryUnit, unit: primaryUnit, secondaryUnit, conversionValue, buy: Number(fd.get("buy")), secondaryBuy: twoUnits ? MDDConversion.calculateSecondaryCost(fd.get("buy"), conversionValue) : 0, price: Number(fd.get("price")), price2: Number(fd.get("price2")), secondaryPrice: twoUnits ? Number(fd.get("secondaryPrice")) : 0, secondaryPrice2: twoUnits ? Number(fd.get("secondaryPrice2")) : 0, min: Number(fd.get("min")) });
           saveState(`Konversi produk ${product.name} diperbarui`);
-          closeModal(); renderAll(); toast(`Konversi tersimpan: ${conversionLabel(product)}.`);
+          closeModal(); renderAll(); toast(`Konversi dicatat di perangkat dan masuk antrean sinkronisasi: ${conversionLabel(product)}.`);
         });
         const fillConversionForm = (fallbackToInitial = false) => {
           const product = findProduct(document.getElementById("conversionProductId").value) || (fallbackToInitial ? initial : null);
@@ -3304,7 +3320,7 @@
           const two = document.querySelector('input[name="unitMode"]:checked')?.value === "two";
           const primary = document.getElementById("conversionPrimaryUnit").value;
           const secondary = document.getElementById("conversionSecondaryUnit").value;
-          const value = toNumber(document.getElementById("conversionValue").value);
+          const value = Number(document.getElementById("conversionValue").value);
           const hpp = toNumber(document.getElementById("conversionPrimaryBuy").value);
           ["conversionSecondaryUnit", "conversionValue", "conversionSecondaryBarcode", "conversionSecondaryPrice", "conversionSecondaryPrice2"].forEach((id) => document.getElementById(id).disabled = !two);
           document.getElementById("conversionSecondaryBuy").value = two && value > 0 ? MDDConversion.calculateSecondaryCost(hpp, value) : "";

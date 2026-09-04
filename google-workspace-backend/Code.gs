@@ -522,7 +522,10 @@ function applyTableChanges_(ss, table, change) {
       if (!base || !Object.prototype.hasOwnProperty.call(base, field)) return normalizeValue_(row[field]);
       const incoming = normalizeValue_(row[field]);
       const original = normalizeValue_(base[field]);
-      const current = normalizeValue_(currentValues[index]);
+      let current = normalizeValue_(currentValues[index]);
+      // The frontend normalizes empty numeric conversion cells to zero.
+      // Compare like-for-like so a first conversion is not discarded as a conflict.
+      if (table.key === "products" && ["conversionValue", "secondaryBuy", "secondaryPrice", "secondaryPrice2"].indexOf(field) >= 0 && current === "" && original === 0) current = 0;
       // Three-way merge: perubahan manual di Sheet pada kolom lain tidak boleh
       // tertimpa oleh snapshot lama dari salah satu perangkat.
       if (sameValue_(incoming, original)) return currentValues[index];

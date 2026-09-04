@@ -272,7 +272,7 @@ function syncFinancialLedgerSheets_(ss, preferCanonical) {
 function applyLedgerChangesSafely_(ss, sheetName, kind, change, canonicalBefore) {
   if (!change) return;
   const upserts = change.upserts || [];
-  const deletes = change.deletes || [];
+  const deletes = change.deleteMode === "explicit" ? (change.deletes || []) : [];
   if (!upserts.length && !deletes.length) return;
   const headers = kind === "debt" ? ["Tanggal", "Jatuh Tempo", "No. Faktur", "Supplier", "Hutang Aktif", "Bayar", "Retur", "Sisa Hutang", "Metode", "Catatan"] : ["Tanggal", "Jatuh Tempo", "No. Faktur", "Pelanggan", "Piutang Aktif", "Bayar", "Retur", "Sisa Piutang", "Metode", "Catatan"];
   const sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
@@ -493,8 +493,11 @@ function applyTableChanges_(ss, table, change) {
       if (id) rowById[id] = index + 2;
     });
   }
+  // Klien lama menyimpulkan delete dari cache yang tidak lengkap. Tolak semua
+  // penghapusan yang tidak membawa penanda bahwa user menekan tombol Delete.
+  const explicitDeletes = change.deleteMode === "explicit" ? (change.deletes || []) : [];
   // Hapus dari bawah ke atas agar nomor baris yang belum diproses tidak bergeser.
-  (change.deletes || []).map((id) => rowById[String(id)]).filter(Boolean).sort((a, b) => b - a).forEach((rowNumber) => sheet.deleteRow(rowNumber));
+  explicitDeletes.map((id) => rowById[String(id)]).filter(Boolean).sort((a, b) => b - a).forEach((rowNumber) => sheet.deleteRow(rowNumber));
   // Bangun ulang indeks setelah delete, lalu sentuh hanya baris yang berubah.
   const refreshedRowById = {};
   if (sheet.getLastRow() > 1) {

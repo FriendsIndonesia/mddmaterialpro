@@ -884,7 +884,7 @@
           hardware: { receipt: "Thermal 58/80mm", invoice: "Printer Faktur", barcode: "USB/HID Barcode Scanner", drawer: "RJ11 Cash Drawer", tag: "Printer Barcode" },
           accessCodes: { owner: "060361", admin: "123456", kasir: "111111" },
           userAccounts: defaultUsers.map((user) => ({ ...user })),
-          deletionTombstones: { sales: [], purchases: [] },
+          deletionTombstones: { products: [], customers: [], suppliers: [], employees: [], categories: [], discounts: [], cashAccounts: [], packages: [], sales: [], purchases: [], cashTx: [], payments: [], stockMoves: [], returns: [], pendingSales: [], pendingPurchases: [], history: [] },
           categories: [],
           products: DEFAULT_PRODUCTS.map((product) => ({ ...product })),
           customers: [],
@@ -920,9 +920,10 @@
         } catch {}
       }
       function normalizeState(data) {
-        data.deletionTombstones = data.deletionTombstones || { sales: [], purchases: [] };
-        data.deletionTombstones.sales = [...new Set(data.deletionTombstones.sales || [])];
-        data.deletionTombstones.purchases = [...new Set(data.deletionTombstones.purchases || [])];
+        data.deletionTombstones = data.deletionTombstones || {};
+        ["products", "customers", "suppliers", "employees", "categories", "discounts", "cashAccounts", "packages", "sales", "purchases", "cashTx", "payments", "stockMoves", "returns", "pendingSales", "pendingPurchases", "history"].forEach((key) => {
+          data.deletionTombstones[key] = [...new Set(data.deletionTombstones[key] || [])];
+        });
         data.userAccounts = Array.isArray(data.userAccounts) && data.userAccounts.length
           ? data.userAccounts.map((user) => ({ username: String(user.username || "").trim().toLowerCase(), password: String(user.password || ""), name: String(user.name || user.username || "User").trim(), role: ["Owner", "Kasir", "Gudang"].includes(user.role) ? user.role : "Kasir" })).filter((user) => user.username)
           : defaultUsers.map((user) => ({ ...user }));
@@ -1108,6 +1109,12 @@
         return String(row.id || (key === "syncQueue" ? row.type : "") || "").trim();
       }
 
+      function markExplicitDeletion(key, id) {
+        if (!key || !id) return;
+        state.deletionTombstones = state.deletionTombstones || {};
+        state.deletionTombstones[key] = [...new Set([...(state.deletionTombstones[key] || []), String(id)])];
+      }
+
       function buildSyncChanges(baseState = lastSyncedSnapshot || {}, currentState = state) {
         const base = baseState || {};
         const tables = {};
@@ -1120,16 +1127,16 @@
           currentById.forEach((row, id) => {
             if (!baseById.has(id) || JSON.stringify(baseById.get(id)) !== JSON.stringify(row)) upserts.push(row);
           });
-          const deletes = [];
-          baseById.forEach((_row, id) => { if (!currentById.has(id)) deletes.push(id); });
-          if (key === "sales" || key === "purchases") (currentState.deletionTombstones?.[key] || []).forEach((id) => { if (!deletes.includes(id)) deletes.push(id); });
+          // Baris yang tidak ada di cache lokal belum tentu dihapus user.
+          // Hanya tindakan Delete eksplisit yang boleh diteruskan ke backend.
+          const deletes = [...new Set((currentState.deletionTombstones?.[key] || []).map(String))];
           if (upserts.length || deletes.length) {
             const baseRowsForChange = {};
             upserts.forEach((row) => {
               const id = rowIdentity(key, row);
               if (id && baseById.has(id)) baseRowsForChange[id] = baseById.get(id);
             });
-            tables[key] = { upserts, deletes, baseRows: baseRowsForChange };
+            tables[key] = { upserts, deletes, baseRows: baseRowsForChange, deleteMode: "explicit" };
           }
         });
         return { tables };
@@ -1293,7 +1300,7 @@
           location.reload();
         });
         try {
-          const registration = await navigator.serviceWorker.register("service-worker.js?v=93", { updateViaCache: "none" });
+          const registration = await navigator.serviceWorker.register("service-worker.js?v=95", { updateViaCache: "none" });
           await registration.update();
         } catch (error) {
           console.warn("Pemeriksaan pembaruan aplikasi belum berhasil.", error);
@@ -1383,7 +1390,9 @@
           if (results.some(Boolean)) renderSyncedState();
         });
         setTimeout(() => {
-          if (!hasLocalSyncChanges()) loadGoogleWorkspaceState("products").then((loaded) => { if (loaded) renderSyncedState(); });
+          // Backend selalu menjadi sumber daftar produk dan saldo stok terbaru.
+          // Pending edit lokal tetap dilindungi oleh mergeSubsetFromBackend.
+          loadGoogleWorkspaceState("products").then((loaded) => { if (loaded) renderSyncedState(); });
         }, 100);
         requestGoogleWorkspaceJsonp("revision").then((result) => {
           if (result?.ok && result.revision) lastBackendRevision = result.revision;
@@ -2011,6 +2020,7 @@
         if (!pending) return toast("Invoice pending tidak ditemukan.");
         activeCart = structuredClone(pending.items || []);
         saleDraft = { invoiceNo: pending.invoiceNo, ongkir: pending.ongkir || 0, dp: pending.dp || 0, cashReceived: pending.dp || pending.cashReceived || 0, note: pending.note || "", method: toNumber(pending.dp) > 0 ? "DP (Uang Muka)" : (pending.method || "Cash"), customerId: pending.customerId || "", customerName: pending.customerName || "", customerType: pending.customerType || "", customerAddress: pending.customerAddress || "", customerWhatsapp: pending.customerWhatsapp || "" };
+        markExplicitDeletion("pendingSales", id);
         state.pendingSales = state.pendingSales.filter((p) => p.id !== id);
         saveState(`${payNow ? "Lanjut bayar" : "Edit"} invoice pending ${pending.invoiceNo || id}`);
         renderAll();
@@ -2020,6 +2030,7 @@
         const pending = state.pendingSales.find((p) => p.id === id);
         if (!pending) return toast("Invoice pending tidak ditemukan.");
         if (!confirm(`Hapus invoice pending ${pending.invoiceNo || id}?`)) return;
+        markExplicitDeletion("pendingSales", id);
         state.pendingSales = state.pendingSales.filter((p) => p.id !== id);
         saveState(`Invoice pending ${pending.invoiceNo || id} dihapus`);
         renderAll();
@@ -2183,6 +2194,8 @@
               product.stockAkhir = product.stock;
             }
           });
+          state.stockMoves.filter((move) => String(move.note || "").startsWith(`Penjualan ${previousSale.id}`)).forEach((move) => markExplicitDeletion("stockMoves", move.id));
+          state.payments.filter((payment) => payment.refId === previousSale.id && payment.method === "DP Penjualan").forEach((payment) => markExplicitDeletion("payments", payment.id));
           state.stockMoves = state.stockMoves.filter((move) => !String(move.note || "").startsWith(`Penjualan ${previousSale.id}`));
           state.payments = state.payments.filter((payment) => !(payment.refId === previousSale.id && payment.method === "DP Penjualan"));
           state.sales = state.sales.filter((item) => item.id !== previousSale.id);
@@ -2733,6 +2746,8 @@
         const debt = state.purchases.find((p) => p.id === debtId);
         if (!debt) return toast("Data hutang tidak ditemukan.");
         if (!confirm(`Hapus data hutang ${debt.invoiceNo || debt.id}?`)) return;
+        markExplicitDeletion("purchases", debtId);
+        state.payments.filter((payment) => payment.refId === debtId).forEach((payment) => markExplicitDeletion("payments", payment.id));
         state.purchases = state.purchases.filter((p) => p.id !== debtId);
         state.payments = state.payments.filter((payment) => payment.refId !== debtId);
         saveState(`Data hutang ${debt.invoiceNo || debt.id} dihapus`);
@@ -2824,6 +2839,8 @@
         const receivable = state.sales.find((s) => s.id === receivableId);
         if (!receivable) return toast("Data piutang tidak ditemukan.");
         if (!confirm(`Hapus data piutang ${receivable.invoiceNo || receivable.id}?`)) return;
+        markExplicitDeletion("sales", receivableId);
+        state.payments.filter((payment) => payment.refId === receivableId).forEach((payment) => markExplicitDeletion("payments", payment.id));
         state.sales = state.sales.filter((s) => s.id !== receivableId);
         state.payments = state.payments.filter((payment) => payment.refId !== receivableId);
         saveState(`Data piutang ${receivable.invoiceNo || receivable.id} dihapus`);
@@ -3082,6 +3099,7 @@
         const labels = { customers: "pelanggan", suppliers: "supplier", employees: "karyawan", categories: "kategori", packages: "paket", stockMoves: "stok opname", cashAccounts: "kas" };
         if (!state[type]) return toast("Data tidak ditemukan.");
         if (!confirm(`Hapus data ${labels[type] || "master"} ini?`)) return;
+        markExplicitDeletion(type, id);
         state[type] = state[type].filter((item) => item.id !== id);
         saveState(`Data ${labels[type] || "master"} dihapus`);
         renderAll();
@@ -3198,6 +3216,7 @@
         const product = state.products.find((p) => p.id === productId);
         if (!product) return toast("Produk tidak ditemukan.");
         if (!confirm(`Hapus produk ${product.name} dari daftar produk material?`)) return;
+        markExplicitDeletion("products", productId);
         state.products = state.products.filter((p) => p.id !== productId);
         activeCart = activeCart.filter((item) => item.productId !== productId);
         purchaseCart = purchaseCart.filter((item) => item.productId !== productId);

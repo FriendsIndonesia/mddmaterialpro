@@ -3870,6 +3870,22 @@
           if (runAfterSave) syncGoogleWorkspace();
         });
       }
+      function verifyConversionReadback(remoteData, changes) {
+        const change = changes?.tables?.products;
+        if (!change) return;
+        const fields = ["primaryUnit", "secondaryUnit", "conversionValue", "secondaryBarcode", "secondaryBuy", "secondaryPrice", "secondaryPrice2"];
+        const remoteById = new Map((remoteData?.products || []).map((row) => [String(row.id), row]));
+        for (const row of change.upserts || []) {
+          const base = change.baseRows?.[row.id] || {};
+          const changed = fields.filter((field) => String(row[field] ?? "") !== String(base[field] ?? ""));
+          if (!changed.length) continue;
+          const remote = remoteById.get(String(row.id));
+          if (!remote || changed.some((field) => {
+            if (["conversionValue", "secondaryBuy", "secondaryPrice", "secondaryPrice2"].includes(field)) return Math.abs(Number(remote[field] || 0) - Number(row[field] || 0)) > 0.000001;
+            return String(remote[field] || "").trim() !== String(row[field] || "").trim();
+          })) throw new Error("Konversi belum sesuai di backend; perubahan lokal tetap disimpan.");
+        }
+      }
       async function syncGoogleWorkspace() {
         if (isSyncing) return;
         if (!state.profile.googleEndpoint) {
@@ -3887,14 +3903,21 @@
           await fetch(state.profile.googleEndpoint, { method: "POST", mode: "no-cors", body: JSON.stringify({ app: "MDD Material Pro", syncProtocol: 3, requestId, account: state.profile.googleAccount || "friendsindonesia28@gmail.com", githubRepo: state.profile.githubRepo || "https://github.com/FriendsIndonesia/mddmaterialpro", sentAt: new Date().toISOString(), queue: state.syncQueue, changes, settings }) });
           const receipt = await requestGoogleWorkspaceJsonp("receipt", { requestId });
           if (!receipt?.processed) throw new Error("Backend belum mengonfirmasi paket sinkronisasi.");
-          const pendingAfterSend = syncPending ? { ...buildSyncChanges(sentState, state), settings: buildSyncSettings(sentState, state) } : null;
-          lastSyncedSnapshot = JSON.parse(JSON.stringify(sentState));
           const refreshActions = syncRefreshActions(changes, settings);
+          const verifiedResponses = [];
           for (const action of refreshActions) {
             const verifiedResponse = await requestGoogleWorkspaceJsonp(action);
             if (!verifiedResponse?.data) throw new Error(`Backend belum mengirim pembaruan ${action}.`);
-            if (action === "state") mergeStateFromBackend(verifiedResponse.data, { preserveLocal: true });
-            else mergeSubsetFromBackend(verifiedResponse.data);
+            verifiedResponses.push({ action, data: verifiedResponse.data });
+          }
+          if (changes.tables.products) verifyConversionReadback(Object.assign({}, ...verifiedResponses.map((response) => response.data)), changes);
+          // Advance the baseline only after read-back succeeds. Capture edits
+          // made during ALL network awaits, not just before the first refresh.
+          const pendingAfterSend = { ...buildSyncChanges(sentState, state), settings: buildSyncSettings(sentState, state) };
+          lastSyncedSnapshot = JSON.parse(JSON.stringify(sentState));
+          for (const response of verifiedResponses) {
+            if (response.action === "state") mergeStateFromBackend(response.data, { preserveLocal: true });
+            else mergeSubsetFromBackend(response.data);
           }
           state.syncQueue = [];
           if (pendingAfterSend) reapplyPendingChanges(pendingAfterSend);

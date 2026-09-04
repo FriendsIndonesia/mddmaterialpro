@@ -3180,7 +3180,7 @@
           if (options.conversions && productHasConversion(p)) {
             const secondary = { ...row, kode: p.secondaryBarcode || p.code, satuan: p.secondaryUnit, jenis_satuan: "Satuan kedua (stok setara)", harga_jual_1: p.secondaryPrice ?? 0, harga_jual_2: p.secondaryPrice2 ?? 0 };
             for (const field of ["stock_awal", "stock_masuk", "stock_keluar", "stock_akhir"]) secondary[field] = MDDConversion.convertPrimaryToSecondary(row[field], p.conversionValue);
-            if (options.actions) secondary.aksi = "";
+            if (options.actions) secondary.aksi = `<div class="d-flex flex-wrap gap-2"><button class="btn btn-outline-primary btn-sm" type="button" data-edit-conversion="${esc(p.id)}"><i class="bi bi-pencil-square"></i> Edit Konversi</button><button class="btn btn-outline-danger btn-sm" type="button" data-delete-conversion="${esc(p.id)}"><i class="bi bi-trash"></i> Hapus Konversi</button></div>`;
             return [row, secondary];
           }
           return row;
@@ -3224,6 +3224,8 @@
         document.querySelector("#modalSubmitBtn span").textContent = "Simpan";
       }
       function bindProductActions() {
+        document.querySelectorAll("[data-edit-conversion]").forEach((btn) => btn.onclick = () => { if (canAccessMaster("Master Barang")) openProductConversionModal(btn.dataset.editConversion); });
+        document.querySelectorAll("[data-delete-conversion]").forEach((btn) => btn.onclick = () => deleteProductConversion(btn.dataset.deleteConversion));
         document.querySelectorAll("[data-edit-product]").forEach((btn) => btn.onclick = () => openProductModal(btn.dataset.editProduct));
         document.querySelectorAll("[data-delete-product]").forEach((btn) => btn.onclick = () => deleteProduct(btn.dataset.deleteProduct));
       }
@@ -3239,7 +3241,24 @@
         renderAll();
         toast("Produk sudah dihapus dari daftar.");
       }
+      function deleteProductConversion(productId) {
+        if (!canAccessMaster("Master Barang")) return toast("Anda tidak memiliki akses mengubah konversi.");
+        const product = state.products.find((row) => row.id === productId);
+        if (!product || !productHasConversion(product)) return toast("Konversi produk tidak ditemukan.");
+        const pendingItems = [
+          ...activeCart, ...purchaseCart,
+          ...(state.pendingSales || []).flatMap((row) => row.items || []),
+          ...(state.pendingPurchases || []).flatMap((row) => row.items || [])
+        ];
+        if (pendingItems.some((item) => item.productId === productId)) return toast("Selesaikan atau keluarkan produk ini dari keranjang dan transaksi pending sebelum menghapus konversinya.");
+        if (!confirm(`Hapus konversi ${product.name} ke ${product.secondaryUnit}? Produk utama, jumlah stok, harga satuan utama, dan histori transaksi tetap tersimpan. Pengaturan satuan kedua dapat dibuat kembali melalui Konversi Produk.`)) return;
+        Object.assign(product, { secondaryUnit: "", secondaryBarcode: "", conversionValue: 0, secondaryBuy: 0, secondaryPrice: 0, secondaryPrice2: 0 });
+        saveState(`Konversi produk ${product.name} dihapus; produk utama dan stok tetap tersimpan`);
+        renderAll();
+        toast("Konversi dihapus di perangkat dan masuk antrean sinkronisasi. Produk utama tetap tersedia.");
+      }
       function openProductConversionModal(productId = "") {
+        if (!canAccessMaster("Master Barang")) return toast("Anda tidak memiliki akses mengubah konversi.");
         const initial = state.products.find((p) => p.id === productId) || state.products.find((p) => p.active !== false);
         if (!initial) return toast("Tambahkan Master Barang terlebih dahulu.");
         openModal("Konversi Produk", `

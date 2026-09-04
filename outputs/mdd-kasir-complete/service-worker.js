@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v97-conversion-guards";
+const CACHE_NAME = "mdd-material-pro-v98-converted-product-search";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

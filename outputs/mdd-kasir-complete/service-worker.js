@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v96-finance-invoice-print";
+const CACHE_NAME = "mdd-material-pro-v97-conversion-guards";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

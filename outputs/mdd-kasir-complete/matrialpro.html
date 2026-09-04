@@ -2567,9 +2567,10 @@
           const relationMatch = financeTextMatches([row.invoiceNo, row.noFaktur, row.invoice, row.customerName, row.pelanggan, row.customer, row.relation, row.customerWhatsapp, customer.name, customer.phone, customer.address], query);
           return relationMatch;
         }).map((row) => { const customer = state.customers.find((item) => item.id === row.customerId) || {}; return { type: "Piutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.customerName || customer.name || "-", address: row.customerAddress || row.address || customer.address || "-", whatsapp: row.customerWhatsapp || row.whatsapp || customer.phone || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due, items: row.items }; });
-        const resultTable = (rows, type) => rows.length ? `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th><i class="bi bi-check2-square"></i></th><th>Nama/Perusahaan</th><th>Alamat</th><th>WhatsApp</th><th>No. Faktur</th><th>Rincian Produk/Barang</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="text-end">Total Hutang/Piutang</th><th class="text-end">Sisa Pembayaran</th><th></th></tr></thead><tbody>${rows.map((row) => { const selectionKey = `${type}:${row.id}`; return `<tr><td><input class="form-check-input" type="checkbox" data-finance-bulk-check="${selectionKey}" ${financeBulkSelection.has(selectionKey) ? "checked" : ""} aria-label="Pilih ${esc(row.invoice)}"></td><td><strong>${esc(row.name)}</strong></td><td>${esc(row.address)}</td><td>${esc(row.whatsapp)}</td><td>${esc(row.invoice)}</td><td>${transactionItemDetails(row)}</td><td>${displayDate(row.date)}</td><td>${displayDate(row.dueDate)}</td><td class="text-end">${idr.format(row.total || 0)}</td><td class="text-end fw-bold">${idr.format(row.remaining || 0)}</td><td class="text-end"><button class="btn btn-sm btn-primary" data-finance-search-pay="${type}" data-finance-search-id="${row.id}" ${toNumber(row.remaining) <= 0 ? "disabled" : ""}><i class="bi bi-cash-coin"></i> ${toNumber(row.remaining) > 0 ? "Bayar" : "Lunas"}</button></td></tr>`; }).join("")}</tbody></table></div>` : `<div class="text-center text-secondary py-3">Data ${type === "debt" ? "hutang" : "piutang"} yang sesuai tidak ditemukan.</div>`;
+        const resultTable = (rows, type) => rows.length ? `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th><i class="bi bi-check2-square"></i></th><th>Nama/Perusahaan</th><th>Alamat</th><th>WhatsApp</th><th>No. Faktur</th><th>Rincian Produk/Barang</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="text-end">Total Hutang/Piutang</th><th class="text-end">Sisa Pembayaran</th><th></th></tr></thead><tbody>${rows.map((row) => { const selectionKey = `${type}:${row.id}`; return `<tr><td><input class="form-check-input" type="checkbox" data-finance-bulk-check="${selectionKey}" ${financeBulkSelection.has(selectionKey) ? "checked" : ""} aria-label="Pilih ${esc(row.invoice)}"></td><td><strong>${esc(row.name)}</strong></td><td>${esc(row.address)}</td><td>${esc(row.whatsapp)}</td><td>${esc(row.invoice)}</td><td>${transactionItemDetails(row)}</td><td>${displayDate(row.date)}</td><td>${displayDate(row.dueDate)}</td><td class="text-end">${idr.format(row.total || 0)}</td><td class="text-end fw-bold">${idr.format(row.remaining || 0)}</td><td class="text-end"><button class="btn btn-sm btn-primary" data-finance-search-pay="${type}" data-finance-search-id="${row.id}" ${toNumber(row.remaining) <= 0 ? "disabled" : ""}><i class="bi bi-cash-coin"></i> ${toNumber(row.remaining) > 0 ? "Bayar" : "Lunas"}</button> <button type="button" class="btn btn-sm btn-outline-primary" data-finance-print="${type}" data-finance-print-id="${esc(row.id)}" aria-label="Print faktur ${esc(row.invoice)}"><i class="bi bi-printer"></i> Print</button></td></tr>`; }).join("")}</tbody></table></div>` : `<div class="text-center text-secondary py-3">Data ${type === "debt" ? "hutang" : "piutang"} yang sesuai tidak ditemukan.</div>`;
         debtTarget.innerHTML = resultTable(debtMatches, "debt");
         receivableTarget.innerHTML = resultTable(receivableMatches, "receivable");
+        document.querySelectorAll("[data-finance-print]").forEach((button) => button.onclick = () => printFinanceInvoice(button.dataset.financePrint, button.dataset.financePrintId));
         document.querySelectorAll("[data-finance-search-pay]").forEach((button) => button.onclick = () => openPaymentModal(button.dataset.financeSearchPay, button.dataset.financeSearchId));
         document.querySelectorAll("[data-finance-bulk-check]").forEach((checkbox) => checkbox.onchange = () => { if (checkbox.checked) financeBulkSelection.add(checkbox.dataset.financeBulkCheck); else financeBulkSelection.delete(checkbox.dataset.financeBulkCheck); updateBulkFinancePaymentButton(); });
         updateBulkFinancePaymentButton();
@@ -3690,6 +3691,52 @@
         } else {
           receiptPrintStages.delete(printKey);
           toast("Lembar 2 tanpa harga selesai. Proses cetak dua lembar telah ditutup.");
+        }
+      }
+      function printFinanceInvoice(type, id) {
+        const isDebt = type === "debt";
+        const rows = isDebt ? state.purchases : state.sales;
+        const doc = rows.find((row) => String(row.id) === String(id));
+        if (!doc) return toast("Faktur tidak ditemukan. Silakan cari kembali.");
+        const label = isDebt ? "Hutang" : "Piutang";
+        const supplier = isDebt ? selectedSupplierData(doc.supplierId) : {};
+        const customer = !isDebt ? state.customers.find((row) => row.id === doc.customerId) || {} : {};
+        const name = isDebt ? doc.company || supplier.company || doc.salesName || supplier.name : doc.customerName || customer.name;
+        const address = isDebt ? doc.address || doc.supplierAddress || supplier.address : doc.customerAddress || doc.address || customer.address;
+        const phone = isDebt ? doc.whatsapp || doc.phone || supplier.phone : doc.customerWhatsapp || doc.whatsapp || customer.phone;
+        const area = document.getElementById("printArea");
+        const previousHtml = area.innerHTML;
+        const previousClass = area.className;
+        const style = document.createElement("style");
+        style.textContent = "@page { size: 58mm 210mm; margin: 0; } @media print { html, body { width:58mm !important; height:auto !important; } }";
+        try {
+          area.className = "receipt-58";
+          area.innerHTML = `<section class="receipt-copy">
+            <div class="thermal-store">MUTIARA JAYA</div>
+            <div class="thermal-address">JL. RAYA KARAKAL RT.03/RW.03<br>CIAWI - BOGOR<br>Telp &amp; WhatsApp: 082312233247</div>
+            <div class="thermal-separator"></div><div class="thermal-copy-label">FAKTUR ${label.toUpperCase()}</div>
+            <div class="thermal-meta">
+              <span>NO FAKTUR</span><span>:</span><span>${esc(doc.invoiceNo || doc.id)}</span>
+              <span>TANGGAL</span><span>:</span><span>${displayDate(doc.date)}</span>
+              <span>JATUH TEMPO</span><span>:</span><span>${displayDate(doc.dueDate)}</span>
+              <span>${isDebt ? "SUPPLIER" : "PELANGGAN"}</span><span>:</span><span>${esc(name || "-")}</span>
+              <span>ALAMAT</span><span>:</span><span>${esc(address || "-")}</span>
+              <span>WHATSAPP</span><span>:</span><span>${esc(phone || "-")}</span>
+            </div><div class="thermal-separator"></div>
+            <div class="thermal-items">${transactionItemDetails(doc)}</div>
+            <div class="thermal-separator"></div><div class="thermal-totals">
+              <span>TOTAL ${label.toUpperCase()}</span><span>:</span><span>${number.format(toNumber(doc.total))}</span>
+              <span>SISA PEMBAYARAN</span><span>:</span><span>${number.format(toNumber(doc.due))}</span>
+            </div><div class="thermal-separator"></div>
+            <div class="thermal-address">Saldo sesuai catatan saat dicetak.<br>Faktur ini bukan bukti pembayaran baru.</div>
+            <div class="thermal-thanks">Terima Kasih</div>
+          </section>`;
+          document.head.appendChild(style);
+          window.print();
+        } finally {
+          style.remove();
+          area.innerHTML = previousHtml;
+          area.className = previousClass;
         }
       }
       function printDebtPaymentReceipt(debt, payment, retur = 0) {

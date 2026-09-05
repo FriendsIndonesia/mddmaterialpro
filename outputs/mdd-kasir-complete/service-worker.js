@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v101-discount-dp-return";
+const CACHE_NAME = "mdd-material-pro-v102-return-search-audit";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
@@ -45,3 +45,4 @@ self.addEventListener("fetch", (event) => {
     )
   );
 });
+

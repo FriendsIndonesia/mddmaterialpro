@@ -848,8 +848,8 @@
       let purchaseCart = [];
       let editingSaleId = "";
       const receiptPrintStages = new Map();
-      let saleDraft = { invoiceNo: "", ongkir: 0, dp: 0, cashReceived: 0, note: "", method: "Cash", customerId: "", customerName: "", customerType: "", customerAddress: "", customerWhatsapp: "" };
-      let purchaseDraft = { invoiceNo: "", dueDate: "", ongkir: 0, bankCharge: 0, cashReceived: 0, note: "", method: "Cash", supplierId: "", salesName: "", company: "", whatsapp: "" };
+      let saleDraft = { invoiceNo: "", ongkir: 0, discount: 0, dp: 0, cashReceived: 0, note: "", method: "Cash", customerId: "", customerName: "", customerType: "", customerAddress: "", customerWhatsapp: "" };
+      let purchaseDraft = { invoiceNo: "", supplierInvoiceNo: "", dueDate: "", ongkir: 0, bankCharge: 0, cashReceived: 0, note: "", method: "Cash", supplierId: "", salesName: "", company: "", whatsapp: "" };
       let selectedSaleProductId = "";
       let saleProductDraft = { sku: "", search: "", unit: "", qty: 1, hpp: "", price1: "", price2: "", manualPrice: "", priceMode: "price1" };
       let selectedPurchaseProductId = "";
@@ -1708,7 +1708,7 @@
         } catch {}
       }
       function resetSaleDraft() {
-        saleDraft = { invoiceNo: nextInvoiceNo(), ongkir: 0, dp: 0, cashReceived: 0, note: "", method: "Cash", customerId: "", customerName: "", customerType: "", customerAddress: "", customerWhatsapp: "" };
+        saleDraft = { invoiceNo: nextInvoiceNo(), ongkir: 0, discount: 0, dp: 0, cashReceived: 0, note: "", method: "Cash", customerId: "", customerName: "", customerType: "", customerAddress: "", customerWhatsapp: "" };
         selectedSaleProductId = "";
         saleProductDraft = { sku: "", search: "", unit: "", qty: 1, hpp: "", price1: "", price2: "", manualPrice: "", priceMode: "price1" };
         sessionStorage.removeItem(SALE_PRODUCT_DRAFT_KEY);
@@ -1724,14 +1724,14 @@
         return purchaseDraft;
       }
       function resetPurchaseDraft() {
-        purchaseDraft = { invoiceNo: nextPurchaseNo(), dueDate: "", ongkir: 0, bankCharge: 0, cashReceived: 0, note: "", method: "Cash", supplierId: "", salesName: "", company: "", whatsapp: "" };
+        purchaseDraft = { invoiceNo: nextPurchaseNo(), supplierInvoiceNo: "", dueDate: "", ongkir: 0, bankCharge: 0, cashReceived: 0, note: "", method: "Cash", supplierId: "", salesName: "", company: "", whatsapp: "" };
         selectedPurchaseProductId = "";
       }
       function cartTotal(cart) {
         return MDDConversion.roundMoney(cart.reduce((sum, item) => sum + Math.max(0, MDDConversion.moneyMultiply(item.qty, item.price) - toNumber(item.discount)), 0));
       }
       function saleGrandTotal() {
-        return MDDConversion.roundMoney(cartTotal(activeCart) + Number(saleDraft.ongkir || 0));
+        return Math.max(0, MDDConversion.roundMoney(cartTotal(activeCart) + Number(saleDraft.ongkir || 0) - Number(saleDraft.discount || 0)));
       }
       function purchaseGrandTotal() {
         return MDDConversion.roundMoney(cartTotal(purchaseCart) + Number(purchaseDraft.ongkir || 0) + Number(purchaseDraft.bankCharge || 0));
@@ -1926,11 +1926,13 @@
               <div id="saleCart" class="cart-list">${cartRows(activeCart, "sale")}</div>
               <div class="row g-2 mt-3">
                 <div class="col-12 col-lg-4"><label class="form-label">Metode Bayar</label><select id="salePayMethod" class="form-select">${payMethods.map((m) => `<option ${m === saleDraft.method ? "selected" : ""}>${m}</option>`).join("")}</select></div>
-                <div class="col-12 col-lg-8"><label class="form-label">Uang Diterima</label><div class="input-group flex-nowrap"><input id="saleCashReceived" type="text" inputmode="numeric" value="${saleDraft.cashReceived || 0}" class="form-control flex-grow-1 fw-bold" style="min-width:180px;font-size:1.05rem" placeholder="Masukkan nominal pembayaran" ${usesReceivedAmount(saleDraft.method) ? "" : "disabled"}><button id="saleExactCashBtn" class="btn btn-outline-primary text-nowrap px-3" type="button" ${isCashMethod(saleDraft.method) ? "" : "disabled"}>Bayar Pas</button></div></div>
+                <div class="col-12 col-lg-8"><label class="form-label">Uang Diterima</label><div class="input-group flex-nowrap"><input id="saleCashReceived" type="text" inputmode="numeric" value="${rupiahInput(saleDraft.cashReceived || 0)}" class="form-control flex-grow-1 fw-bold" style="min-width:180px;font-size:1.05rem" placeholder="Masukkan nominal pembayaran" ${usesReceivedAmount(saleDraft.method) ? "" : "disabled"}><button id="saleExactCashBtn" class="btn btn-outline-primary text-nowrap px-3" type="button" ${isCashMethod(saleDraft.method) ? "" : "disabled"}>Bayar Pas</button></div></div>
+                <div class="col-12 col-lg-4"><label class="form-label">Potongan Harga</label><input id="saleDiscount" type="text" inputmode="numeric" value="${rupiahInput(saleDraft.discount || 0)}" class="form-control" placeholder="Contoh: 50.000"></div>
                 <div class="col-12"><label class="form-label">Note</label><input id="saleNote" value="${saleDraft.note || ""}" class="form-control" placeholder="Catatan faktur/surat jalan"></div>
               </div>
               <div class="total-box mt-3"><span>Total Transaksi</span><strong id="saleGrandTotal">${idr.format(saleGrandTotal())}</strong></div>
               <div class="total-box mt-2"><span>Sisa Pembayaran</span><strong id="saleRemainingPayment">${idr.format(saleRemainingPayment())}</strong></div>
+              <div class="small text-secondary mt-1" id="saleRemainingFormula">${isDownPaymentMethod(saleDraft.method) ? `${idr.format(saleGrandTotal())} − ${idr.format(toNumber(saleDraft.cashReceived))} = ${idr.format(saleRemainingPayment())}` : "Sisa pembayaran otomatis dihitung berdasarkan metode bayar."}</div>
               <div id="saleChangeRow" class="total-box mt-2 ${isCashMethod(saleDraft.method) ? "" : "d-none"}"><span>Kembali</span><strong id="saleCashChange">${idr.format(saleCashChange())}</strong></div>
             </section>
           </div>
@@ -1954,7 +1956,8 @@
         document.getElementById("saleCustomerAddress").oninput = (e) => { saleDraft.customerAddress = e.target.value; };
         document.getElementById("saleCustomerWhatsapp").oninput = (e) => { saleDraft.customerWhatsapp = e.target.value; };
         document.getElementById("salePayMethod").onchange = (e) => { saleDraft.method = e.target.value; updateSaleDraftTotals(); };
-        document.getElementById("saleCashReceived").oninput = updateSaleDraftTotals;
+        document.getElementById("saleCashReceived").oninput = (event) => { event.target.value = rupiahInput(event.target.value); updateSaleDraftTotals(); };
+        document.getElementById("saleDiscount").oninput = (event) => { event.target.value = rupiahInput(event.target.value); updateSaleDraftTotals(); };
         document.getElementById("saleExactCashBtn").onclick = () => { if (!isCashMethod(saleDraft.method)) return; saleDraft.cashReceived = saleGrandTotal(); document.getElementById("saleCashReceived").value = saleDraft.cashReceived; updateSaleDraftTotals(); };
         document.getElementById("saleOngkir").oninput = updateSaleDraftTotals;
         document.getElementById("saleNote").oninput = (e) => { saleDraft.note = e.target.value; };
@@ -2020,7 +2023,7 @@
         const pending = state.pendingSales.find((p) => p.id === id);
         if (!pending) return toast("Invoice pending tidak ditemukan.");
         activeCart = structuredClone(pending.items || []);
-        saleDraft = { invoiceNo: pending.invoiceNo, ongkir: pending.ongkir || 0, dp: pending.dp || 0, cashReceived: pending.dp || pending.cashReceived || 0, note: pending.note || "", method: toNumber(pending.dp) > 0 ? "DP (Uang Muka)" : (pending.method || "Cash"), customerId: pending.customerId || "", customerName: pending.customerName || "", customerType: pending.customerType || "", customerAddress: pending.customerAddress || "", customerWhatsapp: pending.customerWhatsapp || "" };
+        saleDraft = { invoiceNo: pending.invoiceNo, ongkir: pending.ongkir || 0, discount: pending.discount || 0, dp: pending.dp || 0, cashReceived: pending.dp || pending.cashReceived || 0, note: pending.note || "", method: toNumber(pending.dp) > 0 ? "DP (Uang Muka)" : (pending.method || "Cash"), customerId: pending.customerId || "", customerName: pending.customerName || "", customerType: pending.customerType || "", customerAddress: pending.customerAddress || "", customerWhatsapp: pending.customerWhatsapp || "" };
         markExplicitDeletion("pendingSales", id);
         state.pendingSales = state.pendingSales.filter((p) => p.id !== id);
         saveState(`${payNow ? "Lanjut bayar" : "Edit"} invoice pending ${pending.invoiceNo || id}`);
@@ -2051,7 +2054,7 @@
         if (!sale) return toast("Transaksi tidak ditemukan.");
         editingSaleId = sale.id;
         activeCart = structuredClone(sale.items || []);
-        saleDraft = { invoiceNo: sale.invoiceNo || sale.id, date: String(sale.date || today()).slice(0, 10), ongkir: sale.ongkir || 0, dp: sale.dp || 0, cashReceived: sale.dp || sale.cashReceived || 0, note: sale.note || "", method: toNumber(sale.dp) > 0 ? "DP (Uang Muka)" : (sale.method || "Cash"), customerId: sale.customerId || "", customerName: sale.customerName || "", customerType: sale.customerType || "", customerAddress: sale.customerAddress || "", customerWhatsapp: sale.customerWhatsapp || "" };
+        saleDraft = { invoiceNo: sale.invoiceNo || sale.id, date: String(sale.date || today()).slice(0, 10), ongkir: sale.ongkir || 0, discount: sale.discount || 0, dp: sale.dp || 0, cashReceived: sale.dp || sale.cashReceived || 0, note: sale.note || "", method: toNumber(sale.dp) > 0 ? "DP (Uang Muka)" : (sale.method || "Cash"), customerId: sale.customerId || "", customerName: sale.customerName || "", customerType: sale.customerType || "", customerAddress: sale.customerAddress || "", customerWhatsapp: sale.customerWhatsapp || "" };
         renderAll();
         document.getElementById("saleDate")?.scrollIntoView({ behavior: "smooth", block: "center" });
         toast(`Invoice ${sale.invoiceNo || sale.id} siap diedit. Klik Simpan & Bayar untuk menyimpan perubahan.`);
@@ -2123,6 +2126,9 @@
       }
       function updateSaleDraftTotals() {
         saleDraft.ongkir = toNumber(document.getElementById("saleOngkir").value);
+        saleDraft.discount = Math.max(0, toNumber(document.getElementById("saleDiscount").value));
+        const gross = cartTotal(activeCart) + saleDraft.ongkir;
+        if (saleDraft.discount > gross) saleDraft.discount = gross;
         saleDraft.cashReceived = toNumber(document.getElementById("saleCashReceived").value);
         saleDraft.dp = isDownPaymentMethod(saleDraft.method) ? Math.max(0, Math.min(saleGrandTotal(), saleDraft.cashReceived)) : 0;
         document.getElementById("saleGrandTotal").textContent = idr.format(saleGrandTotal());
@@ -2130,6 +2136,7 @@
         document.getElementById("saleExactCashBtn").disabled = !isCashMethod(saleDraft.method);
         document.getElementById("saleChangeRow").classList.toggle("d-none", !isCashMethod(saleDraft.method));
         document.getElementById("saleRemainingPayment").textContent = idr.format(saleRemainingPayment());
+        document.getElementById("saleRemainingFormula").textContent = isDownPaymentMethod(saleDraft.method) ? `${idr.format(saleGrandTotal())} − ${idr.format(saleDraft.cashReceived)} = ${idr.format(saleRemainingPayment())}` : "Sisa pembayaran otomatis dihitung berdasarkan metode bayar.";
         document.getElementById("saleCashChange").textContent = idr.format(saleCashChange());
       }
       function openCartEditModal(item, cart, mode = "sale") {
@@ -2159,7 +2166,7 @@
         updateSaleDraftTotals();
         updateSaleCustomerDraft();
         const customer = selectedSaleCustomerData();
-        state.pendingSales.unshift({ id: uid("PSO"), invoiceNo: saleDraft.invoiceNo, date: today(), customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, method: saleDraft.method, items: structuredClone(activeCart), ongkir: saleDraft.ongkir, dp: saleDraft.dp, bankCharge: 0, cashReceived: saleDraft.cashReceived, change: saleCashChange(), note: saleDraft.note, total: saleGrandTotal() });
+        state.pendingSales.unshift({ id: uid("PSO"), invoiceNo: saleDraft.invoiceNo, date: today(), customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, method: saleDraft.method, items: structuredClone(activeCart), ongkir: saleDraft.ongkir, discount: saleDraft.discount, dp: saleDraft.dp, bankCharge: 0, cashReceived: saleDraft.cashReceived, change: saleCashChange(), note: saleDraft.note, total: saleGrandTotal() });
         activeCart = [];
         resetSaleDraft();
         saveState("Pending penjualan dibuat");
@@ -2202,7 +2209,7 @@
           state.sales = state.sales.filter((item) => item.id !== previousSale.id);
         }
         const due = isDownPaymentMethod(method) ? Math.max(0, total - dp) : method === "Piutang" ? total : 0;
-        const sale = { id: previousSale?.id || uid("SAL"), createdAt: previousSale?.createdAt || new Date().toISOString(), invoiceNo: previousSale?.invoiceNo || saleDraft.invoiceNo, date: document.getElementById("saleDate").value, customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, customerDeposit: customer.deposit, items: structuredClone(activeCart), method, ongkir: saleDraft.ongkir, dp, bankCharge: 0, cashReceived: usesReceivedAmount(method) ? saleDraft.cashReceived : 0, change: saleCashChange(), note: saleDraft.note, status: due > 0 ? "Piutang" : "Lunas", total, due, paid: Math.max(0, total - due), depositRemaining: method === "Deposit" ? Math.max(0, customer.deposit - total) : customer.deposit };
+        const sale = { id: previousSale?.id || uid("SAL"), createdAt: previousSale?.createdAt || new Date().toISOString(), invoiceNo: previousSale?.invoiceNo || saleDraft.invoiceNo, date: document.getElementById("saleDate").value, customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, customerDeposit: customer.deposit, items: structuredClone(activeCart), method, ongkir: saleDraft.ongkir, discount: saleDraft.discount, dp, bankCharge: 0, cashReceived: usesReceivedAmount(method) ? saleDraft.cashReceived : 0, change: saleCashChange(), note: saleDraft.note, status: due > 0 ? "Piutang" : "Lunas", total, due, paid: Math.max(0, total - due), depositRemaining: method === "Deposit" ? Math.max(0, customer.deposit - total) : customer.deposit };
         sale.items.forEach((item) => {
           const p = findProduct(item.productId);
           if (p) {
@@ -2254,6 +2261,7 @@
             </section>
             <section class="panel"><div class="panel-header"><h3>Keranjang Pembelian</h3><span class="chip">${purchaseCart.length} item</span></div><div id="purchaseCart" class="cart-list">${cartRows(purchaseCart, "purchase")}</div>
               <div class="row g-2 mb-3">
+                <div class="col-12"><label class="form-label">No. Faktur/No. Surat Jalan</label><input id="purchaseSupplierInvoiceNo" class="form-control" value="${esc(purchaseDraft.supplierInvoiceNo || "")}" placeholder="Nomor dokumen dari supplier"></div>
                 <div class="col-md-6"><label class="form-label">No. Pembelian</label><div class="input-group"><input id="purchaseInvoiceNo" class="form-control" value="${purchaseDraft.invoiceNo}" readonly><button id="refreshPurchaseInvoiceBtn" class="btn btn-outline-secondary" type="button"><i class="bi bi-arrow-clockwise"></i></button></div></div>
                 <div class="col-md-6"><label class="form-label">Biaya Ongkir</label><input id="purchaseOngkir" type="number" min="0" value="${purchaseDraft.ongkir || 0}" class="form-control"></div>
               </div>
@@ -2277,6 +2285,7 @@
         document.getElementById("purchaseCompany").oninput = updatePurchaseSupplierFromCompany;
         document.getElementById("purchaseCompany").onchange = updatePurchaseSupplierFromCompany;
         document.getElementById("purchaseDueDate").oninput = (e) => { purchaseDraft.dueDate = e.target.value; };
+        document.getElementById("purchaseSupplierInvoiceNo").oninput = (e) => { purchaseDraft.supplierInvoiceNo = e.target.value; };
         document.getElementById("purchasePayMethod").onchange = (e) => { purchaseDraft.method = e.target.value; updatePurchaseDraftTotals(); };
         document.getElementById("purchaseCashReceived").oninput = updatePurchaseDraftTotals;
         document.getElementById("purchaseOngkir").oninput = updatePurchaseDraftTotals;
@@ -2379,7 +2388,7 @@
         if (!purchaseCart.length) return toast("Keranjang pembelian kosong.");
         updatePurchaseDraftTotals();
         const supplier = selectedSupplierData(purchaseDraft.supplierId);
-        state.pendingPurchases.unshift({ id: uid("PPO"), invoiceNo: purchaseDraft.invoiceNo, date: today(), dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", method: purchaseDraft.method, items: structuredClone(purchaseCart), ongkir: purchaseDraft.ongkir, bankCharge: purchaseDraft.bankCharge, cashReceived: purchaseDraft.cashReceived, change: purchaseCashChange(), note: purchaseDraft.note, total: purchaseGrandTotal() });
+        state.pendingPurchases.unshift({ id: uid("PPO"), invoiceNo: purchaseDraft.invoiceNo, supplierInvoiceNo: purchaseDraft.supplierInvoiceNo, date: today(), dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", method: purchaseDraft.method, items: structuredClone(purchaseCart), ongkir: purchaseDraft.ongkir, bankCharge: purchaseDraft.bankCharge, cashReceived: purchaseDraft.cashReceived, change: purchaseCashChange(), note: purchaseDraft.note, total: purchaseGrandTotal() });
         purchaseCart = [];
         resetPurchaseDraft();
         saveState("Pending pembelian dibuat");
@@ -2395,6 +2404,7 @@
         purchaseDraft.company = document.getElementById("purchaseCompany").value;
         purchaseDraft.whatsapp = document.getElementById("purchaseWhatsapp").value;
         purchaseDraft.dueDate = document.getElementById("purchaseDueDate").value;
+        purchaseDraft.supplierInvoiceNo = document.getElementById("purchaseSupplierInvoiceNo").value.trim();
         const supplier = selectedSupplierData(purchaseDraft.supplierId);
         const method = purchaseDraft.method;
         const total = purchaseGrandTotal();
@@ -2402,7 +2412,7 @@
         const isPaidPurchase = !isDebtPurchase;
         if (isPaidPurchase && isCashMethod(method) && toNumber(purchaseDraft.cashReceived) < total) return toast("Uang diterima kurang dari Total Transaksi.");
         purchaseCheckoutBusy = true;
-        const purchase = { id: uid("PUR"), createdAt: new Date().toISOString(), invoiceNo: purchaseDraft.invoiceNo, date: document.getElementById("purchaseDate").value, dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", items: structuredClone(purchaseCart), method, ongkir: purchaseDraft.ongkir, bankCharge: purchaseDraft.bankCharge, cashReceived: isCashMethod(method) ? purchaseDraft.cashReceived : (isPaidPurchase ? total : 0), change: purchaseCashChange(), note: purchaseDraft.note, status: isPaidPurchase ? "Lunas" : "Hutang", total, due: isPaidPurchase ? 0 : total, paid: isPaidPurchase ? total : 0, returnAmount: 0 };
+        const purchase = { id: uid("PUR"), createdAt: new Date().toISOString(), invoiceNo: purchaseDraft.invoiceNo, supplierInvoiceNo: purchaseDraft.supplierInvoiceNo, date: document.getElementById("purchaseDate").value, dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", items: structuredClone(purchaseCart), method, ongkir: purchaseDraft.ongkir, bankCharge: purchaseDraft.bankCharge, cashReceived: isCashMethod(method) ? purchaseDraft.cashReceived : (isPaidPurchase ? total : 0), change: purchaseCashChange(), note: purchaseDraft.note, status: isPaidPurchase ? "Lunas" : "Hutang", total, due: isPaidPurchase ? 0 : total, paid: isPaidPurchase ? total : 0, returnAmount: 0 };
         purchase.items.forEach((item) => {
           const p = findProduct(item.productId);
           if (p) {
@@ -3193,16 +3203,16 @@
         return genericTable(productRows(rows, options), keys);
       }
       function salesReportRows(rows) {
-        return rows.map((s) => ({ tanggal: s.date, invoice: s.invoiceNo || s.id, nama_pelanggan: s.customerName || relationName(s.customerId), alamat_pelanggan: s.customerAddress || "-", whatsapp: s.customerWhatsapp || "-", item: s.items?.length || 0, ongkir: s.ongkir || 0, dp_uang_muka: s.dp || 0, metode: s.method, status: s.status, total: s.total, jumlah_piutang_tersisa: s.due || 0, jumlah_deposit_tersisa: s.depositRemaining || 0, aksi: `<div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-outline-primary" type="button" data-edit-sale="${s.id}" title="Edit transaksi"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-secondary" type="button" data-print-sale="${s.id}" title="Print ulang"><i class="bi bi-printer"></i> Print</button></div>` }));
+        return rows.map((s) => ({ tanggal: s.date, invoice: s.invoiceNo || s.id, nama_pelanggan: s.customerName || relationName(s.customerId), alamat_pelanggan: s.customerAddress || "-", whatsapp: s.customerWhatsapp || "-", item: s.items?.length || 0, ongkir: s.ongkir || 0, potongan_harga: s.discount || 0, dp_uang_muka: s.dp || 0, metode: s.method, status: s.status, total: s.total, jumlah_piutang_tersisa: s.due || 0, jumlah_deposit_tersisa: s.depositRemaining || 0, aksi: `<div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-outline-primary" type="button" data-edit-sale="${s.id}" title="Edit transaksi"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-secondary" type="button" data-print-sale="${s.id}" title="Print ulang"><i class="bi bi-printer"></i> Print</button></div>` }));
       }
       function purchaseReportRows(rows) {
-        return rows.map((p) => ({ tanggal: p.date, no_po: p.invoiceNo || p.id, nama_sales: p.salesName || personName(state.suppliers, p.supplierId), nama_perusahaan: p.company || selectedSupplierData(p.supplierId).company || "-", whatsapp: p.whatsapp || selectedSupplierData(p.supplierId).phone || "-", nama_barang: (p.items || []).map((item) => item.name).join(", "), qty: (p.items || []).reduce((sum, item) => sum + Number(item.qty || 0), 0), metode_pembayaran: p.method, jumlah_total: p.total, jumlah_hutang_tersisa: p.due || 0 }));
+        return rows.map((p) => ({ tanggal: p.date, no_faktur_surat_jalan: p.supplierInvoiceNo || "-", no_po: p.invoiceNo || p.id, nama_sales: p.salesName || personName(state.suppliers, p.supplierId), nama_perusahaan: p.company || selectedSupplierData(p.supplierId).company || "-", whatsapp: p.whatsapp || selectedSupplierData(p.supplierId).phone || "-", nama_barang: (p.items || []).map((item) => item.name).join(", "), qty: (p.items || []).reduce((sum, item) => sum + Number(item.qty || 0), 0), metode_pembayaran: p.method, jumlah_total: p.total, jumlah_hutang_tersisa: p.due || 0 }));
       }
       function salesTable(rows) {
-        return genericTable(salesReportRows(rows), ["tanggal", "invoice", "nama_pelanggan", "alamat_pelanggan", "whatsapp", "item", "ongkir", "bank_charge", "metode", "status", "total", "jumlah_piutang_tersisa", "jumlah_deposit_tersisa", "aksi"]);
+        return genericTable(salesReportRows(rows), ["tanggal", "invoice", "nama_pelanggan", "alamat_pelanggan", "whatsapp", "item", "ongkir", "potongan_harga", "metode", "status", "total", "jumlah_piutang_tersisa", "jumlah_deposit_tersisa", "aksi"]);
       }
       function purchaseTable(rows) {
-        return genericTable(purchaseReportRows(rows), ["tanggal", "no_po", "nama_sales", "nama_perusahaan", "whatsapp", "nama_barang", "qty", "metode_pembayaran", "jumlah_total", "jumlah_hutang_tersisa"]);
+        return genericTable(purchaseReportRows(rows), ["tanggal", "no_faktur_surat_jalan", "no_po", "nama_sales", "nama_perusahaan", "whatsapp", "nama_barang", "qty", "metode_pembayaran", "jumlah_total", "jumlah_hutang_tersisa"]);
       }
       function cashTable(rows = state.cashTx) {
         return genericTable(rows.map((x) => ({ tanggal: x.date, jenis: x.type, kategori: x.category, kas: personName(state.cashAccounts, x.accountId), nominal: x.amount, catatan: x.note })), ["tanggal", "jenis", "kategori", "kas", "nominal", "catatan"]);
@@ -3606,27 +3616,52 @@
         updateEditOpname();
       }
       function openReturnModal(module) {
-        const first = state.products.find((p) => p.active !== false);
-        if (!first) return toast("Produk belum tersedia.");
-        openModal(`Retur ${module}`, `<div class="row g-3"><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div><div class="col-md-5"><label class="form-label">Produk</label><select id="returnProductId" name="productId" class="form-select">${productOptions()}</select></div><div class="col-md-3"><label class="form-label">Satuan</label><select id="returnUnit" name="unit" class="form-select">${productUnitOptions(first)}</select></div><div class="col-md-3"><label class="form-label">Qty</label><input name="qty" type="number" min="0.000001" step="0.000001" value="1" class="form-control"></div><div class="col-md-4"><label class="form-label">Metode Retur</label><select name="method" class="form-select">${payMethods.map((m) => `<option>${m}</option>`).join("")}</select></div><div class="col-md-5"><label class="form-label">Catatan/Alasan</label><input name="note" class="form-control" required></div></div>`, (fd) => {
-          const p = findProduct(fd.get("productId"));
+        const documents = (module === "Penjualan" ? state.sales : state.purchases).filter((row) => Array.isArray(row.items) && row.items.length);
+        if (!documents.length) return toast(`Belum ada transaksi ${module.toLowerCase()} yang dapat diretur.`);
+        const documentOptions = documents.map((row) => `<option value="${esc(row.id)}">${esc(row.invoiceNo || row.id)} — ${esc(module === "Penjualan" ? (row.customerName || "-") : (row.company || row.salesName || "-"))}</option>`).join("");
+        const renderReturnProductOptions = (doc) => (doc?.items || []).map((item, index) => `<option value="${index}">${esc(item.name)} — ${number.format(item.qty)} ${esc(item.unit || "")}</option>`).join("");
+        const firstDoc = documents[0], firstItem = firstDoc.items[0], firstProduct = findProduct(firstItem.productId);
+        openModal(`Retur ${module}`, `<div class="row g-3"><div class="col-12"><label class="form-label">No. Transaksi/Faktur</label><select id="returnRefId" name="refId" class="form-select">${documentOptions}</select></div><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div><div class="col-md-5"><label class="form-label">Produk Transaksi</label><select id="returnItemIndex" name="itemIndex" class="form-select">${renderReturnProductOptions(firstDoc)}</select></div><div class="col-md-3"><label class="form-label">Satuan</label><input id="returnUnit" name="unit" value="${esc(firstItem.unit || firstProduct?.primaryUnit || firstProduct?.unit || "")}" class="form-control" readonly></div><div class="col-md-3"><label class="form-label">Qty</label><input name="qty" type="number" min="0.000001" step="0.000001" value="1" class="form-control"></div><div class="col-md-4"><label class="form-label">Metode Retur</label><select name="method" class="form-select">${payMethods.map((m) => `<option>${m}</option>`).join("")}</select></div><div class="col-md-5"><label class="form-label">Catatan/Alasan</label><input name="note" class="form-control" required></div></div>`, (fd) => {
+          const doc = documents.find((row) => row.id === fd.get("refId"));
+          const item = doc?.items?.[Number(fd.get("itemIndex"))];
+          const p = findProduct(item?.productId);
           const qty = Number(fd.get("qty"));
-          const unit = fd.get("unit") || p.primaryUnit || p.unit;
+          if (!doc || !item || !p || !Number.isFinite(qty) || qty <= 0) return toast("Data retur tidak valid.");
+          const alreadyReturned = state.returns.filter((row) => row.refId === doc.id && row.productId === p.id && String(row.unit) === String(item.unit)).reduce((sum, row) => sum + toNumber(row.qty), 0);
+          if (qty > toNumber(item.qty) - alreadyReturned + 0.000001) return toast("Qty retur melebihi jumlah barang pada transaksi.");
+          const unit = item.unit || p.primaryUnit || p.unit;
           const primaryQty = productQuantityInPrimary(p, qty, unit);
-          if (module === "Penjualan") p.stockOut = Math.max(0, toNumber(p.stockOut) - primaryQty);
-          else {
-            if (stockAkhirProduk(p) + 0.000001 < primaryQty) return toast("Stok tidak cukup untuk retur pembelian ini.");
+          const previousStock = stockAkhirProduk(p);
+          if (module === "Penjualan") {
+            p.stockOut = Math.max(0, toNumber(p.stockOut) - primaryQty);
+            p.stock = previousStock + primaryQty;
+          } else {
+            if (previousStock + 0.000001 < primaryQty) return toast("Stok tidak cukup untuk retur pembelian ini.");
             p.stockIn = Math.max(0, toNumber(p.stockIn) - primaryQty);
+            p.stock = previousStock - primaryQty;
           }
-          p.stock = stockAkhirProduk(p); p.stockAkhir = p.stock;
-          const amount = MDDConversion.moneyMultiply(qty, productHppForUnit(p, unit));
-          state.returns.unshift({ id: uid("RET"), module, date: fd.get("date"), productId: p.id, product: p.name, qty, unit, primaryQty, amount, total: amount, method: fd.get("method"), note: fd.get("note") });
-          state.stockMoves.unshift({ id: uid("STK"), date: fd.get("date"), productId: p.id, productName: p.name, unit, type: `Retur ${module}`, qty: primaryQty, note: `${qty} ${unit}. ${fd.get("note")}` });
-          saveState(`Retur ${module} ${p.name}`);
-          closeModal();
-          renderAll();
+          p.stockAkhir = p.stock;
+          const unitPrice = toNumber(item.price || item.buy || productHppForUnit(p, unit));
+          const amount = MDDConversion.moneyMultiply(qty, unitPrice);
+          doc.returnAmount = toNumber(doc.returnAmount) + amount;
+          doc.due = Math.max(0, toNumber(doc.due) - amount);
+          state.returns.unshift({ id: uid("RET"), module, date: fd.get("date"), refId: doc.id, invoiceNo: doc.invoiceNo || doc.id, productId: p.id, product: p.name, qty, unit, primaryQty, amount, total: amount, method: fd.get("method"), note: fd.get("note") });
+          state.stockMoves.unshift({ id: uid("STK"), date: fd.get("date"), productId: p.id, productName: p.name, unit, type: `Retur ${module}`, qty: primaryQty, note: `${doc.invoiceNo || doc.id}: ${qty} ${unit}. ${fd.get("note")}` });
+          saveState(`Retur ${module} ${doc.invoiceNo || doc.id} — ${p.name}`);
+          closeModal(); renderAll(); toast("Retur tersimpan di aplikasi dan masuk antrean sinkronisasi backend.");
         });
-        document.getElementById("returnProductId").onchange = (event) => { const product = findProduct(event.target.value); document.getElementById("returnUnit").innerHTML = productUnitOptions(product); };
+        const updateReturnItems = () => {
+          const doc = documents.find((row) => row.id === document.getElementById("returnRefId").value);
+          document.getElementById("returnItemIndex").innerHTML = renderReturnProductOptions(doc);
+          const item = doc?.items?.[0], product = findProduct(item?.productId);
+          document.getElementById("returnUnit").value = item?.unit || product?.primaryUnit || product?.unit || "";
+        };
+        document.getElementById("returnRefId").onchange = updateReturnItems;
+        document.getElementById("returnItemIndex").onchange = () => {
+          const doc = documents.find((row) => row.id === document.getElementById("returnRefId").value);
+          const item = doc?.items?.[Number(document.getElementById("returnItemIndex").value)], product = findProduct(item?.productId);
+          document.getElementById("returnUnit").value = item?.unit || product?.primaryUnit || product?.unit || "";
+        };
       }
       function openAccessCodeModal() {
         if (session.role !== "Owner") return toast("Hanya Owner yang dapat mengubah kode akses.");
@@ -3706,7 +3741,7 @@
         const meta = (copyLabel) => `${header}<div class="thermal-separator"></div><div class="thermal-copy-label">${title} - ${copyLabel}</div><div class="thermal-meta"><span>TANGGAL</span><span>:</span><span>${dateText} ${timeText}</span><span>NO FAKTUR</span><span>:</span><span>${doc.invoiceNo || doc.id}</span><span>KASIR</span><span>:</span><span>${cashierName}</span><span>${isSale ? "PELANGGAN" : "SUPPLIER"}</span><span>:</span><span>${relation}</span><span>ALAMAT</span><span>:</span><span>${relationAddress}</span><span>WHATSAPP</span><span>:</span><span>${relationWhatsapp}</span></div><div class="thermal-separator"></div>`;
         const pricedItems = doc.items.map((item) => `<div class="thermal-item"><div class="thermal-item-name">${item.name}</div><div class="thermal-item-line"><span>${number.format(item.price)}/${item.unit || "PCS"}</span><span>x${number.format(item.qty)}</span><span>${number.format(item.qty * item.price - (item.discount || 0))}</span></div></div>`).join("");
         const deliveryItems = doc.items.map((item) => `<div class="thermal-delivery-line"><span>${item.name}</span><span>x${number.format(item.qty)} ${item.unit || ""}</span></div>`).join("");
-        const chargeRows = `${toNumber(doc.ongkir) ? `<span>ONGKIR</span><span>:</span><span>${number.format(doc.ongkir)}</span>` : ""}`;
+        const chargeRows = `${toNumber(doc.ongkir) ? `<span>ONGKIR</span><span>:</span><span>${number.format(doc.ongkir)}</span>` : ""}${toNumber(doc.discount) ? `<span>POTONGAN HARGA</span><span>:</span><span>-${number.format(doc.discount)}</span>` : ""}`;
         const printArea = document.getElementById("printArea");
         const bankAccounts = `<div class="thermal-bank-accounts"><div>BCA : 7361049555</div><div>BSI : 7215480709</div><div class="account-owner">A/N : TABNA</div><div>BRI : 224501000715564</div><div class="account-owner">A/N : KHAIRIYATUN NISA</div></div>`;
         const paymentMethod = String(doc.method || "Cash").toUpperCase();

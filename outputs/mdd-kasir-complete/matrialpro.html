@@ -3630,12 +3630,17 @@
         const searchableDocuments = documents.filter((doc) => eligibleItems(doc).length);
         if (!searchableDocuments.length) return toast(`Semua barang pada transaksi ${module.toLowerCase()} sudah diretur.`);
         const renderReturnProductOptions = (doc) => `<option value="">Pilih produk transaksi</option>${eligibleItems(doc).map(({ item, index, remaining }) => `<option value="${index}">${esc(item.name)} — tersedia ${number.format(remaining)} ${esc(item.unit || "")}</option>`).join("")}`;
+        const returnUnitPrice = (item, product) => toNumber(item?.price ?? item?.buy ?? productHppForUnit(product, item?.unit));
+        const returnMoney = (item, product, qty) => MDDConversion.moneyMultiply(Math.max(0, toNumber(qty)), returnUnitPrice(item, product));
         openModal(`Retur ${module}`, `<div class="row g-3">
           <div class="col-12"><label class="form-label">No. Transaksi/Faktur</label><input id="returnDocumentSearch" class="form-control" autocomplete="off" value="" placeholder="Ketik nomor invoice/faktur atau nama ${module === "Penjualan" ? "pelanggan" : "supplier"}"><input id="returnRefId" name="refId" type="hidden" value=""><div id="returnDocumentResults" class="search-results mt-2"></div><div class="form-text">Pilih transaksi dari hasil pencarian agar rincian barang terisi otomatis.</div></div>
           <div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div>
-          <div class="col-md-5"><label class="form-label">Produk Transaksi</label><select id="returnItemIndex" name="itemIndex" class="form-select" disabled><option value="">Pilih transaksi terlebih dahulu</option></select></div>
+          <div class="col-md-8"><label class="form-label">Total Transaksi</label><input id="returnTransactionTotal" class="form-control fw-bold" value="" readonly></div>
+          <div class="col-12"><label class="form-label">Rincian Produk yang ${module === "Penjualan" ? "Dijual" : "Dibeli"}</label><div id="returnTransactionItems" class="audit-box">Pilih transaksi terlebih dahulu.</div></div>
+          <div class="col-md-5"><label class="form-label">Produk yang Ingin Diretur</label><select id="returnItemIndex" name="itemIndex" class="form-select" disabled><option value="">Pilih transaksi terlebih dahulu</option></select></div>
           <div class="col-md-3"><label class="form-label">Satuan</label><input id="returnUnit" name="unit" value="" class="form-control" readonly></div>
           <div class="col-md-3"><label class="form-label">Qty</label><input id="returnQty" name="qty" type="number" min="0.000001" step="0.000001" value="" class="form-control" disabled></div>
+          <div class="col-md-5"><label class="form-label">Jumlah Uang yang Dikembalikan</label><input id="returnRefundAmount" class="form-control fw-bold" value="" readonly><div class="form-text">Dihitung otomatis: Qty retur × harga produk pada transaksi.</div></div>
           <div class="col-md-4"><label class="form-label">Metode Retur</label><select name="method" class="form-select">${payMethods.map((m) => `<option>${m}</option>`).join("")}</select></div>
           <div class="col-md-5"><label class="form-label">Catatan/Alasan</label><input name="note" class="form-control" required></div>
         </div>`, (fd) => {
@@ -3657,8 +3662,7 @@
             p.stock = previousStock - primaryQty;
           }
           p.stockAkhir = p.stock;
-          const unitPrice = toNumber(item.price || item.buy || productHppForUnit(p, unit));
-          const amount = MDDConversion.moneyMultiply(qty, unitPrice);
+          const amount = returnMoney(item, p, qty);
           doc.returnAmount = toNumber(doc.returnAmount) + amount;
           doc.due = Math.max(0, toNumber(doc.due) - amount);
           state.returns.unshift({ id: uid("RET"), module, date: fd.get("date"), refId: doc.id, invoiceNo: doc.invoiceNo || doc.id, productId: p.id, product: p.name, qty, unit, primaryQty, amount, total: amount, method: fd.get("method"), note: fd.get("note") });
@@ -3672,6 +3676,9 @@
         const itemSelect = document.getElementById("returnItemIndex");
         const unitInput = document.getElementById("returnUnit");
         const qtyInput = document.getElementById("returnQty");
+        const totalInput = document.getElementById("returnTransactionTotal");
+        const itemsBox = document.getElementById("returnTransactionItems");
+        const refundInput = document.getElementById("returnRefundAmount");
         const clearReturnSelection = () => {
           refInput.value = "";
           itemSelect.innerHTML = `<option value="">Pilih transaksi terlebih dahulu</option>`;
@@ -3679,6 +3686,9 @@
           unitInput.value = "";
           qtyInput.value = "";
           qtyInput.disabled = true;
+          totalInput.value = "";
+          itemsBox.textContent = "Pilih transaksi terlebih dahulu.";
+          refundInput.value = "";
         };
         const updateReturnItemDetails = () => {
           const doc = searchableDocuments.find((row) => row.id === refInput.value);
@@ -3687,6 +3697,7 @@
           unitInput.value = item?.unit || product?.primaryUnit || product?.unit || "";
           qtyInput.value = item ? remainingQty(doc, item) : "";
           qtyInput.disabled = !item;
+          refundInput.value = item ? idr.format(returnMoney(item, product, qtyInput.value)) : "";
         };
         const chooseDocument = (doc) => {
           refInput.value = doc.id;
@@ -3695,6 +3706,8 @@
           itemSelect.disabled = false;
           const firstEligible = eligibleItems(doc)[0];
           itemSelect.value = String(firstEligible.index);
+          totalInput.value = idr.format(toNumber(doc.total));
+          itemsBox.innerHTML = (doc.items || []).map((item) => `<div class="d-flex justify-content-between gap-3 py-1"><span><strong>${esc(item.name || "-")}</strong><br><small>${number.format(item.qty)} ${esc(item.unit || "")}</small></span><span class="text-end">${idr.format(MDDConversion.moneyMultiply(item.qty, toNumber(item.price ?? item.buy)))}</span></div>`).join("");
           resultBox.innerHTML = "";
           updateReturnItemDetails();
         };
@@ -3713,6 +3726,12 @@
         };
         searchInput.addEventListener("input", renderDocumentSearch);
         itemSelect.addEventListener("change", updateReturnItemDetails);
+        qtyInput.addEventListener("input", () => {
+          const doc = searchableDocuments.find((row) => row.id === refInput.value);
+          const item = doc?.items?.[Number(itemSelect.value)];
+          const product = findProduct(item?.productId);
+          refundInput.value = item ? idr.format(returnMoney(item, product, qtyInput.value)) : "";
+        });
       }
       function openAccessCodeModal() {
         if (session.role !== "Owner") return toast("Hanya Owner yang dapat mengubah kode akses.");

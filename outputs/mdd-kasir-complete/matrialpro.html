@@ -2664,14 +2664,19 @@
         return Math.max(logged, Number(purchase.paid || 0));
       }
       function debtReturnAmount(purchase) {
-        return Number(purchase.returnAmount || 0) + state.returns.filter((r) => r.module === "Pembelian" && (r.refId === purchase.id || r.invoiceNo === purchase.invoiceNo)).reduce((sum, r) => sum + Number(r.amount || r.total || 0), 0);
+        const logged = state.returns.filter((r) => r.module === "Pembelian" && (r.refId === purchase.id || r.invoiceNo === purchase.invoiceNo)).reduce((sum, r) => sum + Number(r.amount || r.total || 0), 0);
+        // returnAmount pada transaksi adalah ringkasan dari baris Returns yang
+        // sama. Gunakan nilai terbesar agar data lama tetap terbaca tanpa
+        // menghitung satu retur dua kali.
+        return Math.max(logged, Number(purchase.returnAmount || 0));
       }
       function receivablePaidAmount(sale) {
         const logged = state.payments.filter((p) => p.type === "Piutang" && p.refId === sale.id).reduce((sum, p) => sum + Number(p.amount || 0), 0);
         return Math.max(logged, Number(sale.paid || 0));
       }
       function receivableReturnAmount(sale) {
-        return Number(sale.returnAmount || 0) + state.returns.filter((r) => r.module === "Penjualan" && (r.refId === sale.id || r.invoiceNo === sale.invoiceNo)).reduce((sum, r) => sum + Number(r.amount || r.total || 0), 0);
+        const logged = state.returns.filter((r) => r.module === "Penjualan" && (r.refId === sale.id || r.invoiceNo === sale.invoiceNo)).reduce((sum, r) => sum + Number(r.amount || r.total || 0), 0);
+        return Math.max(logged, Number(sale.returnAmount || 0));
       }
       function openDebtInputModal(debtId = "") {
         const editing = state.purchases.find((p) => p.id === debtId);
@@ -3618,17 +3623,28 @@
       function openReturnModal(module) {
         const documents = (module === "Penjualan" ? state.sales : state.purchases).filter((row) => Array.isArray(row.items) && row.items.length);
         if (!documents.length) return toast(`Belum ada transaksi ${module.toLowerCase()} yang dapat diretur.`);
-        const documentOptions = documents.map((row) => `<option value="${esc(row.id)}">${esc(row.invoiceNo || row.id)} — ${esc(module === "Penjualan" ? (row.customerName || "-") : (row.company || row.salesName || "-"))}</option>`).join("");
-        const renderReturnProductOptions = (doc) => (doc?.items || []).map((item, index) => `<option value="${index}">${esc(item.name)} — ${number.format(item.qty)} ${esc(item.unit || "")}</option>`).join("");
-        const firstDoc = documents[0], firstItem = firstDoc.items[0], firstProduct = findProduct(firstItem.productId);
-        openModal(`Retur ${module}`, `<div class="row g-3"><div class="col-12"><label class="form-label">No. Transaksi/Faktur</label><select id="returnRefId" name="refId" class="form-select">${documentOptions}</select></div><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div><div class="col-md-5"><label class="form-label">Produk Transaksi</label><select id="returnItemIndex" name="itemIndex" class="form-select">${renderReturnProductOptions(firstDoc)}</select></div><div class="col-md-3"><label class="form-label">Satuan</label><input id="returnUnit" name="unit" value="${esc(firstItem.unit || firstProduct?.primaryUnit || firstProduct?.unit || "")}" class="form-control" readonly></div><div class="col-md-3"><label class="form-label">Qty</label><input name="qty" type="number" min="0.000001" step="0.000001" value="1" class="form-control"></div><div class="col-md-4"><label class="form-label">Metode Retur</label><select name="method" class="form-select">${payMethods.map((m) => `<option>${m}</option>`).join("")}</select></div><div class="col-md-5"><label class="form-label">Catatan/Alasan</label><input name="note" class="form-control" required></div></div>`, (fd) => {
+        const partyName = (row) => module === "Penjualan" ? (row.customerName || "-") : (row.company || row.salesName || "-");
+        const alreadyReturnedQty = (doc, item) => state.returns.filter((row) => row.refId === doc.id && row.productId === item.productId && String(row.unit || "") === String(item.unit || "")).reduce((sum, row) => sum + toNumber(row.qty), 0);
+        const remainingQty = (doc, item) => Math.max(0, toNumber(item.qty) - alreadyReturnedQty(doc, item));
+        const eligibleItems = (doc) => (doc?.items || []).map((item, index) => ({ item, index, remaining: remainingQty(doc, item) })).filter((entry) => entry.remaining > 0.000001);
+        const searchableDocuments = documents.filter((doc) => eligibleItems(doc).length);
+        if (!searchableDocuments.length) return toast(`Semua barang pada transaksi ${module.toLowerCase()} sudah diretur.`);
+        const renderReturnProductOptions = (doc) => `<option value="">Pilih produk transaksi</option>${eligibleItems(doc).map(({ item, index, remaining }) => `<option value="${index}">${esc(item.name)} — tersedia ${number.format(remaining)} ${esc(item.unit || "")}</option>`).join("")}`;
+        openModal(`Retur ${module}`, `<div class="row g-3">
+          <div class="col-12"><label class="form-label">No. Transaksi/Faktur</label><input id="returnDocumentSearch" class="form-control" autocomplete="off" value="" placeholder="Ketik nomor invoice/faktur atau nama ${module === "Penjualan" ? "pelanggan" : "supplier"}"><input id="returnRefId" name="refId" type="hidden" value=""><div id="returnDocumentResults" class="search-results mt-2"></div><div class="form-text">Pilih transaksi dari hasil pencarian agar rincian barang terisi otomatis.</div></div>
+          <div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div>
+          <div class="col-md-5"><label class="form-label">Produk Transaksi</label><select id="returnItemIndex" name="itemIndex" class="form-select" disabled><option value="">Pilih transaksi terlebih dahulu</option></select></div>
+          <div class="col-md-3"><label class="form-label">Satuan</label><input id="returnUnit" name="unit" value="" class="form-control" readonly></div>
+          <div class="col-md-3"><label class="form-label">Qty</label><input id="returnQty" name="qty" type="number" min="0.000001" step="0.000001" value="" class="form-control" disabled></div>
+          <div class="col-md-4"><label class="form-label">Metode Retur</label><select name="method" class="form-select">${payMethods.map((m) => `<option>${m}</option>`).join("")}</select></div>
+          <div class="col-md-5"><label class="form-label">Catatan/Alasan</label><input name="note" class="form-control" required></div>
+        </div>`, (fd) => {
           const doc = documents.find((row) => row.id === fd.get("refId"));
           const item = doc?.items?.[Number(fd.get("itemIndex"))];
           const p = findProduct(item?.productId);
           const qty = Number(fd.get("qty"));
           if (!doc || !item || !p || !Number.isFinite(qty) || qty <= 0) return toast("Data retur tidak valid.");
-          const alreadyReturned = state.returns.filter((row) => row.refId === doc.id && row.productId === p.id && String(row.unit) === String(item.unit)).reduce((sum, row) => sum + toNumber(row.qty), 0);
-          if (qty > toNumber(item.qty) - alreadyReturned + 0.000001) return toast("Qty retur melebihi jumlah barang pada transaksi.");
+          if (qty > remainingQty(doc, item) + 0.000001) return toast("Qty retur melebihi jumlah barang yang masih dapat diretur.");
           const unit = item.unit || p.primaryUnit || p.unit;
           const primaryQty = productQuantityInPrimary(p, qty, unit);
           const previousStock = stockAkhirProduk(p);
@@ -3650,18 +3666,53 @@
           saveState(`Retur ${module} ${doc.invoiceNo || doc.id} — ${p.name}`);
           closeModal(); renderAll(); toast("Retur tersimpan di aplikasi dan masuk antrean sinkronisasi backend.");
         });
-        const updateReturnItems = () => {
-          const doc = documents.find((row) => row.id === document.getElementById("returnRefId").value);
-          document.getElementById("returnItemIndex").innerHTML = renderReturnProductOptions(doc);
-          const item = doc?.items?.[0], product = findProduct(item?.productId);
-          document.getElementById("returnUnit").value = item?.unit || product?.primaryUnit || product?.unit || "";
+        const searchInput = document.getElementById("returnDocumentSearch");
+        const resultBox = document.getElementById("returnDocumentResults");
+        const refInput = document.getElementById("returnRefId");
+        const itemSelect = document.getElementById("returnItemIndex");
+        const unitInput = document.getElementById("returnUnit");
+        const qtyInput = document.getElementById("returnQty");
+        const clearReturnSelection = () => {
+          refInput.value = "";
+          itemSelect.innerHTML = `<option value="">Pilih transaksi terlebih dahulu</option>`;
+          itemSelect.disabled = true;
+          unitInput.value = "";
+          qtyInput.value = "";
+          qtyInput.disabled = true;
         };
-        document.getElementById("returnRefId").onchange = updateReturnItems;
-        document.getElementById("returnItemIndex").onchange = () => {
-          const doc = documents.find((row) => row.id === document.getElementById("returnRefId").value);
-          const item = doc?.items?.[Number(document.getElementById("returnItemIndex").value)], product = findProduct(item?.productId);
-          document.getElementById("returnUnit").value = item?.unit || product?.primaryUnit || product?.unit || "";
+        const updateReturnItemDetails = () => {
+          const doc = searchableDocuments.find((row) => row.id === refInput.value);
+          const item = doc?.items?.[Number(itemSelect.value)];
+          const product = findProduct(item?.productId);
+          unitInput.value = item?.unit || product?.primaryUnit || product?.unit || "";
+          qtyInput.value = item ? remainingQty(doc, item) : "";
+          qtyInput.disabled = !item;
         };
+        const chooseDocument = (doc) => {
+          refInput.value = doc.id;
+          searchInput.value = `${doc.invoiceNo || doc.id} — ${partyName(doc)}`;
+          itemSelect.innerHTML = renderReturnProductOptions(doc);
+          itemSelect.disabled = false;
+          const firstEligible = eligibleItems(doc)[0];
+          itemSelect.value = String(firstEligible.index);
+          resultBox.innerHTML = "";
+          updateReturnItemDetails();
+        };
+        const renderDocumentSearch = () => {
+          const query = String(searchInput.value || "").trim().toLowerCase();
+          clearReturnSelection();
+          if (!query) { resultBox.innerHTML = ""; return; }
+          const matches = searchableDocuments.filter((doc) => [doc.invoiceNo, doc.id, partyName(doc)].some((value) => String(value || "").toLowerCase().includes(query)));
+          resultBox.innerHTML = matches.length
+            ? `<div class="small text-secondary px-2 py-1"><strong>${number.format(matches.length)} transaksi ditemukan</strong></div>${matches.map((doc) => `<button class="search-result" type="button" data-return-document-id="${esc(doc.id)}"><strong>${esc(doc.invoiceNo || doc.id)}</strong><br><span class="text-secondary">${esc(partyName(doc))} | ${displayDate(doc.date)} | ${number.format(eligibleItems(doc).length)} produk dapat diretur</span></button>`).join("")}`
+            : `<div class="small text-secondary px-2 py-2">Transaksi yang sesuai tidak ditemukan.</div>`;
+          resultBox.querySelectorAll("[data-return-document-id]").forEach((button) => button.onclick = () => {
+            const doc = searchableDocuments.find((row) => row.id === button.dataset.returnDocumentId);
+            if (doc) chooseDocument(doc);
+          });
+        };
+        searchInput.addEventListener("input", renderDocumentSearch);
+        itemSelect.addEventListener("change", updateReturnItemDetails);
       }
       function openAccessCodeModal() {
         if (session.role !== "Owner") return toast("Hanya Owner yang dapat mengubah kode akses.");
@@ -4049,3 +4100,4 @@
   </script>
 </body>
 </html>
+

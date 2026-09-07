@@ -1,6 +1,7 @@
 const APP_NAME = "MDD Material Pro";
 const OWNER_EMAIL = "friendsindonesia28@gmail.com";
 const GITHUB_REPO = "https://github.com/FriendsIndonesia/mddmaterialpro";
+const MINIMUM_CLIENT_VERSION = 106;
 
 const TABLES = [
   { key: "products", sheet: "Products", fields: ["id", "code", "name", "category", "unit", "primaryUnit", "secondaryUnit", "conversionValue", "secondaryBarcode", "buy", "secondaryBuy", "price", "price2", "secondaryPrice", "secondaryPrice2", "stockIn", "stockOut", "stock", "stockAkhir", "min", "active"] },
@@ -28,7 +29,8 @@ function doGet(e) {
   const action = String((e && e.parameter && e.parameter.action) || "status").toLowerCase();
   const callback = e && e.parameter && e.parameter.callback;
   let payload;
-  if (action === "revision") payload = { ok: true, revision: getRevision_() };
+  if (action === "revision") payload = { ok: true, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION };
+  else if (action === "health") payload = { ok: true, app: APP_NAME, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION, serverTime: new Date().toISOString() };
   else if (action === "state") payload = readState_(ss);
   else if (action === "receipt") payload = { ok: true, processed: hasProcessedSync_(ss, String((e && e.parameter && e.parameter.requestId) || "")) };
   else if (action === "auth") payload = { ok: true, app: APP_NAME, source: "Sheets", data: readProfile_(ss) };
@@ -48,6 +50,10 @@ function doPost(e) {
   lock.waitLock(30000);
   try {
     const payload = JSON.parse((e && e.postData && e.postData.contents) || "{}");
+    const clientVersion = Number(payload.clientVersion || 0);
+    if (clientVersion < MINIMUM_CLIENT_VERSION) {
+      return output_({ ok: false, updateRequired: true, minimumClientVersion: MINIMUM_CLIENT_VERSION, error: "Versi aplikasi terlalu lama. Paket tidak diproses agar database tetap aman." });
+    }
     const data = payload.data || {};
     const ss = getSpreadsheet_();
     normalizeCashAccountNames_(ss);
@@ -118,7 +124,8 @@ function statusPayload_(ss) {
     spreadsheetId: ss.getId(),
     spreadsheetUrl: ss.getUrl(),
     message: "Backend Google Workspace siap menerima dan mengirim database MDD Material Pro.",
-    revision: getRevision_()
+    revision: getRevision_(),
+    minimumClientVersion: MINIMUM_CLIENT_VERSION
   };
 }
 

@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v105-durable-sync-ledger-fix";
+const CACHE_NAME = "mdd-material-pro-v106-forced-update-health-check";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
@@ -18,8 +18,16 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
-    ).then(() => self.clients.claim())
+    ).then(() => self.clients.claim()).then(() =>
+      self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) =>
+        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 106 }))
+      )
+    )
   );
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
 
 self.addEventListener("fetch", (event) => {

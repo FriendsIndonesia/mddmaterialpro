@@ -12,5 +12,15 @@ assert.doesNotMatch(backend, /Backward-compatible import: merge rows/);
 assert.match(backend, /hasExplicitRemaining \? Math\.max\(0, remaining\)/);
 assert.match(backend, /!isNewRow && table\.key === "products" && !base/);
 assert.match(backend, /if \(!existingRowNumber && !isCreditRecord\) return/);
+assert.match(html, /const APP_VERSION = 106/);
+assert.match(html, /clientVersion: APP_VERSION/);
+assert.match(html, /requestGoogleWorkspaceJsonp\("health"/);
+assert.match(backend, /const MINIMUM_CLIENT_VERSION = 106/);
+assert.match(backend, /clientVersion < MINIMUM_CLIENT_VERSION/);
+assert.match(backend, /action === "health"/);
 
-console.log("sync-resilience.test.js: perlindungan refresh, perangkat lama, stok, dan saldo lulus");
+const worker = fs.readFileSync(__dirname + "/service-worker.js", "utf8");
+assert.match(worker, /mdd-material-pro-v106-forced-update-health-check/);
+assert.match(worker, /MDD_FORCE_RELOAD/);
+
+console.log("sync-resilience.test.js: refresh, forced update, health check, stok, dan saldo lulus");

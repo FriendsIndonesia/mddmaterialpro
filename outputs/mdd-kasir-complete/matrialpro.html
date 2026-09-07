@@ -795,6 +795,8 @@
 
       const STORAGE_KEY = "mdd_material_pro_clean_v1";
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
+      const APP_VERSION = 106;
+      const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
       const STORE_PRINT_NAME = "MUTIARA JAYA";
       const STORE_PRINT_ADDRESS = "JL. RAYA KARAKAL RT.03 / RW. 03, CIAWI, BOGOR";
@@ -1324,6 +1326,34 @@
         if (!cashierEditing && !purchaseEditing && !activeInput) renderAll();
       }
 
+      async function checkApplicationHealth() {
+        if (!state.profile?.onlineMode || !state.profile?.googleEndpoint || !navigator.onLine) return false;
+        try {
+          const health = await requestGoogleWorkspaceJsonp("health", { clientVersion: APP_VERSION });
+          if (!health?.ok) return false;
+          if (Number(health.minimumClientVersion || 0) > APP_VERSION) {
+            await forceApplicationUpdate();
+            return false;
+          }
+          return true;
+        } catch {
+          return false;
+        }
+      }
+
+      async function forceApplicationUpdate() {
+        // Jangan pernah membuang transaksi lokal: outbox sudah disimpan oleh saveState.
+        try {
+          if ("serviceWorker" in navigator) {
+            const registration = await navigator.serviceWorker.getRegistration();
+            if (registration) await registration.update();
+          }
+        } catch {}
+        const target = new URL(APP_CANONICAL_URL);
+        target.searchParams.set("appVersion", String(Date.now()));
+        location.replace(target.href);
+      }
+
       async function manualRefreshBackend(action, label) {
         if (isSyncing) return toast("Sinkronisasi masih berjalan. Tunggu sebentar lalu coba lagi.");
         if (hasLocalSyncChanges()) await syncGoogleWorkspace();
@@ -1341,8 +1371,14 @@
           location.reload();
         });
         try {
-          const registration = await navigator.serviceWorker.register("service-worker.js?v=105", { updateViaCache: "none" });
+          const registration = await navigator.serviceWorker.register(`service-worker.js?v=${APP_VERSION}`, { updateViaCache: "none" });
           await registration.update();
+          navigator.serviceWorker.addEventListener("message", (event) => {
+            if (event.data?.type === "MDD_FORCE_RELOAD") forceApplicationUpdate();
+          });
+          document.addEventListener("visibilitychange", () => {
+            if (!document.hidden) registration.update().catch(() => {});
+          });
         } catch (error) {
           console.warn("Pemeriksaan pembaruan aplikasi belum berhasil.", error);
         }
@@ -1447,6 +1483,9 @@
         autoPullTimer = setInterval(refreshGoogleWorkspaceState, 5000);
         window.onfocus = refreshGoogleWorkspaceState;
         window.ononline = () => { queueGoogleWorkspaceSync(); refreshGoogleWorkspaceState(); };
+        // Pemeriksaan kesehatan tidak menghalangi login atau pekerjaan user.
+        checkApplicationHealth();
+        setInterval(checkApplicationHealth, 60000);
       }
       function renderNav() {
         document.getElementById("mainNav").innerHTML = navItems.filter(([view]) => canAccessView(view)).map(([view, icon, label]) => `<button class="nav-link ${document.querySelector(".view-section.active")?.id === view ? "active" : ""}" data-view="${view}" type="button"><i class="bi ${icon}"></i>${label}</button>`).join("");
@@ -4086,7 +4125,7 @@
           const settings = buildSyncSettings();
           const sentState = JSON.parse(JSON.stringify(state));
           const requestId = await syncRequestId(changes, settings);
-          await fetch(state.profile.googleEndpoint, { method: "POST", mode: "no-cors", body: JSON.stringify({ app: "MDD Material Pro", syncProtocol: 3, requestId, account: state.profile.googleAccount || "friendsindonesia28@gmail.com", githubRepo: state.profile.githubRepo || "https://github.com/FriendsIndonesia/mddmaterialpro", sentAt: new Date().toISOString(), queue: state.syncQueue, changes, settings }) });
+          await fetch(state.profile.googleEndpoint, { method: "POST", mode: "no-cors", body: JSON.stringify({ app: "MDD Material Pro", clientVersion: APP_VERSION, syncProtocol: 3, requestId, account: state.profile.googleAccount || "friendsindonesia28@gmail.com", githubRepo: state.profile.githubRepo || "https://github.com/FriendsIndonesia/mddmaterialpro", sentAt: new Date().toISOString(), queue: state.syncQueue, changes, settings }) });
           const receipt = await requestGoogleWorkspaceJsonp("receipt", { requestId });
           if (!receipt?.processed) throw new Error("Backend belum mengonfirmasi paket sinkronisasi.");
           const refreshActions = syncRefreshActions(changes, settings);

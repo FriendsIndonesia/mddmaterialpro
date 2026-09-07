@@ -307,8 +307,15 @@ function applyLedgerChangesSafely_(ss, sheetName, kind, change, canonicalBefore)
     if (!row) return;
     const invoice = String(row.invoiceNo || row.id || "").trim();
     if (!invoice) return;
+    const existingRowNumber = invoiceRows()[invoice.toLowerCase()];
+    const method = String(row.method || "").toLowerCase();
+    const isCreditRecord = Number(row.due || 0) > 0 || (kind === "debt" ? /hutang|dp/.test(method) : /piutang|dp/.test(method));
+    // Transaksi tunai/lunas tetap tersimpan di Sales/Purchases, tetapi tidak
+    // memenuhi tab khusus Hutang/Piutang. Baris tagihan lama yang baru lunas
+    // tetap diperbarui agar histori pembayaran tidak hilang.
+    if (!existingRowNumber && !isCreditRecord) return;
     const values = [[ledgerDateValue_(row.date), ledgerDateValue_(row.dueDate), invoice, kind === "debt" ? (row.salesName || row.company || "-") : (row.customerName || "-"), Number(row.total || 0), Number(row.paid || 0), Number(row.returnAmount || 0), Number(row.due || 0), row.method || "Tempo", row.note || ""]];
-    const rowNumber = invoiceRows()[invoice.toLowerCase()] || sheet.getLastRow() + 1;
+    const rowNumber = existingRowNumber || sheet.getLastRow() + 1;
     sheet.getRange(rowNumber, 1, 1, headers.length).setValues(values);
     sheet.getRange(rowNumber, 1, 1, 2).setNumberFormat("dd/MM/yyyy");
     sheet.getRange(rowNumber, 5, 1, 4).setNumberFormat("#,##0");

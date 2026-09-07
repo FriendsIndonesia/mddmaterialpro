@@ -11,5 +11,6 @@ assert.match(backend, /Jangan menerima snapshot penuh dari aplikasi lama/);
 assert.doesNotMatch(backend, /Backward-compatible import: merge rows/);
 assert.match(backend, /hasExplicitRemaining \? Math\.max\(0, remaining\)/);
 assert.match(backend, /!isNewRow && table\.key === "products" && !base/);
+assert.match(backend, /if \(!existingRowNumber && !isCreditRecord\) return/);
 
 console.log("sync-resilience.test.js: perlindungan refresh, perangkat lama, stok, dan saldo lulus");

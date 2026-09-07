@@ -11,14 +11,14 @@ const TABLES = [
   { key: "discounts", sheet: "Discounts", fields: ["id", "name", "amount", "type", "active"] },
   { key: "cashAccounts", sheet: "CashAccounts", fields: ["id", "name", "balance"] },
   { key: "packages", sheet: "Packages", fields: ["id", "name", "items", "price"] },
-  { key: "sales", sheet: "Sales", fields: ["id", "invoiceNo", "date", "dueDate", "customerId", "customerName", "customerType", "customerAddress", "customerWhatsapp", "customerDeposit", "items", "method", "ongkir", "dp", "bankCharge", "cashReceived", "change", "status", "total", "due", "paid", "returnAmount", "depositRemaining", "note"] },
-  { key: "purchases", sheet: "Purchases", fields: ["id", "invoiceNo", "date", "dueDate", "supplierId", "salesName", "company", "whatsapp", "items", "method", "ongkir", "bankCharge", "cashReceived", "change", "status", "total", "due", "paid", "returnAmount", "note"] },
+  { key: "sales", sheet: "Sales", fields: ["id", "invoiceNo", "date", "dueDate", "customerId", "customerName", "customerType", "customerAddress", "customerWhatsapp", "customerDeposit", "items", "method", "ongkir", "discount", "dp", "bankCharge", "cashReceived", "change", "status", "total", "due", "paid", "returnAmount", "depositRemaining", "note"] },
+  { key: "purchases", sheet: "Purchases", fields: ["id", "invoiceNo", "supplierInvoiceNo", "date", "dueDate", "supplierId", "salesName", "company", "whatsapp", "items", "method", "ongkir", "discount", "dp", "bankCharge", "cashReceived", "change", "status", "total", "due", "paid", "returnAmount", "note"] },
   { key: "cashTx", sheet: "CashTransactions", fields: ["id", "date", "type", "category", "accountId", "amount", "note"] },
   { key: "payments", sheet: "Payments", fields: ["id", "date", "refId", "invoiceNo", "relation", "type", "amount", "remaining", "method", "note"] },
   { key: "stockMoves", sheet: "StockMoves", fields: ["id", "number", "date", "productId", "sku", "productName", "unit", "type", "systemStock", "physicalStock", "difference", "qty", "note"] },
   { key: "returns", sheet: "Returns", fields: ["id", "module", "date", "refId", "invoiceNo", "productId", "product", "qty", "unit", "primaryQty", "amount", "total", "method", "note"] },
-  { key: "pendingSales", sheet: "PendingSales", fields: ["id", "invoiceNo", "date", "customerId", "customerName", "customerType", "customerAddress", "customerWhatsapp", "method", "items", "ongkir", "dp", "bankCharge", "cashReceived", "change", "total", "note"] },
-  { key: "pendingPurchases", sheet: "PendingPurchases", fields: ["id", "invoiceNo", "date", "dueDate", "supplierId", "salesName", "company", "whatsapp", "method", "items", "ongkir", "bankCharge", "cashReceived", "change", "total", "note"] },
+  { key: "pendingSales", sheet: "PendingSales", fields: ["id", "invoiceNo", "date", "customerId", "customerName", "customerType", "customerAddress", "customerWhatsapp", "method", "items", "ongkir", "discount", "dp", "bankCharge", "cashReceived", "change", "total", "note"] },
+  { key: "pendingPurchases", sheet: "PendingPurchases", fields: ["id", "invoiceNo", "supplierInvoiceNo", "date", "dueDate", "supplierId", "salesName", "company", "whatsapp", "method", "items", "ongkir", "discount", "dp", "bankCharge", "cashReceived", "change", "total", "note"] },
   { key: "history", sheet: "History", fields: ["id", "date", "user", "action"] }
 ];
 
@@ -74,8 +74,10 @@ function doPost(e) {
       applyLedgerChangesSafely_(ss, "Hutang", "debt", purchaseChange, purchasesBefore);
       applyLedgerChangesSafely_(ss, "Piutang", "receivable", salesChange, salesBefore);
     } else if (!payload.changes || !payload.changes.tables) {
-      // Backward-compatible import: merge rows and never delete sheet-only data.
-      TABLES.forEach((table) => mergeTable_(ss, table, data[table.key] || []));
+      // Jangan menerima snapshot penuh dari aplikasi lama. Perangkat lama bisa
+      // membawa cache stok/saldo yang tertinggal lalu menimpa Sheet terbaru.
+      // Profil masih boleh dibaca, tetapi seluruh tabel transaksi tetap menjadi
+      // milik backend sampai aplikasi memperbarui diri ke protokol delta.
     } else {
       // Abaikan delta dari aplikasi lama. Versi lama dapat memiliki snapshot
       // cache yang salah dan tidak boleh lagi menimpa input langsung di Sheet.
@@ -209,7 +211,9 @@ function readLedgerRows_(ss, sheetName, kind) {
     const total = ledgerNumber_(pick(row, kind === "debt" ? ["hutangaktif", "totalhutang", "total"] : ["piutangaktif", "totalpiutang", "total"]));
     const paid = ledgerNumber_(pick(row, ["bayar", "dibayar", "paid"]));
     const returned = ledgerNumber_(pick(row, ["retur", "return", "returnamount"]));
-    const remaining = ledgerNumber_(pick(row, kind === "debt" ? ["sisahutang", "sisa"] : ["sisapiutang", "sisa"]));
+    const remainingRaw = pick(row, kind === "debt" ? ["sisahutang", "sisa"] : ["sisapiutang", "sisa"]);
+    const hasExplicitRemaining = remainingRaw !== "" && remainingRaw !== null && remainingRaw !== undefined;
+    const remaining = ledgerNumber_(remainingRaw);
     const relation = String(pick(row, kind === "debt" ? ["supplier", "namasupplier", "relasi"] : ["pelanggan", "customer", "namapelanggan", "relasi"]) || "").trim();
     const base = {
       // Nomor faktur warisan boleh sama. Suffix baris hanya menjadi ID internal
@@ -222,10 +226,11 @@ function readLedgerRows_(ss, sheetName, kind) {
       total: total || paid + returned + remaining,
       paid,
       returnAmount: returned,
-      due: remaining || Math.max(0, total - paid - returned),
+      // Nilai 0 adalah saldo sah (sudah lunas), bukan tanda kolom kosong.
+      due: hasExplicitRemaining ? Math.max(0, remaining) : Math.max(0, total - paid - returned),
       method: String(pick(row, ["metode", "method"]) || "Tempo"),
       note: String(pick(row, ["catatan", "note"]) || ""),
-      status: (remaining || Math.max(0, total - paid - returned)) > 0 ? (kind === "debt" ? "Hutang" : "Piutang") : "Lunas"
+      status: (hasExplicitRemaining ? remaining : Math.max(0, total - paid - returned)) > 0 ? (kind === "debt" ? "Hutang" : "Piutang") : "Lunas"
     };
     if (kind === "debt") base.salesName = relation;
     else base.customerName = relation;
@@ -519,10 +524,16 @@ function applyTableChanges_(ss, table, change) {
     const base = change.baseRows && change.baseRows[key];
     const values = table.fields.map((field, index) => {
       if (!Object.prototype.hasOwnProperty.call(row, field)) return currentValues[index];
+      // Baris produk lama tanpa baseline tidak boleh mengubah counter stok.
+      // Ini menutup jalur perangkat/cache lama yang pernah mengirim snapshot.
+      if (!isNewRow && table.key === "products" && !base && ["stockIn", "stockOut", "stock", "stockAkhir"].indexOf(field) >= 0) return currentValues[index];
       if (!base || !Object.prototype.hasOwnProperty.call(base, field)) return normalizeValue_(row[field]);
       const incoming = normalizeValue_(row[field]);
       const original = normalizeValue_(base[field]);
-      const current = normalizeValue_(currentValues[index]);
+      let current = normalizeValue_(currentValues[index]);
+      // The frontend normalizes empty numeric conversion cells to zero.
+      // Compare like-for-like so a first conversion is not discarded as a conflict.
+      if (table.key === "products" && ["conversionValue", "secondaryBuy", "secondaryPrice", "secondaryPrice2"].indexOf(field) >= 0 && current === "" && original === 0) current = 0;
       // Three-way merge: perubahan manual di Sheet pada kolom lain tidak boleh
       // tertimpa oleh snapshot lama dari salah satu perangkat.
       if (sameValue_(incoming, original)) return currentValues[index];

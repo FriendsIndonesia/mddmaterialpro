@@ -795,7 +795,7 @@
 
       const STORAGE_KEY = "mdd_material_pro_clean_v1";
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
-      const APP_VERSION = 106;
+      const APP_VERSION = 107;
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
       const STORE_PRINT_NAME = "MUTIARA JAYA";
@@ -979,16 +979,18 @@
         const isLedgerDebtRow = (row) => String(row?.id || "").startsWith("HUT-") || String(row?.source || row?.status || "").toLowerCase() === "hutang";
         const isLedgerReceivableRow = (row) => String(row?.id || "").startsWith("PIU-") || String(row?.source || row?.status || "").toLowerCase() === "piutang";
         data.sales = (data.sales || []).map((row) => {
+          const hasExplicitDue = [row.due, row.remaining, row.sisaPiutang, row.sisa].some((value) => value !== undefined && value !== null && value !== "");
           row.invoiceNo = String(row.invoiceNo ?? row.noFaktur ?? row.invoice ?? "").trim();
           row.customerName = String(row.customerName ?? row.pelanggan ?? row.customer ?? row.relation ?? "").trim();
           row.total = toNumber(row.total ?? row.piutangAktif ?? row.totalPiutang);
           row.paid = toNumber(row.paid ?? row.bayar ?? row.dibayar);
           row.returnAmount = toNumber(row.returnAmount ?? row.retur ?? row.returned);
           row.due = toNumber(row.due ?? row.remaining ?? row.sisaPiutang ?? row.sisa);
-          if (!row.due && row.total > row.paid + row.returnAmount) row.due = Math.max(0, row.total - row.paid - row.returnAmount);
+          if (!hasExplicitDue && row.total > row.paid + row.returnAmount) row.due = Math.max(0, row.total - row.paid - row.returnAmount);
           return row;
         }).filter((row) => isLedgerReceivableRow(row) || !deletedSales.has(row.id));
         data.purchases = (data.purchases || []).map((row) => {
+          const hasExplicitDue = [row.due, row.remaining, row.sisaHutang, row.sisa].some((value) => value !== undefined && value !== null && value !== "");
           row.invoiceNo = String(row.invoiceNo ?? row.noFaktur ?? row.invoice ?? "").trim();
           row.salesName = String(row.salesName ?? row.supplierName ?? row.supplier ?? row.relation ?? "").trim();
           row.company = String(row.company ?? row.namaPerusahaan ?? row.perusahaan ?? "").trim();
@@ -996,7 +998,7 @@
           row.paid = toNumber(row.paid ?? row.bayar ?? row.dibayar);
           row.returnAmount = toNumber(row.returnAmount ?? row.retur ?? row.returned);
           row.due = toNumber(row.due ?? row.remaining ?? row.sisaHutang ?? row.sisa);
-          if (!row.due && row.total > row.paid + row.returnAmount) row.due = Math.max(0, row.total - row.paid - row.returnAmount);
+          if (!hasExplicitDue && row.total > row.paid + row.returnAmount) row.due = Math.max(0, row.total - row.paid - row.returnAmount);
           return row;
         }).filter((row) => isLedgerDebtRow(row) || !deletedPurchases.has(row.id));
         return data;
@@ -2233,15 +2235,20 @@
             <div class="col-md-6"><label class="form-label">Produk</label><input value="${item.name}" class="form-control" readonly></div>
             <div class="col-md-3"><label class="form-label">Satuan</label><select name="unit" class="form-select">${unitOptions.map((u) => `<option ${u === normalizeUnit(item.unit) ? "selected" : ""}>${u}</option>`).join("")}</select></div>
             <div class="col-md-3"><label class="form-label">Qty</label><input name="qty" type="number" min="1" value="${item.qty}" class="form-control"></div>
-            ${mode === "purchase" ? `<div class="col-md-3"><label class="form-label">Harga HPP</label><input name="buy" type="number" min="0" value="${item.buy || 0}" class="form-control"></div>` : ""}
-            <div class="col-md-3"><label class="form-label">Harga Jual</label><input name="price" type="number" min="0" value="${item.price}" class="form-control"></div>
+            <div class="col-md-3"><label class="form-label">${mode === "purchase" ? "Harga Beli" : "Harga Jual"}</label><input name="price" type="number" min="0" value="${item.price}" class="form-control"></div>
             <div class="col-md-3"><label class="form-label">Subtotal</label><input value="${idr.format((item.qty * item.price) - (item.discount || 0))}" class="form-control" readonly></div>
             <div class="col-12"><label class="form-label">Note</label><input name="note" value="${item.note || ""}" class="form-control"></div>
           </div>`, (fd) => {
           item.unit = fd.get("unit");
           item.qty = Math.max(1, Number(fd.get("qty") || 1));
-          if (mode === "purchase") item.buy = Number(fd.get("buy") || 0);
           item.price = Number(fd.get("price") || 0);
+          if (mode === "purchase") {
+            const product = findProduct(item.productId);
+            item.buy = item.price;
+            item.baseBuy = productHasConversion(product) && String(item.unit).toLowerCase() === String(product.secondaryUnit).toLowerCase()
+              ? MDDConversion.convertPrimaryToSecondary(item.price, product.conversionValue)
+              : item.price;
+          }
           item.discount = 0;
           item.note = fd.get("note");
           closeModal();
@@ -2338,10 +2345,10 @@
                 <div class="col-md-8"><label class="form-label">Produk</label><input id="purchaseSearch" class="form-control" autocomplete="off" placeholder="Ketik nama produk, kode, kategori, atau scan barcode"></div>
                 <div class="col-md-4"><label class="form-label">Qty</label><input id="purchaseQty" type="number" value="1" min="1" class="form-control"></div>
                 <div class="col-12"><div id="purchaseSearchResults" class="search-results"></div></div>
-                <div class="col-md-3"><label class="form-label">Harga HPP</label><input id="purchaseHpp" type="number" min="0" class="form-control"></div>
-                <div class="col-md-3"><label class="form-label">Harga Beli 1</label><input id="purchasePrice1" type="number" min="0" class="form-control"></div>
+                <div class="col-md-3"><label class="form-label">HPP Saat Ini</label><input id="purchaseHpp" type="number" min="0" class="form-control" readonly></div>
+                <div class="col-md-3"><label class="form-label">Harga Beli Baru</label><input id="purchasePrice1" type="number" min="0" class="form-control"></div>
                 <div class="col-md-3"><label class="form-label">Harga Lainnya</label><input id="purchaseManualPrice" type="number" min="0" class="form-control" placeholder="Harga negosiasi"></div>
-                <div class="col-md-4"><label class="form-label">Gunakan Harga</label><select id="purchasePriceMode" class="form-select"><option value="hpp">Harga HPP</option><option value="price1">Harga Beli 1</option><option value="manual">Harga Lainnya</option></select></div>
+                <div class="col-md-4"><label class="form-label">Gunakan Harga</label><select id="purchasePriceMode" class="form-select"><option value="price1">Harga Beli Baru</option><option value="hpp">HPP Saat Ini</option><option value="manual">Harga Lainnya</option></select></div>
                 <div class="col-md-4"><button id="purchaseAddBtn" class="btn btn-outline-primary w-100"><i class="bi bi-plus-lg"></i> Tambah</button></div>
                 <div class="col-md-4"><button id="purchaseReturnBtn" class="btn btn-outline-danger w-100"><i class="bi bi-arrow-return-left"></i> Retur</button></div>
               </div>
@@ -2409,7 +2416,7 @@
         document.getElementById("purchaseUnit").disabled = false;
         document.getElementById("purchaseUnit").innerHTML = productUnitOptions(product, product.primaryUnit || product.unit);
         document.getElementById("purchaseHpp").value = product.buy;
-        document.getElementById("purchasePrice1").value = product.buy;
+        document.getElementById("purchasePrice1").value = productHppForUnit(product, product.primaryUnit || product.unit);
         document.getElementById("purchaseManualPrice").value = "";
         document.getElementById("purchaseSearchResults").innerHTML = "";
       }
@@ -2457,8 +2464,8 @@
         const selectedPrice = priceMode === "price1" ? price1 : priceMode === "manual" ? (manual || hpp) : hpp;
         addCartLine(purchaseCart, product, Number(document.getElementById("purchaseQty").value || 1), "purchase", {
           unit: document.getElementById("purchaseUnit").value,
-          buy: hpp,
-          baseBuy: productHasConversion(product) && document.getElementById("purchaseUnit").value === product.secondaryUnit ? MDDConversion.convertPrimaryToSecondary(hpp, product.conversionValue) : hpp,
+          buy: selectedPrice,
+          baseBuy: productHasConversion(product) && String(document.getElementById("purchaseUnit").value).toLowerCase() === String(product.secondaryUnit).toLowerCase() ? MDDConversion.convertPrimaryToSecondary(selectedPrice, product.conversionValue) : selectedPrice,
           price1,
           price2: 0,
           priceMode,
@@ -2524,8 +2531,10 @@
             p.stockOut = toNumber(p.stockOut);
             p.stock = previousStock + primaryQty;
             p.stockAkhir = p.stock;
-            p.buy = item.baseBuy || item.buy || item.price;
-            p.price = item.price1 || p.price;
+            // Transaksi pembelian hanya memperbarui Harga Beli/HPP. Harga Jual
+            // 1 dan Harga Jual 2 adalah keputusan penjualan dan tidak boleh
+            // berubah akibat pemilihan harga pada menu Purchase.
+            p.buy = toNumber(item.baseBuy ?? item.buy ?? item.price);
           }
           state.stockMoves.unshift({ id: uid("STK"), date: purchase.date, productId: item.productId, productName: p?.name || item.name, unit: item.unit, type: "Masuk", qty: item.primaryQty ?? item.qty, note: `Pembelian ${purchase.id}: ${item.qty} ${item.unit}` });
         });
@@ -3502,7 +3511,7 @@
             <div class="col-md-8"><label class="form-label">Nama Barang</label><input name="name" class="form-control" value="${editing?.name || ""}" required></div>
             <div class="col-md-4"><label class="form-label">Kategori</label><input name="category" list="masterProductCategories" class="form-control" value="${esc(editing?.category || "")}" placeholder="Ketik atau pilih kategori"><datalist id="masterProductCategories">${[...new Set([...materialCategories, ...state.categories.map((c) => c.name).filter(Boolean)])].map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist></div>
             <div class="col-md-2"><label class="form-label">Satuan</label><select name="unit" class="form-select">${unitOptions.map((u) => `<option ${u === normalizeUnit(editing?.unit) ? "selected" : ""}>${u}</option>`).join("")}</select></div>
-            <div class="col-md-3"><label class="form-label">Harga Beli</label><input name="buy" type="number" class="form-control" value="${editing?.buy || 0}" required></div>
+            <div class="col-md-3"><label class="form-label">Harga Beli / HPP</label><input name="buy" type="number" class="form-control" value="${editing?.buy || 0}" required></div>
             <div class="col-md-3"><label class="form-label">Harga Jual 1</label><input name="price" type="number" class="form-control" value="${editing?.price || 0}" required></div>
             <div class="col-md-3"><label class="form-label">Harga Jual 2</label><input name="price2" type="number" class="form-control" value="${editing?.price2 || 0}"></div>
             <div class="col-md-3"><label class="form-label">Stock Masuk (Histori)</label><input id="masterStockIn" name="stockIn" type="number" class="form-control" value="${stockInValue}" readonly></div>

@@ -1,7 +1,7 @@
 const APP_NAME = "MDD Material Pro";
 const OWNER_EMAIL = "friendsindonesia28@gmail.com";
 const GITHUB_REPO = "https://github.com/FriendsIndonesia/mddmaterialpro";
-const MINIMUM_CLIENT_VERSION = 106;
+const MINIMUM_CLIENT_VERSION = 107;
 
 const TABLES = [
   { key: "products", sheet: "Products", fields: ["id", "code", "name", "category", "unit", "primaryUnit", "secondaryUnit", "conversionValue", "secondaryBarcode", "buy", "secondaryBuy", "price", "price2", "secondaryPrice", "secondaryPrice2", "stockIn", "stockOut", "stock", "stockAkhir", "min", "active"] },

@@ -16,6 +16,9 @@ assert.match(html, /data-report-edit/);
 assert.match(html, /data-report-print/);
 assert.match(html, /function editReportTransaction/);
 assert.match(html, /function printReportTransaction/);
+assert.match(html, /Edit diblokir agar stok dan saldo piutang tetap akurat/);
+assert.match(html, /Edit diblokir agar stok dan saldo hutang tetap akurat/);
+assert.match(html, /type === "sales" \|\| String\(type \|\| ""\)\.toLowerCase\(\)\.includes\("penjualan"\)/);
 assert.doesNotMatch(html, /Preview Laporan Penjualan/);
 
 console.log("report-transaction-search.test.js: pencarian penjualan, pembelian, retur, relasi, dokumen, dan tanggal lulus");

@@ -795,7 +795,7 @@
 
       const STORAGE_KEY = "mdd_material_pro_clean_v1";
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
-      const APP_VERSION = 109;
+      const APP_VERSION = 110;
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
       const STORE_PRINT_NAME = "MUTIARA JAYA";
@@ -2143,6 +2143,7 @@
       function editCompletedSale(id) {
         const sale = state.sales.find((item) => item.id === id);
         if (!sale) return toast("Transaksi tidak ditemukan.");
+        if (state.returns.some((row) => row.refId === sale.id) || state.payments.some((row) => row.refId === sale.id && row.method !== "DP Penjualan")) return toast("Transaksi ini sudah memiliki retur atau pembayaran lanjutan. Edit diblokir agar stok dan saldo piutang tetap akurat.");
         editingSaleId = sale.id;
         activeCart = structuredClone(sale.items || []);
         saleDraft = { invoiceNo: sale.invoiceNo || sale.id, date: String(sale.date || today()).slice(0, 10), ongkir: sale.ongkir || 0, discount: sale.discount || 0, dp: sale.dp || 0, cashReceived: sale.dp || sale.cashReceived || 0, note: sale.note || "", method: toNumber(sale.dp) > 0 ? "DP (Uang Muka)" : (sale.method || "Cash"), customerId: sale.customerId || "", customerName: sale.customerName || "", customerType: sale.customerType || "", customerAddress: sale.customerAddress || "", customerWhatsapp: sale.customerWhatsapp || "" };
@@ -2153,6 +2154,7 @@
       function editCompletedPurchase(id) {
         const purchase = state.purchases.find((item) => item.id === id);
         if (!purchase) return toast("Transaksi pembelian tidak ditemukan.");
+        if (state.returns.some((row) => row.refId === purchase.id) || state.payments.some((row) => row.refId === purchase.id && row.method !== "DP Pembelian")) return toast("Transaksi ini sudah memiliki retur atau pembayaran lanjutan. Edit diblokir agar stok dan saldo hutang tetap akurat.");
         editingPurchaseId = purchase.id;
         purchaseCart = structuredClone(purchase.items || []);
         purchaseDraft = { invoiceNo: purchase.invoiceNo || purchase.id, supplierInvoiceNo: purchase.supplierInvoiceNo || "", date: String(purchase.date || today()).slice(0, 10), dueDate: String(purchase.dueDate || "").slice(0, 10), ongkir: purchase.ongkir || 0, discount: purchase.discount || 0, dp: purchase.dp || 0, bankCharge: purchase.bankCharge || 0, cashReceived: purchase.cashReceived || purchase.dp || 0, note: purchase.note || "", method: purchase.method || "Cash", supplierId: purchase.supplierId || "", salesName: purchase.salesName || "", company: purchase.company || "", whatsapp: purchase.whatsapp || "" };
@@ -4043,7 +4045,7 @@
       function printDoc(title, doc, type) {
         const printKey = `${type}:${doc.id || doc.invoiceNo}`;
         const copyStage = receiptPrintStages.get(printKey) || 1;
-        const isSale = type === "sales";
+        const isSale = type === "sales" || String(type || "").toLowerCase().includes("penjualan");
         const relation = isSale ? (doc.customerName || relationName(doc.customerId)) : (doc.salesName || personName(state.suppliers, doc.supplierId));
         const relationAddress = isSale ? (doc.customerAddress || "-") : (doc.company || "-");
         const relationWhatsapp = isSale ? (doc.customerWhatsapp || "-") : (doc.whatsapp || "-");

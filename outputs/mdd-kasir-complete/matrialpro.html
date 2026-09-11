@@ -795,7 +795,7 @@
 
       const STORAGE_KEY = "mdd_material_pro_clean_v1";
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
-      const APP_VERSION = 108;
+      const APP_VERSION = 109;
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
       const STORE_PRINT_NAME = "MUTIARA JAYA";
@@ -850,9 +850,10 @@
       let activeCart = [];
       let purchaseCart = [];
       let editingSaleId = "";
+      let editingPurchaseId = "";
       const receiptPrintStages = new Map();
       let saleDraft = { invoiceNo: "", ongkir: 0, discount: 0, dp: 0, cashReceived: 0, note: "", method: "Cash", customerId: "", customerName: "", customerType: "", customerAddress: "", customerWhatsapp: "" };
-      let purchaseDraft = { invoiceNo: "", supplierInvoiceNo: "", dueDate: "", ongkir: 0, discount: 0, dp: 0, bankCharge: 0, cashReceived: 0, note: "", method: "Cash", supplierId: "", salesName: "", company: "", whatsapp: "" };
+      let purchaseDraft = { invoiceNo: "", supplierInvoiceNo: "", date: "", dueDate: "", ongkir: 0, discount: 0, dp: 0, bankCharge: 0, cashReceived: 0, note: "", method: "Cash", supplierId: "", salesName: "", company: "", whatsapp: "" };
       let selectedSaleProductId = "";
       let saleProductDraft = { sku: "", search: "", unit: "", qty: 1, hpp: "", price1: "", price2: "", manualPrice: "", priceMode: "price1" };
       let selectedPurchaseProductId = "";
@@ -1809,7 +1810,7 @@
         return purchaseDraft;
       }
       function resetPurchaseDraft() {
-        purchaseDraft = { invoiceNo: nextPurchaseNo(), supplierInvoiceNo: "", dueDate: "", ongkir: 0, discount: 0, dp: 0, bankCharge: 0, cashReceived: 0, note: "", method: "Cash", supplierId: "", salesName: "", company: "", whatsapp: "" };
+        purchaseDraft = { invoiceNo: nextPurchaseNo(), supplierInvoiceNo: "", date: today(), dueDate: "", ongkir: 0, discount: 0, dp: 0, bankCharge: 0, cashReceived: 0, note: "", method: "Cash", supplierId: "", salesName: "", company: "", whatsapp: "" };
         selectedPurchaseProductId = "";
       }
       function cartTotal(cart) {
@@ -2149,6 +2150,48 @@
         document.getElementById("saleDate")?.scrollIntoView({ behavior: "smooth", block: "center" });
         toast(`Invoice ${sale.invoiceNo || sale.id} siap diedit. Klik Simpan & Bayar untuk menyimpan perubahan.`);
       }
+      function editCompletedPurchase(id) {
+        const purchase = state.purchases.find((item) => item.id === id);
+        if (!purchase) return toast("Transaksi pembelian tidak ditemukan.");
+        editingPurchaseId = purchase.id;
+        purchaseCart = structuredClone(purchase.items || []);
+        purchaseDraft = { invoiceNo: purchase.invoiceNo || purchase.id, supplierInvoiceNo: purchase.supplierInvoiceNo || "", date: String(purchase.date || today()).slice(0, 10), dueDate: String(purchase.dueDate || "").slice(0, 10), ongkir: purchase.ongkir || 0, discount: purchase.discount || 0, dp: purchase.dp || 0, bankCharge: purchase.bankCharge || 0, cashReceived: purchase.cashReceived || purchase.dp || 0, note: purchase.note || "", method: purchase.method || "Cash", supplierId: purchase.supplierId || "", salesName: purchase.salesName || "", company: purchase.company || "", whatsapp: purchase.whatsapp || "" };
+        setView("purchaseView", true);
+        document.getElementById("purchaseDate")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        toast(`Pembelian ${purchase.invoiceNo || purchase.id} siap diedit. Klik Simpan untuk menyimpan perubahan.`);
+      }
+      function editReturnTransaction(id) {
+        const row = state.returns.find((item) => item.id === id);
+        if (!row) return toast("Data retur tidak ditemukan.");
+        openModal(`Edit ${row.module === "Penjualan" ? "Retur Penjualan" : "Retur Pembelian"}`, `<div class="row g-3"><div class="col-md-6"><label class="form-label">No. Transaksi/Faktur</label><input class="form-control" value="${esc(row.invoiceNo || row.refId || "-")}" readonly></div><div class="col-md-6"><label class="form-label">Produk</label><input class="form-control" value="${esc(row.product || findProduct(row.productId)?.name || "-")}" readonly></div><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${esc(String(row.date || today()).slice(0, 10))}" class="form-control" required></div><div class="col-md-4"><label class="form-label">Qty</label><input class="form-control" value="${esc(number.format(toNumber(row.qty)))} ${esc(row.unit || "")}" readonly></div><div class="col-md-4"><label class="form-label">Nilai Retur</label><input class="form-control" value="${esc(idr.format(toNumber(row.total || row.amount)))}" readonly></div><div class="col-md-6"><label class="form-label">Metode Retur</label><select name="method" class="form-select">${payMethods.map((method) => `<option ${method === row.method ? "selected" : ""}>${method}</option>`).join("")}</select></div><div class="col-md-6"><label class="form-label">Catatan/Alasan</label><input name="note" class="form-control" value="${esc(row.note || "")}" required></div></div>`, (fd) => { row.date = fd.get("date"); row.method = fd.get("method"); row.note = String(fd.get("note") || "").trim(); state.syncQueue.push({ type: "return", id: row.id }); saveState(`${row.module === "Penjualan" ? "Retur penjualan" : "Retur pembelian"} ${row.invoiceNo || row.id} diperbarui`); closeModal(); renderAll(); toast("Data retur diperbarui dan masuk antrean sinkronisasi backend."); }, "Simpan Perubahan");
+      }
+      function editReportTransaction(key) {
+        const separator = String(key || "").indexOf(":");
+        const type = String(key || "").slice(0, separator);
+        const id = String(key || "").slice(separator + 1);
+        if (type === "sales") { setView("cashierView", true); return editCompletedSale(id); }
+        if (type === "purchases") return editCompletedPurchase(id);
+        if (type === "returns") return editReturnTransaction(id);
+        toast("Jenis transaksi tidak dikenali.");
+      }
+      function printReportTransaction(key, button) {
+        const separator = String(key || "").indexOf(":");
+        const type = String(key || "").slice(0, separator);
+        const id = String(key || "").slice(separator + 1);
+        if (type === "sales" || type === "purchases") {
+          const row = (type === "sales" ? state.sales : state.purchases).find((item) => item.id === id);
+          if (!row) return toast("Transaksi tidak ditemukan.");
+          printDoc(type === "sales" ? "Faktur Penjualan" : "Faktur Pembelian", row, type);
+          const nextStage = receiptPrintStages.get(`${type}:${row.id || row.invoiceNo}`) || 1;
+          if (button) button.innerHTML = `<i class="bi bi-printer"></i> Print Lembar ${nextStage}`;
+          return;
+        }
+        const row = state.returns.find((item) => item.id === id);
+        if (!row) return toast("Data retur tidak ditemukan.");
+        const source = row.module === "Penjualan" ? state.sales.find((item) => item.id === row.refId) : state.purchases.find((item) => item.id === row.refId);
+        const printable = { ...source, ...row, id: row.id, invoiceNo: row.invoiceNo || source?.invoiceNo || row.id, items: [{ productId: row.productId, name: row.product || findProduct(row.productId)?.name || "Produk retur", unit: row.unit || "", qty: toNumber(row.qty), price: toNumber(row.amount || row.total) / Math.max(1, toNumber(row.qty)) }], total: toNumber(row.total || row.amount), ongkir: 0, discount: 0, due: 0, dp: 0, cashReceived: toNumber(row.total || row.amount), change: 0, method: row.method || "Cash" };
+        printDoc(row.module === "Penjualan" ? "Retur Penjualan" : "Retur Pembelian", printable, `returns-${row.module || "transaksi"}`);
+      }
       function selectSaleProduct(productId) {
         const product = findProduct(productId);
         if (!product) return;
@@ -2337,7 +2380,7 @@
           <div class="content-grid">
             <section class="panel"><div class="panel-header"><h3>Cari Barang</h3><button id="quickNewProductBtn" class="btn btn-outline-primary btn-sm"><i class="bi bi-plus-lg"></i> Barang Baru</button></div>
               <div class="row g-3 align-items-end">
-                <div class="col-md-4"><label class="form-label">Tanggal</label><input id="purchaseDate" type="date" value="${today()}" class="form-control"></div>
+                <div class="col-md-4"><label class="form-label">Tanggal</label><input id="purchaseDate" type="date" value="${esc(purchaseDraft.date || today())}" class="form-control"></div>
                 <div class="col-md-4"><label class="form-label">Nama Perusahaan</label><input id="purchaseCompany" list="purchaseCompanyList" class="form-control" value="${esc(purchaseDraft.company)}" autocomplete="off" placeholder="Cari perusahaan supplier"><datalist id="purchaseCompanyList">${supplierCompanyOptions()}</datalist></div>
                 <div class="col-md-4"><label class="form-label">Nama Sales</label><input id="purchaseSalesName" class="form-control" value="${esc(purchaseDraft.salesName)}" readonly></div>
                 <div class="col-md-4"><label class="form-label">Whatsapp</label><input id="purchaseWhatsapp" class="form-control" value="${esc(purchaseDraft.whatsapp)}" readonly></div>
@@ -2381,6 +2424,7 @@
         document.getElementById("purchaseUnit").onchange = updatePurchaseUnitFields;
         document.getElementById("purchaseCompany").oninput = updatePurchaseSupplierFromCompany;
         document.getElementById("purchaseCompany").onchange = updatePurchaseSupplierFromCompany;
+        document.getElementById("purchaseDate").oninput = (e) => { purchaseDraft.date = e.target.value; };
         document.getElementById("purchaseDueDate").oninput = (e) => { purchaseDraft.dueDate = e.target.value; };
         document.getElementById("purchaseSupplierInvoiceNo").oninput = (e) => { purchaseDraft.supplierInvoiceNo = e.target.value; };
         document.getElementById("purchasePayMethod").onchange = (e) => { purchaseDraft.method = e.target.value; updatePurchaseDraftTotals(); };
@@ -2391,7 +2435,7 @@
         document.getElementById("purchaseNote").oninput = (e) => { purchaseDraft.note = e.target.value; };
         document.getElementById("refreshPurchaseInvoiceBtn").onclick = () => { purchaseDraft.invoiceNo = nextPurchaseNo(); renderAll(); };
         document.getElementById("quickNewProductBtn").onclick = () => openProductModal();
-        document.getElementById("purchaseCancelBtn").onclick = () => { purchaseCart = []; resetPurchaseDraft(); renderAll(); toast("Pembelian dibatalkan."); };
+        document.getElementById("purchaseCancelBtn").onclick = () => { purchaseCart = []; editingPurchaseId = ""; resetPurchaseDraft(); renderAll(); toast("Pembelian dibatalkan."); };
         document.getElementById("purchasePendingBtn").onclick = pendingPurchase;
         document.getElementById("purchaseSaveBtn").onclick = () => checkoutPurchase(false);
         document.getElementById("purchasePayBtn").onclick = () => checkoutPurchase(true);
@@ -2519,9 +2563,26 @@
         if (isPaidPurchase && isCashMethod(method) && toNumber(purchaseDraft.cashReceived) < total) return toast("Uang diterima kurang dari Total Transaksi.");
         if (isDpPurchase && (purchaseDraft.dp <= 0 || purchaseDraft.dp >= total)) return toast("DP harus lebih dari Rp 0 dan lebih kecil dari Total Transaksi.");
         purchaseCheckoutBusy = true;
+        const previousPurchase = editingPurchaseId ? state.purchases.find((item) => item.id === editingPurchaseId) : null;
+        if (previousPurchase) {
+          (previousPurchase.items || []).forEach((item) => {
+            const product = findProduct(item.productId);
+            if (product) {
+              const restoredQty = toNumber(item.primaryQty ?? productQuantityInPrimary(product, item.qty, item.unit));
+              product.stockIn = Math.max(0, toNumber(product.stockIn) - restoredQty);
+              product.stock = Math.max(0, stockAkhirProduk(product) - restoredQty);
+              product.stockAkhir = product.stock;
+            }
+          });
+          state.stockMoves.filter((move) => String(move.note || "").startsWith(`Pembelian ${previousPurchase.id}`)).forEach((move) => markExplicitDeletion("stockMoves", move.id));
+          state.payments.filter((payment) => payment.refId === previousPurchase.id && payment.method === "DP Pembelian").forEach((payment) => markExplicitDeletion("payments", payment.id));
+          state.stockMoves = state.stockMoves.filter((move) => !String(move.note || "").startsWith(`Pembelian ${previousPurchase.id}`));
+          state.payments = state.payments.filter((payment) => !(payment.refId === previousPurchase.id && payment.method === "DP Pembelian"));
+          state.purchases = state.purchases.filter((item) => item.id !== previousPurchase.id);
+        }
         const paid = isDpPurchase ? purchaseDraft.dp : (isPaidPurchase ? total : 0);
         const due = Math.max(0, total - paid);
-        const purchase = { id: uid("PUR"), createdAt: new Date().toISOString(), invoiceNo: purchaseDraft.invoiceNo, supplierInvoiceNo: purchaseDraft.supplierInvoiceNo, date: document.getElementById("purchaseDate").value, dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", items: structuredClone(purchaseCart), method, ongkir: purchaseDraft.ongkir, discount: purchaseDraft.discount, dp: purchaseDraft.dp, bankCharge: purchaseDraft.bankCharge, cashReceived: usesReceivedAmount(method) ? purchaseDraft.cashReceived : (isPaidPurchase ? total : 0), change: purchaseCashChange(), note: purchaseDraft.note, status: due > 0 ? "Hutang" : "Lunas", total, due, paid, returnAmount: 0 };
+        const purchase = { id: previousPurchase?.id || uid("PUR"), createdAt: previousPurchase?.createdAt || new Date().toISOString(), invoiceNo: previousPurchase?.invoiceNo || purchaseDraft.invoiceNo, supplierInvoiceNo: purchaseDraft.supplierInvoiceNo, date: document.getElementById("purchaseDate").value, dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", items: structuredClone(purchaseCart), method, ongkir: purchaseDraft.ongkir, discount: purchaseDraft.discount, dp: purchaseDraft.dp, bankCharge: purchaseDraft.bankCharge, cashReceived: usesReceivedAmount(method) ? purchaseDraft.cashReceived : (isPaidPurchase ? total : 0), change: purchaseCashChange(), note: purchaseDraft.note, status: due > 0 ? "Hutang" : "Lunas", total, due, paid, returnAmount: previousPurchase?.returnAmount || 0 };
         purchase.items.forEach((item) => {
           const p = findProduct(item.productId);
           if (p) {
@@ -2541,6 +2602,7 @@
         });
         state.purchases.unshift(purchase);
         state.syncQueue.push({ type: "purchase", id: purchase.id });
+        editingPurchaseId = "";
         purchaseCart = [];
         resetPurchaseDraft();
         saveState(`Pembelian ${purchase.id} disimpan`);
@@ -3085,11 +3147,13 @@
       function reportTransactionDatabaseRows(query = reportTransactionQuery) {
         const entries = [];
         state.sales.filter(isCashierSale).forEach((row) => entries.push({
+          _type: "sales", _id: row.id,
           jenis: "Penjualan", tanggal: row.date, no_dokumen: row.invoiceNo || row.id,
           relasi: row.customerName || personName(state.customers, row.customerId),
           rincian_produk: transactionProductDetails(row), qty: (row.items || []).reduce((sum, item) => sum + toNumber(item.qty), 0), total: toNumber(row.total)
         }));
         state.purchases.filter(isPurchaseTransaction).forEach((row) => entries.push({
+          _type: "purchases", _id: row.id,
           jenis: "Pembelian", tanggal: row.date, no_dokumen: row.supplierInvoiceNo || row.invoiceNo || row.id,
           relasi: row.company || row.salesName || personName(state.suppliers, row.supplierId),
           rincian_produk: transactionProductDetails(row), qty: (row.items || []).reduce((sum, item) => sum + toNumber(item.qty), 0), total: toNumber(row.total)
@@ -3100,6 +3164,7 @@
             ? state.sales.find((item) => item.id === row.refId || String(item.invoiceNo) === String(row.invoiceNo))
             : state.purchases.find((item) => item.id === row.refId || String(item.invoiceNo) === String(row.invoiceNo) || String(item.supplierInvoiceNo) === String(row.invoiceNo));
           entries.push({
+            _type: "returns", _id: row.id,
             jenis: isSaleReturn ? "Retur Penjualan" : "Retur Pembelian", tanggal: row.date,
             no_dokumen: row.invoiceNo || source?.invoiceNo || row.refId || row.id,
             relasi: isSaleReturn ? (source?.customerName || personName(state.customers, source?.customerId)) : (source?.company || source?.salesName || personName(state.suppliers, source?.supplierId)),
@@ -3119,11 +3184,13 @@
         if (!target) return;
         const query = String(reportTransactionQuery || "").trim();
         if (!query) {
-          target.innerHTML = '<div class="text-secondary text-center py-3">Ketik nama pelanggan/supplier, nomor invoice/faktur, tanggal, bulan, atau tahun.</div>';
+          target.innerHTML = "";
           return;
         }
-        const rows = reportTransactionDatabaseRows(query);
-        target.innerHTML = `<div class="small text-secondary mb-2"><strong>${number.format(rows.length)} data ditemukan</strong>${rows.length === 200 ? " (maksimal 200 hasil teratas)" : ""}</div>${genericTable(rows, ["jenis", "tanggal", "no_dokumen", "relasi", "rincian_produk", "qty", "total"])}`;
+        const rows = reportTransactionDatabaseRows(query).map((row) => ({ ...row, aksi: `<div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-outline-primary" type="button" data-report-edit="${esc(row._type)}:${esc(row._id)}"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-secondary" type="button" data-report-print="${esc(row._type)}:${esc(row._id)}"><i class="bi bi-printer"></i> Print</button></div>` }));
+        target.innerHTML = `<div class="small text-secondary mb-2"><strong>${number.format(rows.length)} data ditemukan</strong>${rows.length === 200 ? " (maksimal 200 hasil teratas)" : ""}</div>${genericTable(rows, ["jenis", "tanggal", "no_dokumen", "relasi", "rincian_produk", "qty", "total", "aksi"])}`;
+        target.querySelectorAll("[data-report-edit]").forEach((button) => button.onclick = () => editReportTransaction(button.dataset.reportEdit));
+        target.querySelectorAll("[data-report-print]").forEach((button) => button.onclick = () => printReportTransaction(button.dataset.reportPrint, button));
         makeTablesMobileFriendly(target);
       }
 
@@ -3182,8 +3249,7 @@
           </div>
           <div class="audit-box mb-3"><strong>Rincian laba:</strong> penjualan barang ${idr.format(salesRevenue)} − HPP barang terjual ${idr.format(cogs)} = laba kotor ${idr.format(grossProfit)}; dikurangi biaya operasional ${idr.format(expenses)} = <strong>${idr.format(netProfit)}</strong>.</div>
           <div class="module-grid">${reports.map((report, i) => `<div class="module-card"><div class="d-flex justify-content-between gap-2 align-items-start"><h4>${report.title}</h4><span class="chip">${report.period}</span></div><strong class="report-value">${report.value}</strong><p class="report-note">${report.note}</p><p class="small text-secondary mb-2">${report.rows.length} baris data siap diexport.</p><div class="d-flex gap-2 flex-wrap"><button class="btn btn-outline-primary btn-sm" data-report-index="${i}"><i class="bi bi-filetype-pdf"></i> PDF</button><button class="btn btn-outline-success btn-sm" data-report-excel-index="${i}"><i class="bi bi-file-earmark-excel"></i> Excel</button></div></div>`).join("")}</div>
-          <section class="panel mt-3"><div class="panel-header"><div><h3>Laporan Penjualan & Pembelian</h3><small class="text-secondary">Pencarian terpadu seluruh transaksi dan retur</small></div><span class="chip"><i class="bi bi-search"></i> Database transaksi</span></div><div class="row g-2 align-items-end"><div class="col-md-10"><label class="form-label" for="reportTransactionSearch">Nama pelanggan/supplier, no. invoice/faktur, tanggal, bulan, atau tahun</label><input id="reportTransactionSearch" class="form-control" value="${esc(reportTransactionQuery)}" autocomplete="off" placeholder="Contoh: Tabna, INV-001, 12/09/2026, September, atau 2026"></div><div class="col-md-2"><button id="clearReportTransactionSearch" class="btn btn-outline-secondary w-100" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button></div></div><div id="reportTransactionSearchResults" class="mt-3"></div></section>
-          <section class="panel mt-3" id="reportPrintable"><div class="panel-header"><h3>Preview Laporan Penjualan</h3><span class="chip">${periodLabel}</span></div>${salesTable(visibleReportRows("reportsView", "sales", reportSales))}</section>`;
+          <section class="panel mt-3"><div class="panel-header"><div><h3>Laporan Penjualan & Pembelian</h3><small class="text-secondary">Pencarian terpadu seluruh transaksi dan retur</small></div><span class="chip"><i class="bi bi-search"></i> Database transaksi</span></div><div class="row g-2 align-items-end"><div class="col-md-10"><label class="form-label" for="reportTransactionSearch">Nama pelanggan/supplier, no. invoice/faktur, tanggal, bulan, atau tahun</label><input id="reportTransactionSearch" class="form-control" value="${esc(reportTransactionQuery)}" autocomplete="off" placeholder="Ketik nama pelanggan/supplier, nomor invoice/faktur, tanggal, bulan, atau tahun."></div><div class="col-md-2"><button id="clearReportTransactionSearch" class="btn btn-outline-secondary w-100" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button></div></div><div id="reportTransactionSearchResults" class="mt-3"></div></section>`;
         document.getElementById("reportPeriodFilter").onchange = (event) => { reportPeriod = event.target.value; renderReports(); makeTablesMobileFriendly(document.getElementById("reportsView")); };
         document.querySelectorAll("[data-report-index]").forEach((btn) => btn.onclick = () => { const report = reports[btn.dataset.reportIndex]; exportReportPdf(`${report.title} - ${report.period}`, report.rows); });
         document.querySelectorAll("[data-report-excel-index]").forEach((btn) => btn.onclick = () => { const report = reports[btn.dataset.reportExcelIndex]; exportReportExcel(`${report.title} - ${report.period}`, report.rows); });
@@ -3193,7 +3259,6 @@
         document.getElementById("reportTransactionSearch").oninput = (event) => { reportTransactionQuery = event.target.value; renderReportTransactionSearch(); };
         document.getElementById("clearReportTransactionSearch").onclick = () => { reportTransactionQuery = ""; document.getElementById("reportTransactionSearch").value = ""; renderReportTransactionSearch(); document.getElementById("reportTransactionSearch").focus(); };
         renderReportTransactionSearch();
-        bindCompletedSalesActions();
       }
 
       function renderMaster() {

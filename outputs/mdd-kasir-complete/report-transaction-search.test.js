@@ -11,6 +11,11 @@ assert.match(html, /Retur Penjualan/);
 assert.match(html, /Retur Pembelian/);
 assert.match(html, /reportSearchDateTerms\(row\.tanggal\)/);
 assert.match(html, /terms\.every\(\(term\) => haystack\.includes\(term\)\)/);
-assert.match(html, /renderReportTransactionSearch\(\);[\s\S]*bindCompletedSalesActions\(\)/);
+assert.match(html, /placeholder="Ketik nama pelanggan\/supplier, nomor invoice\/faktur, tanggal, bulan, atau tahun\."/);
+assert.match(html, /data-report-edit/);
+assert.match(html, /data-report-print/);
+assert.match(html, /function editReportTransaction/);
+assert.match(html, /function printReportTransaction/);
+assert.doesNotMatch(html, /Preview Laporan Penjualan/);
 
 console.log("report-transaction-search.test.js: pencarian penjualan, pembelian, retur, relasi, dokumen, dan tanggal lulus");

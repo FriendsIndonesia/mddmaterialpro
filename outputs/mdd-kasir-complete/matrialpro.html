@@ -795,7 +795,7 @@
 
       const STORAGE_KEY = "mdd_material_pro_clean_v1";
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
-      const APP_VERSION = 107;
+      const APP_VERSION = 108;
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
       const STORE_PRINT_NAME = "MUTIARA JAYA";
@@ -863,6 +863,7 @@
       let financeDatabaseQuery = "";
       let financeProductQuery = "";
       let reportPeriod = "bulanan";
+      let reportTransactionQuery = "";
       const financeBulkSelection = new Set();
       let salesChart = null;
       let syncTimer = null;
@@ -3063,6 +3064,69 @@
         return labels[reportPeriod] || labels.bulanan;
       }
 
+      function reportSearchDateTerms(value) {
+        const date = reportRowDate({ date: value });
+        if (!date) return String(value || "");
+        return [
+          String(value || ""), displayDate(value),
+          new Intl.DateTimeFormat("id-ID", { day: "numeric", month: "long", year: "numeric" }).format(date),
+          new Intl.DateTimeFormat("id-ID", { month: "long", year: "numeric" }).format(date),
+          String(date.getFullYear()), String(date.getMonth() + 1).padStart(2, "0")
+        ].join(" ");
+      }
+
+      function transactionProductDetails(row) {
+        if (Array.isArray(row?.items) && row.items.length) {
+          return row.items.map((item) => `${item.name || item.product || findProduct(item.productId)?.name || "Produk"} × ${number.format(toNumber(item.qty))} ${item.unit || ""}`.trim()).join("; ");
+        }
+        return row?.product || row?.productName || row?.note || "-";
+      }
+
+      function reportTransactionDatabaseRows(query = reportTransactionQuery) {
+        const entries = [];
+        state.sales.filter(isCashierSale).forEach((row) => entries.push({
+          jenis: "Penjualan", tanggal: row.date, no_dokumen: row.invoiceNo || row.id,
+          relasi: row.customerName || personName(state.customers, row.customerId),
+          rincian_produk: transactionProductDetails(row), qty: (row.items || []).reduce((sum, item) => sum + toNumber(item.qty), 0), total: toNumber(row.total)
+        }));
+        state.purchases.filter(isPurchaseTransaction).forEach((row) => entries.push({
+          jenis: "Pembelian", tanggal: row.date, no_dokumen: row.supplierInvoiceNo || row.invoiceNo || row.id,
+          relasi: row.company || row.salesName || personName(state.suppliers, row.supplierId),
+          rincian_produk: transactionProductDetails(row), qty: (row.items || []).reduce((sum, item) => sum + toNumber(item.qty), 0), total: toNumber(row.total)
+        }));
+        state.returns.forEach((row) => {
+          const isSaleReturn = String(row.module || "").toLowerCase() === "penjualan";
+          const source = isSaleReturn
+            ? state.sales.find((item) => item.id === row.refId || String(item.invoiceNo) === String(row.invoiceNo))
+            : state.purchases.find((item) => item.id === row.refId || String(item.invoiceNo) === String(row.invoiceNo) || String(item.supplierInvoiceNo) === String(row.invoiceNo));
+          entries.push({
+            jenis: isSaleReturn ? "Retur Penjualan" : "Retur Pembelian", tanggal: row.date,
+            no_dokumen: row.invoiceNo || source?.invoiceNo || row.refId || row.id,
+            relasi: isSaleReturn ? (source?.customerName || personName(state.customers, source?.customerId)) : (source?.company || source?.salesName || personName(state.suppliers, source?.supplierId)),
+            rincian_produk: transactionProductDetails(row), qty: toNumber(row.qty), total: toNumber(row.total || row.amount)
+          });
+        });
+        const terms = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+        if (!terms.length) return [];
+        return entries.filter((row) => {
+          const haystack = [row.jenis, row.no_dokumen, row.relasi, row.rincian_produk, reportSearchDateTerms(row.tanggal)].join(" ").toLowerCase();
+          return terms.every((term) => haystack.includes(term));
+        }).sort((a, b) => (reportRowDate(b)?.getTime() || 0) - (reportRowDate(a)?.getTime() || 0)).slice(0, 200);
+      }
+
+      function renderReportTransactionSearch() {
+        const target = document.getElementById("reportTransactionSearchResults");
+        if (!target) return;
+        const query = String(reportTransactionQuery || "").trim();
+        if (!query) {
+          target.innerHTML = '<div class="text-secondary text-center py-3">Ketik nama pelanggan/supplier, nomor invoice/faktur, tanggal, bulan, atau tahun.</div>';
+          return;
+        }
+        const rows = reportTransactionDatabaseRows(query);
+        target.innerHTML = `<div class="small text-secondary mb-2"><strong>${number.format(rows.length)} data ditemukan</strong>${rows.length === 200 ? " (maksimal 200 hasil teratas)" : ""}</div>${genericTable(rows, ["jenis", "tanggal", "no_dokumen", "relasi", "rincian_produk", "qty", "total"])}`;
+        makeTablesMobileFriendly(target);
+      }
+
       function renderReports() {
         const periodLabel = reportPeriodText();
         const reportSales = rowsForReportPeriod(state.sales.filter(isCashierSale));
@@ -3118,6 +3182,7 @@
           </div>
           <div class="audit-box mb-3"><strong>Rincian laba:</strong> penjualan barang ${idr.format(salesRevenue)} − HPP barang terjual ${idr.format(cogs)} = laba kotor ${idr.format(grossProfit)}; dikurangi biaya operasional ${idr.format(expenses)} = <strong>${idr.format(netProfit)}</strong>.</div>
           <div class="module-grid">${reports.map((report, i) => `<div class="module-card"><div class="d-flex justify-content-between gap-2 align-items-start"><h4>${report.title}</h4><span class="chip">${report.period}</span></div><strong class="report-value">${report.value}</strong><p class="report-note">${report.note}</p><p class="small text-secondary mb-2">${report.rows.length} baris data siap diexport.</p><div class="d-flex gap-2 flex-wrap"><button class="btn btn-outline-primary btn-sm" data-report-index="${i}"><i class="bi bi-filetype-pdf"></i> PDF</button><button class="btn btn-outline-success btn-sm" data-report-excel-index="${i}"><i class="bi bi-file-earmark-excel"></i> Excel</button></div></div>`).join("")}</div>
+          <section class="panel mt-3"><div class="panel-header"><div><h3>Laporan Penjualan & Pembelian</h3><small class="text-secondary">Pencarian terpadu seluruh transaksi dan retur</small></div><span class="chip"><i class="bi bi-search"></i> Database transaksi</span></div><div class="row g-2 align-items-end"><div class="col-md-10"><label class="form-label" for="reportTransactionSearch">Nama pelanggan/supplier, no. invoice/faktur, tanggal, bulan, atau tahun</label><input id="reportTransactionSearch" class="form-control" value="${esc(reportTransactionQuery)}" autocomplete="off" placeholder="Contoh: Tabna, INV-001, 12/09/2026, September, atau 2026"></div><div class="col-md-2"><button id="clearReportTransactionSearch" class="btn btn-outline-secondary w-100" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button></div></div><div id="reportTransactionSearchResults" class="mt-3"></div></section>
           <section class="panel mt-3" id="reportPrintable"><div class="panel-header"><h3>Preview Laporan Penjualan</h3><span class="chip">${periodLabel}</span></div>${salesTable(visibleReportRows("reportsView", "sales", reportSales))}</section>`;
         document.getElementById("reportPeriodFilter").onchange = (event) => { reportPeriod = event.target.value; renderReports(); makeTablesMobileFriendly(document.getElementById("reportsView")); };
         document.querySelectorAll("[data-report-index]").forEach((btn) => btn.onclick = () => { const report = reports[btn.dataset.reportIndex]; exportReportPdf(`${report.title} - ${report.period}`, report.rows); });
@@ -3125,6 +3190,9 @@
         document.getElementById("exportAllReportsBtn").onclick = () => exportReportPdf(`Semua Laporan MDD - ${periodLabel}`, reports.flatMap((report) => report.rows.map((r) => ({ laporan: report.title, periode: report.period, nilaiRingkasan: report.value, catatan: report.note, ...r }))));
         document.getElementById("exportAllReportsExcelBtn").onclick = () => exportAllReportsExcel(reports);
         document.getElementById("printReportsBtn").onclick = () => window.print();
+        document.getElementById("reportTransactionSearch").oninput = (event) => { reportTransactionQuery = event.target.value; renderReportTransactionSearch(); };
+        document.getElementById("clearReportTransactionSearch").onclick = () => { reportTransactionQuery = ""; document.getElementById("reportTransactionSearch").value = ""; renderReportTransactionSearch(); document.getElementById("reportTransactionSearch").focus(); };
+        renderReportTransactionSearch();
         bindCompletedSalesActions();
       }
 
@@ -3279,7 +3347,7 @@
         return `<div class="table-responsive"><table class="table table-hover align-middle"><thead><tr>${keys.map((k) => `<th>${k}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${keys.map((k) => `<td>${formatCell(r[k], k)}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="${keys.length}" class="text-center text-secondary">Belum ada data.</td></tr>`}</tbody></table></div>`;
       }
       function formatCell(value, key = "") {
-        const identifierKeys = new Set(["kode", "code", "sku", "barcode", "phone", "telepon", "telp", "whatsapp", "invoice", "invoiceNo", "no_po", "no_faktur"]);
+        const identifierKeys = new Set(["kode", "code", "sku", "barcode", "phone", "telepon", "telp", "whatsapp", "invoice", "invoiceNo", "no_po", "no_faktur", "no_dokumen"]);
         const plainNumberKeys = new Set(["qty", "item", "stock", "stock_awal", "stock_masuk", "stock_keluar", "stock_akhir", "min", "systemStock", "physicalStock", "difference"]);
         if (key === "aksi") return value || "";
         if (/date|tanggal|jatuh|tempo/i.test(String(key))) return displayDate(value);

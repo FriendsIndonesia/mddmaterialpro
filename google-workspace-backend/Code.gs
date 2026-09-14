@@ -24,15 +24,14 @@ const TABLES = [
 ];
 
 function doGet(e) {
-  
-  
+  const ss = getSpreadsheet_();
+  normalizeCashAccountNames_(ss);
   const action = String((e && e.parameter && e.parameter.action) || "status").toLowerCase();
   const callback = e && e.parameter && e.parameter.callback;
   let payload;
-  if (action === "revision") return output_({ ok: true, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION }, callback);
-  if (action === "health") return output_({ ok: true, app: APP_NAME, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION, serverTime: new Date().toISOString() }, callback);
-  const ss = getSpreadsheet_();
-  if (action === "state") payload = readState_(ss);
+  if (action === "revision") payload = { ok: true, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION };
+  else if (action === "health") payload = { ok: true, app: APP_NAME, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION, serverTime: new Date().toISOString() };
+  else if (action === "state") payload = readState_(ss);
   else if (action === "receipt") payload = { ok: true, processed: hasProcessedSync_(ss, String((e && e.parameter && e.parameter.requestId) || "")) };
   else if (action === "auth") payload = { ok: true, app: APP_NAME, source: "Sheets", data: readProfile_(ss) };
   else if (action === "finance") payload = readSubsetState_(ss, ["purchases", "sales", "payments", "cashAccounts", "cashTx", "returns", "pendingSales", "pendingPurchases"]);
@@ -48,7 +47,12 @@ function doGet(e) {
 
 function doPost(e) {
   const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
+  // Jangan menumpuk puluhan eksekusi selama perangkat lain sedang menulis.
+  // Klien mempertahankan paket secara lokal dan akan mencoba lagi setelah
+  // memeriksa receipt, sehingga gagal-cepat di sini lebih aman dan lebih ringan.
+  if (!lock.tryLock(5000)) {
+    return output_({ ok: false, busy: true, retryAfterMs: 15000, error: "Backend sedang memproses antrean perangkat lain." });
+  }
   try {
     const payload = JSON.parse((e && e.postData && e.postData.contents) || "{}");
     const clientVersion = Number(payload.clientVersion || 0);
@@ -57,8 +61,6 @@ function doPost(e) {
     }
     const data = payload.data || {};
     const ss = getSpreadsheet_();
-    normalizeCashAccountNames_(ss);
-    ensureWorkbook_(ss);
 
     const requestId = String(payload.requestId || "").trim();
     if (requestId && hasProcessedSync_(ss, requestId)) {
@@ -73,13 +75,18 @@ function doPost(e) {
     if (payload.changes && payload.changes.tables && Number(payload.syncProtocol || 0) >= 2) {
       const purchaseChange = payload.changes.tables.purchases || {};
       const salesChange = payload.changes.tables.sales || {};
-      const purchasesBefore = readTableDefinition_(ss, TABLES.find((table) => table.key === "purchases"));
-      const salesBefore = readTableDefinition_(ss, TABLES.find((table) => table.key === "sales"));
-      TABLES.forEach((table) => applyTableChanges_(ss, table, payload.changes.tables[table.key]));
+      const hasPurchaseChange = (purchaseChange.upserts || []).length || (purchaseChange.deletes || []).length;
+      const hasSalesChange = (salesChange.upserts || []).length || (salesChange.deletes || []).length;
+      const purchasesBefore = hasPurchaseChange ? readTableDefinition_(ss, TABLES.find((table) => table.key === "purchases")) : [];
+      const salesBefore = hasSalesChange ? readTableDefinition_(ss, TABLES.find((table) => table.key === "sales")) : [];
+      TABLES.forEach((table) => {
+        const change = payload.changes.tables[table.key];
+        if (change && ((change.upserts || []).length || (change.deletes || []).length)) applyTableChanges_(ss, table, change);
+      });
       // Ledger yang dapat diedit manual tidak pernah ditulis ulang secara penuh.
       // Hanya baris transaksi yang benar-benar berubah di aplikasi yang disentuh.
-      applyLedgerChangesSafely_(ss, "Hutang", "debt", purchaseChange, purchasesBefore);
-      applyLedgerChangesSafely_(ss, "Piutang", "receivable", salesChange, salesBefore);
+      if (hasPurchaseChange) applyLedgerChangesSafely_(ss, "Hutang", "debt", purchaseChange, purchasesBefore);
+      if (hasSalesChange) applyLedgerChangesSafely_(ss, "Piutang", "receivable", salesChange, salesBefore);
     } else if (!payload.changes || !payload.changes.tables) {
       // Jangan menerima snapshot penuh dari aplikasi lama. Perangkat lama bisa
       // membawa cache stok/saldo yang tertinggal lalu menimpa Sheet terbaru.
@@ -900,4 +907,3 @@ function output_(value, callback) {
   const mime = callback ? ContentService.MimeType.JAVASCRIPT : ContentService.MimeType.JSON;
   return ContentService.createTextOutput(body).setMimeType(mime);
 }
-

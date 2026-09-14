@@ -725,6 +725,7 @@
     </aside>
 
     <main class="main-content">
+      <div id="backendSyncBanner" class="alert alert-warning py-2 small mb-3" role="status" aria-live="polite">Memeriksa data pusat. Angka yang tampil sementara berasal dari perangkat ini.</div>
       <section id="dashboardView" class="view-section active">
         <div class="page-header">
           <div>
@@ -795,7 +796,8 @@
 
       const STORAGE_KEY = "mdd_material_pro_clean_v1";
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
-      const APP_VERSION = 111;
+      const APP_VERSION = 112;
+      const EXPECTED_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ";
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
       const STORE_PRINT_NAME = "MUTIARA JAYA";
@@ -873,6 +875,7 @@
       let lastBackendRevision = "";
       let isSyncing = false;
       let isPulling = false;
+      let verifiedBackendEndpoint = "";
       const REPORT_DISPLAY_STORAGE_KEY = "mdd_report_display_hidden_v1";
       let hiddenReportRows = loadHiddenReportRows();
       let durablePendingSync = loadDurablePendingSync();
@@ -1103,6 +1106,12 @@
         Object.assign(state, pending?.settings || {});
         normalizeState(state);
       }
+      function setBackendSyncBanner(kind, message) {
+        const banner = document.getElementById("backendSyncBanner");
+        if (!banner) return;
+        banner.className = `alert alert-${kind} py-2 small mb-3`;
+        banner.textContent = message;
+      }
 
       function mergeStateFromBackend(remoteData, options = {}) {
         if (!remoteData || typeof remoteData !== "object") return false;
@@ -1216,7 +1225,7 @@
           const timer = setTimeout(() => {
             cleanup();
             resolve(false);
-          }, action === "products" || action === "master" ? 12000 : 7000);
+          }, ["state", "finance", "masterlite", "master", "products"].includes(action) ? 30000 : 10000);
           window[callbackName] = (response) => {
             clearTimeout(timer);
             cleanup();
@@ -1295,12 +1304,30 @@
         isPulling = true;
         try {
           const status = await requestGoogleWorkspaceJsonp("revision");
-          if (!status?.ok || !status.revision || status.revision === lastBackendRevision) return;
+          if (!status?.ok || !status.revision) {
+            setBackendSyncBanner("warning", "Data pusat belum dapat diperiksa. Angka di layar mungkin hanya cache perangkat ini.");
+            return;
+          }
+          if (status.revision === lastBackendRevision && verifiedBackendEndpoint === state.profile.googleEndpoint) {
+            setBackendSyncBanner(hasLocalSyncChanges() ? "warning" : "success", hasLocalSyncChanges() ? "Data pusat terbaca, tetapi ada perubahan perangkat yang belum dikonfirmasi." : `Data pusat sesuai • diperiksa ${new Date().toLocaleTimeString("id-ID")} • versi ${APP_VERSION}`);
+            return;
+          }
           const responses = await Promise.all(["finance", "masterlite", "products"].map((action) => requestGoogleWorkspaceJsonp(action)));
-          if (responses.some((response) => !response?.ok || !response.data)) return; // Jangan akui revisi yang belum diterima lengkap.
+          if (responses.some((response) => !response?.ok || !response.data)) {
+            setBackendSyncBanner("warning", "Sebagian data pusat belum berhasil dimuat. Angka dapat berbeda antarperangkat; aplikasi akan mencoba lagi otomatis.");
+            return;
+          }
+          if (responses.some((response) => response.spreadsheetId !== EXPECTED_SPREADSHEET_ID)) {
+            setBackendSyncBanner("danger", "Aplikasi terhubung ke database yang berbeda. Transaksi ditahan agar data tidak masuk ke tempat yang salah.");
+            return;
+          }
+          verifiedBackendEndpoint = state.profile.googleEndpoint;
           const results = responses.map((response) => mergeSubsetFromBackend(response.data));
           lastBackendRevision = status.revision;
+          setBackendSyncBanner(hasLocalSyncChanges() ? "warning" : "success", hasLocalSyncChanges() ? "Data pusat terbaca, tetapi ada perubahan perangkat yang belum dikonfirmasi." : `Data pusat sesuai • diperiksa ${new Date().toLocaleTimeString("id-ID")} • versi ${APP_VERSION}`);
           if (results.some(Boolean)) renderSyncedState();
+        } catch {
+          setBackendSyncBanner("warning", "Koneksi data pusat terputus. Angka di layar mungkin hanya cache perangkat ini; aplikasi akan mencoba lagi otomatis.");
         } finally {
           isPulling = false;
         }
@@ -1474,6 +1501,7 @@
         // Satu siklus pembacaan yang utuh: transaksi, master, dan produk harus
         // semuanya berhasil sebelum revisi ditandai selesai pada perangkat.
         lastBackendRevision = "";
+        setBackendSyncBanner("warning", "Memeriksa data pusat. Angka yang tampil sementara berasal dari perangkat ini.");
         setTimeout(refreshGoogleWorkspaceState, 0);
         // Kirim kembali perubahan yang sempat tersimpan ketika perangkat
         // ditutup/offline. Outbox ini bertahan melewati refresh dan restart.
@@ -4255,6 +4283,12 @@
       }
       async function syncGoogleWorkspace() {
         if (isSyncing) return;
+        if (isPulling) {
+          syncPending = true;
+          clearTimeout(syncTimer);
+          syncTimer = setTimeout(syncGoogleWorkspace, 500);
+          return;
+        }
         if (!state.profile.googleEndpoint) {
           openGoogleEndpointModal(true);
           return toast("Isi endpoint Google Workspace untuk menjalankan sinkron.");
@@ -4264,6 +4298,12 @@
         try {
           const changes = buildSyncChanges();
           if (!Object.keys(changes.tables).length && !hasLocalSyncChanges()) return;
+          setBackendSyncBanner("warning", "Perubahan sedang dikirim ke data pusat. Jangan anggap transaksi selesai tersinkron sebelum status hijau.");
+          if (verifiedBackendEndpoint !== state.profile.googleEndpoint) {
+            const endpointStatus = await requestGoogleWorkspaceJsonp("status");
+            if (!endpointStatus?.ok || endpointStatus.spreadsheetId !== EXPECTED_SPREADSHEET_ID) throw new Error("Database pusat tidak sesuai atau belum dapat diverifikasi.");
+            verifiedBackendEndpoint = state.profile.googleEndpoint;
+          }
           const settings = buildSyncSettings();
           const sentState = JSON.parse(JSON.stringify(state));
           const requestId = await syncRequestId(changes, settings);
@@ -4271,12 +4311,11 @@
           const receipt = await requestGoogleWorkspaceJsonp("receipt", { requestId });
           if (!receipt?.processed) throw new Error("Backend belum mengonfirmasi paket sinkronisasi.");
           const refreshActions = syncRefreshActions(changes, settings);
-          const verifiedResponses = [];
-          for (const action of refreshActions) {
+          const verifiedResponses = await Promise.all(refreshActions.map(async (action) => {
             const verifiedResponse = await requestGoogleWorkspaceJsonp(action);
-            if (!verifiedResponse?.data) throw new Error(`Backend belum mengirim pembaruan ${action}.`);
-            verifiedResponses.push({ action, data: verifiedResponse.data });
-          }
+            if (!verifiedResponse?.ok || !verifiedResponse.data) throw new Error(`Backend belum mengirim pembaruan ${action}.`);
+            return { action, data: verifiedResponse.data };
+          }));
           const readbackData = Object.assign({}, ...verifiedResponses.map((response) => response.data));
           if (!syncChangesConfirmed(readbackData, changes)) throw new Error("Transaksi belum ditemukan pada pembacaan ulang backend; antrean lokal tetap disimpan.");
           if (changes.tables.products) verifyConversionReadback(Object.assign({}, ...verifiedResponses.map((response) => response.data)), changes);
@@ -4296,10 +4335,14 @@
             try { localStorage.setItem(PENDING_SYNC_STORAGE_KEY, JSON.stringify(durablePendingSync)); } catch {}
           }
           localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          lastBackendRevision = ""; // Pastikan perangkat lain dan laporan menarik revisi terbaru.
+          const hasMoreChanges = Boolean(pendingAfterSend && (Object.keys(pendingAfterSend.tables || {}).length || Object.keys(pendingAfterSend.settings || {}).length));
+          setBackendSyncBanner(hasMoreChanges ? "warning" : "success", hasMoreChanges ? "Sebagian perubahan sudah tercatat; perubahan berikutnya masih dikirim otomatis." : `Transaksi tercatat di data pusat • ${new Date().toLocaleTimeString("id-ID")} • versi ${APP_VERSION}`);
           renderSyncedState();
-          if (pendingAfterSend && (Object.keys(pendingAfterSend.tables || {}).length || Object.keys(pendingAfterSend.settings || {}).length)) queueGoogleWorkspaceSync();
+          if (hasMoreChanges) queueGoogleWorkspaceSync();
         } catch {
           syncPending = true;
+          setBackendSyncBanner("danger", "Perubahan belum terkonfirmasi di data pusat. Data tersimpan di perangkat ini dan akan dicoba lagi otomatis.");
           clearTimeout(syncTimer);
           syncTimer = setTimeout(syncGoogleWorkspace, 2500);
         } finally {

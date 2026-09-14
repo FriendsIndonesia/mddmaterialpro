@@ -12,10 +12,15 @@ assert.strictEqual(confirm({ sales: [{ id: "SAL-1" }], purchases: [{ id: "PUR-1"
 assert.strictEqual(confirm({ sales: [{ id: "SAL-1" }, { id: "SAL-OLD" }], purchases: [{ id: "PUR-1" }] }, changes), false, "penghapusan yang belum diterapkan tidak boleh dianggap sukses");
 assert.strictEqual(confirm({ sales: [{ id: "SAL-1" }] }, changes), false, "scope yang gagal dibaca tidak boleh dianggap sukses");
 
-assert.match(html, /responses\.some\(\(response\) => !response\?\.ok \|\| !response\.data\)\) return/);
+assert.ok(html.includes("responses.some((response) => !response?.ok || !response.data)"), "scope yang gagal tidak boleh diakui");
 assert.match(html, /if \(!syncChangesConfirmed\(readbackData, changes\)\) throw/);
 assert.match(html, /if \(activeView === "reportsView"\) \{ renderAll\(\); return; \}/);
 assert.match(html, /const stockValue = activeProducts\.reduce/);
 assert.match(html, /Owner, Kasir, dan Gudang menggunakan sumber transaksi yang sama/);
+assert.match(html, /\["state", "finance", "masterlite", "master", "products"\]\.includes\(action\) \? 30000 : 10000/);
+assert.match(html, /EXPECTED_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ"/);
+assert.match(html, /responses\.some\(\(response\) => response\.spreadsheetId !== EXPECTED_SPREADSHEET_ID\)/);
+assert.match(html, /id="backendSyncBanner"/);
+assert.match(html, /if \(isPulling\) \{\s*syncPending = true/);
 
 console.log("report-consistency.test.js: verifikasi transaksi, revisi backend, periode, dan peran lulus");

@@ -24,14 +24,15 @@ const TABLES = [
 ];
 
 function doGet(e) {
-  const ss = getSpreadsheet_();
-  normalizeCashAccountNames_(ss);
+  
+  
   const action = String((e && e.parameter && e.parameter.action) || "status").toLowerCase();
   const callback = e && e.parameter && e.parameter.callback;
   let payload;
-  if (action === "revision") payload = { ok: true, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION };
-  else if (action === "health") payload = { ok: true, app: APP_NAME, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION, serverTime: new Date().toISOString() };
-  else if (action === "state") payload = readState_(ss);
+  if (action === "revision") return output_({ ok: true, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION }, callback);
+  if (action === "health") return output_({ ok: true, app: APP_NAME, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION, serverTime: new Date().toISOString() }, callback);
+  const ss = getSpreadsheet_();
+  if (action === "state") payload = readState_(ss);
   else if (action === "receipt") payload = { ok: true, processed: hasProcessedSync_(ss, String((e && e.parameter && e.parameter.requestId) || "")) };
   else if (action === "auth") payload = { ok: true, app: APP_NAME, source: "Sheets", data: readProfile_(ss) };
   else if (action === "finance") payload = readSubsetState_(ss, ["purchases", "sales", "payments", "cashAccounts", "cashTx", "returns", "pendingSales", "pendingPurchases"]);

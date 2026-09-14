@@ -17,7 +17,7 @@ assert.match(html, /if \(!syncChangesConfirmed\(readbackData, changes\)\) throw/
 assert.match(html, /if \(activeView === "reportsView"\) \{ renderAll\(\); return; \}/);
 assert.match(html, /const stockValue = activeProducts\.reduce/);
 assert.match(html, /Owner, Kasir, dan Gudang menggunakan sumber transaksi yang sama/);
-assert.match(html, /\["state", "finance", "masterlite", "master", "products"\]\.includes\(action\) \? 30000 : 10000/);
+assert.match(html, /\["state", "finance", "masterlite", "master", "products", "receipt"\]\.includes\(action\) \? 30000 : 10000/);
 assert.match(html, /EXPECTED_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ"/);
 assert.match(html, /responses\.some\(\(response\) => response\.spreadsheetId !== EXPECTED_SPREADSHEET_ID\)/);
 assert.match(html, /id="backendSyncBanner"/);

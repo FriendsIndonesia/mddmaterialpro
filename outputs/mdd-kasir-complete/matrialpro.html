@@ -795,7 +795,7 @@
 
       const STORAGE_KEY = "mdd_material_pro_clean_v1";
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
-      const APP_VERSION = 110;
+      const APP_VERSION = 111;
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
       const STORE_PRINT_NAME = "MUTIARA JAYA";
@@ -1241,6 +1241,7 @@
       function syncChangesConfirmed(remoteData, changes) {
         if (!remoteData || !changes?.tables) return false;
         return Object.entries(changes.tables).every(([key, change]) => {
+          if (!Array.isArray(remoteData[key])) return key === "history"; // Semua tabel operasional wajib terbaca kembali.
           const remoteRows = Array.isArray(remoteData[key]) ? remoteData[key] : [];
           const remoteIds = new Set(remoteRows.map((row) => rowIdentity(key, row)).filter(Boolean));
           return (change.upserts || []).every((row) => remoteIds.has(rowIdentity(key, row))) && (change.deletes || []).every((id) => !remoteIds.has(String(id)));
@@ -1268,7 +1269,7 @@
         const actions = [];
         if (["products", "categories", "discounts"].some((key) => keys.has(key))) actions.push("products");
         if (["sales", "purchases", "payments", "cashTx", "returns", "pendingSales", "pendingPurchases"].some((key) => keys.has(key))) actions.push("finance");
-        if (["customers", "suppliers", "employees", "cashAccounts", "packages"].some((key) => keys.has(key))) actions.push("masterlite");
+        if (["customers", "suppliers", "employees", "cashAccounts", "packages", "stockMoves"].some((key) => keys.has(key))) actions.push("masterlite");
         return actions;
       }
 
@@ -1295,11 +1296,9 @@
         try {
           const status = await requestGoogleWorkspaceJsonp("revision");
           if (!status?.ok || !status.revision || status.revision === lastBackendRevision) return;
-          const results = await Promise.all([
-            loadGoogleWorkspaceState("finance"),
-            loadGoogleWorkspaceState("masterlite"),
-            loadGoogleWorkspaceState("products")
-          ]);
+          const responses = await Promise.all(["finance", "masterlite", "products"].map((action) => requestGoogleWorkspaceJsonp(action)));
+          if (responses.some((response) => !response?.ok || !response.data)) return; // Jangan akui revisi yang belum diterima lengkap.
+          const results = responses.map((response) => mergeSubsetFromBackend(response.data));
           lastBackendRevision = status.revision;
           if (results.some(Boolean)) renderSyncedState();
         } finally {
@@ -1310,6 +1309,11 @@
       function renderSyncedState() {
         const activeView = document.querySelector(".view-section.active")?.id;
         if (document.getElementById("formModal")?.classList.contains("show")) return;
+        if (activeView === "reportsView" && document.activeElement?.id === "reportTransactionSearch") {
+          renderReportTransactionSearch(); // Pertahankan teks dan fokus pencarian saat data baru masuk.
+          return;
+        }
+        if (activeView === "reportsView") { renderAll(); return; }
         if (activeView === "productsView" && (productDatabaseQuery || document.activeElement?.id === "productDatabaseSearch")) {
           return;
         }
@@ -1467,20 +1471,14 @@
         renderAll();
         // Dashboard tampil dari cache lokal lebih dahulu; jaringan berjalan di
         // latar belakang agar login tidak menunggu database produk yang besar.
-        Promise.all([loadGoogleWorkspaceState("finance"), loadGoogleWorkspaceState("masterlite")]).then((results) => {
-          if (results.some(Boolean)) renderSyncedState();
-        });
-        setTimeout(() => {
-          // Backend selalu menjadi sumber daftar produk dan saldo stok terbaru.
-          // Pending edit lokal tetap dilindungi oleh mergeSubsetFromBackend.
-          loadGoogleWorkspaceState("products").then((loaded) => { if (loaded) renderSyncedState(); });
-        }, 100);
+        // Satu siklus pembacaan yang utuh: transaksi, master, dan produk harus
+        // semuanya berhasil sebelum revisi ditandai selesai pada perangkat.
+        lastBackendRevision = "";
+        setTimeout(refreshGoogleWorkspaceState, 0);
         // Kirim kembali perubahan yang sempat tersimpan ketika perangkat
         // ditutup/offline. Outbox ini bertahan melewati refresh dan restart.
         setTimeout(() => { if (hasLocalSyncChanges()) queueGoogleWorkspaceSync(); }, 600);
-        requestGoogleWorkspaceJsonp("revision").then((result) => {
-          if (result?.ok && result.revision) lastBackendRevision = result.revision;
-        }).catch(() => {});
+        // Revisi baru diakui hanya setelah finance, master, dan products berhasil dibaca.
         clearInterval(autoPullTimer);
         // Lima detik cukup responsif untuk tiga perangkat, tetapi jauh lebih aman
         // terhadap kuota Apps Script dibanding polling setiap 1,5 detik.
@@ -1912,7 +1910,7 @@
         const allPaymentsDebt = state.payments.filter((x) => paymentIsType(x, "Hutang")).reduce((sum, x) => sum + toNumber(x.amount), 0);
         const todayPettyCash = state.cashTx.filter((x) => isToday(x.date) && x.category === "Petty Cash").reduce((sum, x) => sum + (x.type === "Masuk" ? toNumber(x.amount) : -toNumber(x.amount)), 0);
         const activeProducts = state.products.filter((p) => p.active !== false);
-        const stockValue = state.products.reduce((sum, product) => sum + (toNumber(product.buy) * stockAkhirProduk(product)), 0);
+        const stockValue = activeProducts.reduce((sum, product) => sum + (toNumber(product.buy) * stockAkhirProduk(product)), 0);
         const receivable = state.sales.filter((s) => toNumber(s.due) > 0).reduce((sum, s) => sum + toNumber(s.due), 0);
         const payable = state.purchases.filter((p) => toNumber(p.due) > 0).reduce((sum, p) => sum + toNumber(p.due), 0);
         const cashBalance = state.cashAccounts.reduce((s, a) => s + toNumber(a.balance), 0);
@@ -3249,7 +3247,7 @@
             <div class="metric-card"><div class="metric-icon bg-blue"><i class="bi bi-graph-up"></i></div><div><span>Laba Kotor Barang</span><strong>${idr.format(grossProfit)}</strong><small class="metric-source">Penjualan item − HPP item terjual</small></div></div>
             <div class="metric-card"><div class="metric-icon bg-amber"><i class="bi bi-currency-exchange"></i></div><div><span>Laba Bersih Operasional</span><strong>${idr.format(netProfit)}</strong><small class="metric-source">Laba kotor barang − biaya operasional</small></div></div>
           </div>
-          <div class="audit-box mb-3"><strong>Rincian laba:</strong> penjualan barang ${idr.format(salesRevenue)} − HPP barang terjual ${idr.format(cogs)} = laba kotor ${idr.format(grossProfit)}; dikurangi biaya operasional ${idr.format(expenses)} = <strong>${idr.format(netProfit)}</strong>.</div>
+          <div class="audit-box mb-3"><strong>Periode yang ditampilkan: ${periodLabel}.</strong> Owner, Kasir, dan Gudang menggunakan sumber transaksi yang sama. Metrik harian di Dashboard Owner berbeda cakupan waktunya dari laporan ini.<br><strong>Rincian laba:</strong> penjualan barang ${idr.format(salesRevenue)} − HPP barang terjual ${idr.format(cogs)} = laba kotor ${idr.format(grossProfit)}; dikurangi biaya operasional ${idr.format(expenses)} = <strong>${idr.format(netProfit)}</strong>.</div>
           <div class="module-grid">${reports.map((report, i) => `<div class="module-card"><div class="d-flex justify-content-between gap-2 align-items-start"><h4>${report.title}</h4><span class="chip">${report.period}</span></div><strong class="report-value">${report.value}</strong><p class="report-note">${report.note}</p><p class="small text-secondary mb-2">${report.rows.length} baris data siap diexport.</p><div class="d-flex gap-2 flex-wrap"><button class="btn btn-outline-primary btn-sm" data-report-index="${i}"><i class="bi bi-filetype-pdf"></i> PDF</button><button class="btn btn-outline-success btn-sm" data-report-excel-index="${i}"><i class="bi bi-file-earmark-excel"></i> Excel</button></div></div>`).join("")}</div>
           <section class="panel mt-3"><div class="panel-header"><div><h3>Laporan Penjualan & Pembelian</h3><small class="text-secondary">Pencarian terpadu seluruh transaksi dan retur</small></div><span class="chip"><i class="bi bi-search"></i> Database transaksi</span></div><div class="row g-2 align-items-end"><div class="col-md-10"><label class="form-label" for="reportTransactionSearch">Nama pelanggan/supplier, no. invoice/faktur, tanggal, bulan, atau tahun</label><input id="reportTransactionSearch" class="form-control" value="${esc(reportTransactionQuery)}" autocomplete="off" placeholder="Ketik nama pelanggan/supplier, nomor invoice/faktur, tanggal, bulan, atau tahun."></div><div class="col-md-2"><button id="clearReportTransactionSearch" class="btn btn-outline-secondary w-100" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button></div></div><div id="reportTransactionSearchResults" class="mt-3"></div></section>`;
         document.getElementById("reportPeriodFilter").onchange = (event) => { reportPeriod = event.target.value; renderReports(); makeTablesMobileFriendly(document.getElementById("reportsView")); };
@@ -4279,6 +4277,8 @@
             if (!verifiedResponse?.data) throw new Error(`Backend belum mengirim pembaruan ${action}.`);
             verifiedResponses.push({ action, data: verifiedResponse.data });
           }
+          const readbackData = Object.assign({}, ...verifiedResponses.map((response) => response.data));
+          if (!syncChangesConfirmed(readbackData, changes)) throw new Error("Transaksi belum ditemukan pada pembacaan ulang backend; antrean lokal tetap disimpan.");
           if (changes.tables.products) verifyConversionReadback(Object.assign({}, ...verifiedResponses.map((response) => response.data)), changes);
           // Advance the baseline only after read-back succeeds. Capture edits
           // made during ALL network awaits, not just before the first refresh.

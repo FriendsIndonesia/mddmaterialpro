@@ -796,7 +796,7 @@
 
       const STORAGE_KEY = "mdd_material_pro_clean_v1";
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
-      const APP_VERSION = 112;
+      const APP_VERSION = 113;
       const EXPECTED_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ";
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
@@ -1225,7 +1225,7 @@
           const timer = setTimeout(() => {
             cleanup();
             resolve(false);
-          }, ["state", "finance", "masterlite", "master", "products"].includes(action) ? 30000 : 10000);
+          }, ["state", "finance", "masterlite", "master", "products", "receipt"].includes(action) ? 30000 : 10000);
           window[callbackName] = (response) => {
             clearTimeout(timer);
             cleanup();

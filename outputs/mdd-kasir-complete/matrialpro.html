@@ -796,7 +796,7 @@
 
       const STORAGE_KEY = "mdd_material_pro_clean_v1";
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
-      const APP_VERSION = 114;
+      const APP_VERSION = 115;
       const EXPECTED_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ";
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
@@ -1256,6 +1256,52 @@
           const remoteIds = new Set(remoteRows.map((row) => rowIdentity(key, row)).filter(Boolean));
           return (change.upserts || []).every((row) => remoteIds.has(rowIdentity(key, row))) && (change.deletes || []).every((id) => !remoteIds.has(String(id)));
         });
+      }
+
+      function takeSyncBatch(changes, settings, limit = 25) {
+        const batch = { tables: {} };
+        const tableKeys = Object.keys(changes?.tables || {});
+        if (tableKeys.length) {
+          const key = tableKeys[0];
+          const change = changes.tables[key] || {};
+          const upserts = (change.upserts || []).slice(0, limit);
+          const deletes = (change.deletes || []).slice(0, Math.max(0, limit - upserts.length));
+          const baseRows = {};
+          upserts.forEach((row) => {
+            const id = rowIdentity(key, row);
+            if (id && change.baseRows?.[id]) baseRows[id] = change.baseRows[id];
+          });
+          batch.tables[key] = { upserts, deletes, baseRows, deleteMode: "explicit" };
+          return { changes: batch, settings: {} };
+        }
+        return { changes: batch, settings: { ...(settings || {}) } };
+      }
+
+      function acknowledgeSyncBatch(batchChanges, batchSettings, sentState) {
+        Object.entries(batchChanges?.tables || {}).forEach(([key, change]) => {
+          if (!Array.isArray(lastSyncedSnapshot[key])) lastSyncedSnapshot[key] = [];
+          const acknowledgedIds = new Set((change.upserts || []).map((row) => rowIdentity(key, row)).filter(Boolean));
+          const deletedIds = new Set((change.deletes || []).map(String));
+          const sourceById = new Map((sentState[key] || []).map((row) => [rowIdentity(key, row), row]).filter(([id]) => id));
+          lastSyncedSnapshot[key] = lastSyncedSnapshot[key]
+            .filter((row) => !acknowledgedIds.has(rowIdentity(key, row)) && !deletedIds.has(rowIdentity(key, row)))
+            .concat([...acknowledgedIds].map((id) => sourceById.get(id)).filter(Boolean));
+          const durableChange = durablePendingSync.tables?.[key];
+          if (durableChange) {
+            durableChange.upserts = (durableChange.upserts || []).filter((row) => !acknowledgedIds.has(rowIdentity(key, row)));
+            durableChange.deletes = (durableChange.deletes || []).filter((id) => !deletedIds.has(String(id)));
+            acknowledgedIds.forEach((id) => { if (durableChange.baseRows) delete durableChange.baseRows[id]; });
+            if (!durableChange.upserts.length && !durableChange.deletes.length) delete durablePendingSync.tables[key];
+          }
+        });
+        Object.keys(batchSettings || {}).forEach((key) => {
+          lastSyncedSnapshot[key] = JSON.parse(JSON.stringify(sentState[key]));
+          if (durablePendingSync.settings) delete durablePendingSync.settings[key];
+        });
+        try {
+          if (Object.keys(durablePendingSync.tables || {}).length || Object.keys(durablePendingSync.settings || {}).length) localStorage.setItem(PENDING_SYNC_STORAGE_KEY, JSON.stringify(durablePendingSync));
+          else clearDurablePendingSync();
+        } catch {}
       }
 
       async function syncRequestId(changes, settings) {
@@ -4310,15 +4356,18 @@
         isSyncing = true;
         syncPending = false;
         try {
-          const changes = buildSyncChanges();
-          if (!Object.keys(changes.tables).length && !hasLocalSyncChanges()) return;
+          const allChanges = buildSyncChanges();
+          const allSettings = buildSyncSettings();
+          if (!Object.keys(allChanges.tables).length && !Object.keys(allSettings).length) return;
+          const batch = takeSyncBatch(allChanges, allSettings);
+          const changes = batch.changes;
+          const settings = batch.settings;
           setBackendSyncBanner("warning", "Perubahan sedang dikirim ke data pusat. Jangan anggap transaksi selesai tersinkron sebelum status hijau.");
           if (verifiedBackendEndpoint !== state.profile.googleEndpoint) {
             const endpointStatus = await requestGoogleWorkspaceJsonp("status");
             if (!endpointStatus?.ok || endpointStatus.spreadsheetId !== EXPECTED_SPREADSHEET_ID) throw new Error("Database pusat tidak sesuai atau belum dapat diverifikasi.");
             verifiedBackendEndpoint = state.profile.googleEndpoint;
           }
-          const settings = buildSyncSettings();
           const sentState = JSON.parse(JSON.stringify(state));
           const requestId = await syncRequestId(changes, settings);
           try {
@@ -4340,19 +4389,13 @@
           if (changes.tables.products) verifyConversionReadback(Object.assign({}, ...verifiedResponses.map((response) => response.data)), changes);
           // Advance the baseline only after read-back succeeds. Capture edits
           // made during ALL network awaits, not just before the first refresh.
-          const pendingAfterSend = { ...buildSyncChanges(sentState, state, { includeDurable: false }), settings: buildSyncSettings(sentState, state) };
-          clearDurablePendingSync();
-          lastSyncedSnapshot = JSON.parse(JSON.stringify(sentState));
+          acknowledgeSyncBatch(changes, settings, sentState);
           for (const response of verifiedResponses) {
             if (response.action === "state") mergeStateFromBackend(response.data, { preserveLocal: true });
             else mergeSubsetFromBackend(response.data);
           }
-          state.syncQueue = [];
-          if (pendingAfterSend) reapplyPendingChanges(pendingAfterSend);
-          if (pendingAfterSend && (Object.keys(pendingAfterSend.tables || {}).length || Object.keys(pendingAfterSend.settings || {}).length)) {
-            durablePendingSync = mergePendingSync(durablePendingSync, pendingAfterSend);
-            try { localStorage.setItem(PENDING_SYNC_STORAGE_KEY, JSON.stringify(durablePendingSync)); } catch {}
-          }
+          const pendingAfterSend = { ...buildSyncChanges(), settings: buildSyncSettings() };
+          if (!Object.keys(pendingAfterSend.tables || {}).length && !Object.keys(pendingAfterSend.settings || {}).length) state.syncQueue = [];
           localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
           lastBackendRevision = ""; // Pastikan perangkat lain dan laporan menarik revisi terbaru.
           const hasMoreChanges = Boolean(pendingAfterSend && (Object.keys(pendingAfterSend.tables || {}).length || Object.keys(pendingAfterSend.settings || {}).length));

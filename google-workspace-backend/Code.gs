@@ -25,7 +25,6 @@ const TABLES = [
 
 function doGet(e) {
   const ss = getSpreadsheet_();
-  normalizeCashAccountNames_(ss);
   const action = String((e && e.parameter && e.parameter.action) || "status").toLowerCase();
   const callback = e && e.parameter && e.parameter.callback;
   let payload;
@@ -907,3 +906,4 @@ function output_(value, callback) {
   const mime = callback ? ContentService.MimeType.JAVASCRIPT : ContentService.MimeType.JSON;
   return ContentService.createTextOutput(body).setMimeType(mime);
 }
+

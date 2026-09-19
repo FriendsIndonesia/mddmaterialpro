@@ -1,8 +1,11 @@
-const CACHE_NAME = "mdd-material-pro-v115-batched-outbox";
-const APP_SHELL = [
-  "./",
+const CACHE_NAME = "mdd-material-pro-v118-sync-v2";
+const CORE_SHELL = [
   "./matrialpro.html",
   "./conversion-utils.js",
+  "./sync-v2.js"
+];
+const OPTIONAL_SHELL = [
+  "./",
   "./manifest.webmanifest",
   "./mdd-material-pro-logo.png",
   "./mdd-material-pro-app-icon.png",
@@ -10,20 +13,32 @@ const APP_SHELL = [
   "./icon-512.png"
 ];
 
+async function cacheAsset(cache, path, required) {
+  try {
+    const response = await fetch(new Request(path, { cache: "reload" }));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    await cache.put(path, response);
+    return true;
+  } catch (error) {
+    if (required) throw new Error(`Aset inti gagal disimpan: ${path} (${error.message || error})`);
+    return false;
+  }
+}
+
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
-  self.skipWaiting();
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    for (const path of CORE_SHELL) await cacheAsset(cache, path, true);
+    await Promise.all(OPTIONAL_SHELL.map((path) => cacheAsset(cache, path, false)));
+  })());
 });
+
 self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
-    ).then(() => self.clients.claim()).then(() =>
-      self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) =>
-        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 115 }))
-      )
-    )
-  );
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)));
+    await self.clients.claim();
+  })());
 });
 
 self.addEventListener("message", (event) => {
@@ -32,24 +47,34 @@ self.addEventListener("message", (event) => {
 
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
+  const requestUrl = new URL(event.request.url);
+  if (requestUrl.origin !== self.location.origin) return;
+
   if (event.request.mode === "navigate") {
-    event.respondWith(
-      fetch(event.request).then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put("./matrialpro.html", copy));
+    event.respondWith((async () => {
+      try {
+        const response = await fetch(event.request);
+        if (response.ok) {
+          const cache = await caches.open(CACHE_NAME);
+          await cache.put("./matrialpro.html", response.clone());
+        }
         return response;
-      }).catch(() => caches.match("./matrialpro.html"))
-    );
+      } catch {
+        return (await caches.match("./matrialpro.html")) || Response.error();
+      }
+    })());
     return;
   }
-  event.respondWith(
-    caches.match(event.request).then((cached) =>
-      cached || fetch(event.request).then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-        return response;
-      }).catch(() => caches.match("./matrialpro.html"))
-    )
-  );
+
+  event.respondWith((async () => {
+    const cached = await caches.match(event.request);
+    if (cached) return cached;
+    const response = await fetch(event.request);
+    if (response.ok) {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.put(event.request, response.clone());
+    }
+    return response;
+  })());
 });
 

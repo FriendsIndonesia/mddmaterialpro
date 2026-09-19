@@ -1,0 +1,222 @@
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === "object" && module.exports) module.exports = api;
+  else root.MDDSyncV2 = api;
+})(typeof self !== "undefined" ? self : this, function () {
+  "use strict";
+
+  const DB_NAME = "mdd-material-pro-sync-v2";
+  const DB_VERSION = 1;
+  const OPERATIONS_STORE = "operations";
+  const META_STORE = "metadata";
+  const STATUSES = ["pending", "sending", "acknowledged", "failed", "conflict"];
+  const RETRY_DELAYS = [2000, 4000, 8000, 16000, 30000, 60000];
+
+  function operationId() {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    const bytes = new Uint8Array(16);
+    if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") crypto.getRandomValues(bytes);
+    else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0"));
+    return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+  }
+
+  function retryDelay(attempt) {
+    return RETRY_DELAYS[Math.min(Math.max(0, Number(attempt || 1) - 1), RETRY_DELAYS.length - 1)];
+  }
+
+  function clone(value) {
+    return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+  }
+
+  function normalizeEnvironment(value) {
+    return String(value || "production").toLowerCase() === "staging" ? "staging" : "production";
+  }
+
+  function dbNameForEnvironment(environment) {
+    return `${DB_NAME}-${normalizeEnvironment(environment)}`;
+  }
+
+  function makeOperation(type, entity, entityId, payload, options) {
+    const now = new Date().toISOString();
+    return {
+      operationId: operationId(),
+      type: String(type || "mutation"),
+      entity: String(entity || ""),
+      entityId: String(entityId || ""),
+      payload: clone(payload || {}),
+      baseRevision: String(options?.baseRevision || ""),
+      deviceId: String(options?.deviceId || ""),
+      environment: normalizeEnvironment(options?.environment),
+      groupId: String(options?.groupId || ""),
+      status: "pending",
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now,
+      nextAttemptAt: 0,
+      lastError: ""
+    };
+  }
+
+  function request(db, mode, storeName, action) {
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(storeName, mode);
+      const store = transaction.objectStore(storeName);
+      let result;
+      try { result = action(store); } catch (error) { reject(error); return; }
+      transaction.oncomplete = () => resolve(result?.result);
+      transaction.onerror = () => reject(transaction.error || result?.error || new Error("IndexedDB transaction failed"));
+      transaction.onabort = () => reject(transaction.error || new Error("IndexedDB transaction aborted"));
+    });
+  }
+
+  class Outbox {
+    constructor(indexedDBImpl, environment) {
+      this.indexedDB = indexedDBImpl || (typeof indexedDB !== "undefined" ? indexedDB : null);
+      this.environment = normalizeEnvironment(environment);
+      this.dbName = dbNameForEnvironment(this.environment);
+      this.dbPromise = null;
+    }
+    open() {
+      if (this.dbPromise) return this.dbPromise;
+      if (!this.indexedDB) return Promise.reject(new Error("IndexedDB tidak tersedia"));
+      this.dbPromise = new Promise((resolve, reject) => {
+        const openRequest = this.indexedDB.open(this.dbName, DB_VERSION);
+        openRequest.onupgradeneeded = () => {
+          const db = openRequest.result;
+          if (!db.objectStoreNames.contains(OPERATIONS_STORE)) {
+            const store = db.createObjectStore(OPERATIONS_STORE, { keyPath: "operationId" });
+            store.createIndex("status", "status", { unique: false });
+            store.createIndex("nextAttemptAt", "nextAttemptAt", { unique: false });
+          }
+          if (!db.objectStoreNames.contains(META_STORE)) db.createObjectStore(META_STORE, { keyPath: "key" });
+        };
+        openRequest.onsuccess = () => resolve(openRequest.result);
+        openRequest.onerror = () => reject(openRequest.error || new Error("IndexedDB gagal dibuka"));
+      });
+      return this.dbPromise;
+    }
+    async put(operation) {
+      if (!STATUSES.includes(operation.status)) throw new Error("Status outbox tidak valid");
+      const db = await this.open();
+      await request(db, "readwrite", OPERATIONS_STORE, (store) => store.put(clone(operation)));
+      return operation;
+    }
+    async putMany(operations) {
+      const db = await this.open();
+      await request(db, "readwrite", OPERATIONS_STORE, (store) => {
+        operations.forEach((operation) => store.put(clone(operation)));
+      });
+      return operations;
+    }
+    async get(operationIdValue) {
+      const db = await this.open();
+      return request(db, "readonly", OPERATIONS_STORE, (store) => store.get(operationIdValue));
+    }
+    async list(statuses, limit) {
+      const db = await this.open();
+      const rows = await request(db, "readonly", OPERATIONS_STORE, (store) => store.getAll());
+      const wanted = new Set(statuses || STATUSES);
+      return (rows || []).filter((row) => wanted.has(row.status)).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).slice(0, limit || 100);
+    }
+    async due(limit, now) {
+      const rows = await this.list(["pending", "failed", "sending"], 10000);
+      const timestamp = Number(now || Date.now());
+      const eligible = rows.filter((row) => row.status !== "sending" || timestamp - Date.parse(row.updatedAt || 0) > 120000)
+        .filter((row) => Number(row.nextAttemptAt || 0) <= timestamp);
+      if (!eligible.length) return [];
+      const firstGroupId = String(eligible[0].groupId || "");
+      if (firstGroupId) return eligible.filter((row) => String(row.groupId || "") === firstGroupId).slice(0, 100);
+      return eligible.slice(0, limit || 25);
+    }
+    async mark(operationIds, status, extra) {
+      const updates = [];
+      for (const id of operationIds) {
+        const row = await this.get(id);
+        if (!row) continue;
+        Object.assign(row, extra || {}, { status, updatedAt: new Date().toISOString() });
+        updates.push(row);
+      }
+      if (updates.length) await this.putMany(updates);
+      return updates;
+    }
+    async markSending(rows) {
+      const updates = rows.map((row) => Object.assign({}, row, { status: "sending", attempts: Number(row.attempts || 0) + 1, updatedAt: new Date().toISOString() }));
+      if (updates.length) await this.putMany(updates);
+      return updates;
+    }
+    async markFailed(rows, error) {
+      const updates = rows.map((row) => Object.assign({}, row, {
+        status: "failed",
+        lastError: String(error?.message || error || "Sync gagal"),
+        nextAttemptAt: Date.now() + retryDelay(row.attempts || 1),
+        updatedAt: new Date().toISOString()
+      }));
+      if (updates.length) await this.putMany(updates);
+      return updates;
+    }
+    async setMeta(key, value) {
+      const db = await this.open();
+      await request(db, "readwrite", META_STORE, (store) => store.put({ key, value: clone(value), updatedAt: new Date().toISOString() }));
+    }
+    async getMeta(key) {
+      const db = await this.open();
+      const row = await request(db, "readonly", META_STORE, (store) => store.get(key));
+      return row?.value;
+    }
+    async pruneAcknowledged(olderThanMs) {
+      const db = await this.open();
+      const rows = await request(db, "readonly", OPERATIONS_STORE, (store) => store.getAll());
+      const cutoff = Date.now() - Math.max(0, Number(olderThanMs || 0));
+      const removable = (rows || []).filter((row) => row.status === "acknowledged" && Date.parse(row.acknowledgedAt || row.updatedAt || row.createdAt || 0) < cutoff);
+      if (!removable.length) return 0;
+      await request(db, "readwrite", OPERATIONS_STORE, (store) => removable.forEach((row) => store.delete(row.operationId)));
+      return removable.length;
+    }
+  }
+
+  function rowsFromLegacyPending(pending, options) {
+    const operations = [];
+    Object.entries(pending?.tables || {}).forEach(([entity, change]) => {
+      (change.upserts || []).forEach((row) => operations.push(makeOperation("upsert", entity, row.id, { row, base: change.baseRows?.[row.id] || null }, options)));
+      (change.deletes || []).forEach((id) => operations.push(makeOperation("delete", entity, id, { id }, options)));
+    });
+    if (Object.keys(pending?.settings || {}).length) operations.push(makeOperation("settings", "settings", "settings", { settings: pending.settings }, options));
+    return operations;
+  }
+
+  async function migrateLegacy(outbox, localStorageImpl, config) {
+    const storage = localStorageImpl;
+    const markerKey = `migration:${config.storageKey}:v1`;
+    const existing = await outbox.getMeta(markerKey);
+    if (existing?.verified) return existing;
+    const rawState = storage?.getItem(config.storageKey);
+    const rawPending = storage?.getItem(config.pendingKey);
+    let stateSnapshot = null;
+    let pending = null;
+    try { stateSnapshot = rawState ? JSON.parse(rawState) : null; } catch {}
+    try { pending = rawPending ? JSON.parse(rawPending) : null; } catch {}
+    if (stateSnapshot) await outbox.setMeta("legacyStateSnapshot", stateSnapshot);
+    // Antrean legacy berasal dari sistem snapshot lama dan mungkin sudah masuk
+    // backend/recovery. Default-nya dikarantina, bukan langsung dikirim ulang.
+    const allowLegacyEnqueue = config.allowLegacyEnqueue === true;
+    if (pending) await outbox.setMeta("legacyPendingQuarantine", pending);
+    const operations = allowLegacyEnqueue ? rowsFromLegacyPending(pending, config.operationOptions || {}) : [];
+    if (operations.length) await outbox.putMany(operations);
+    const verification = {
+      copiedAt: new Date().toISOString(),
+      stateCopied: Boolean(stateSnapshot),
+      operationCount: operations.length,
+      legacyPendingQuarantined: Boolean(pending && !allowLegacyEnqueue),
+      verified: operations.length === 0 || (await outbox.list(STATUSES, 100000)).filter((row) => operations.some((item) => item.operationId === row.operationId)).length === operations.length,
+      legacyStoragePreserved: Boolean(rawState !== null || rawPending !== null)
+    };
+    await outbox.setMeta(markerKey, verification);
+    // Sengaja tidak pernah menghapus localStorage legacy.
+    return verification;
+  }
+
+  return { DB_NAME, DB_VERSION, STATUSES, RETRY_DELAYS, Outbox, operationId, makeOperation, retryDelay, rowsFromLegacyPending, migrateLegacy, normalizeEnvironment, dbNameForEnvironment };
+});

@@ -146,6 +146,24 @@
       if (updates.length) await this.putMany(updates);
       return updates;
     }
+    async deleteByStatuses(statuses) {
+      const rows = await this.list(statuses || [], 1000000);
+      if (!rows.length) return 0;
+      const db = await this.open();
+      await request(db, "readwrite", OPERATIONS_STORE, (store) => {
+        rows.forEach((row) => store.delete(row.operationId));
+      });
+      return rows.length;
+    }
+    async deleteMeta(keys) {
+      const wanted = (keys || []).map(String).filter(Boolean);
+      if (!wanted.length) return 0;
+      const db = await this.open();
+      await request(db, "readwrite", META_STORE, (store) => {
+        wanted.forEach((key) => store.delete(key));
+      });
+      return wanted.length;
+    }
     async setMeta(key, value) {
       const db = await this.open();
       await request(db, "readwrite", META_STORE, (store) => store.put({ key, value: clone(value), updatedAt: new Date().toISOString() }));
@@ -190,6 +208,20 @@
     };
   }
 
+  function validateProductionBaseline(response, expectedProductCount, businessKeys, expectedSpreadsheetId) {
+    if (!response?.ok || !response.data || typeof response.data !== "object") return { ok: false, error: "response-invalid" };
+    if (expectedSpreadsheetId && String(response.spreadsheetId || "") !== String(expectedSpreadsheetId)) return { ok: false, error: "spreadsheet-mismatch" };
+    const missing = (businessKeys || []).filter((key) => !Array.isArray(response.data[key]));
+    if (missing.length) return { ok: false, error: "snapshot-incomplete", missing };
+    const products = response.data.products || [];
+    const ids = new Set(products.map((row) => String(row?.id || "").trim()).filter(Boolean));
+    const active = products.filter((row) => ![false, 0, "0", "false", "inactive"].includes(row?.active)).length;
+    if (products.length !== expectedProductCount || ids.size !== expectedProductCount || active !== expectedProductCount) {
+      return { ok: false, error: "products-invalid", products: products.length, unique: ids.size, active };
+    }
+    return { ok: true, products: products.length, unique: ids.size, active };
+  }
+
   async function migrateLegacy(outbox, localStorageImpl, config) {
     const storage = localStorageImpl;
     const markerKey = `migration:${config.storageKey}:v1`;
@@ -216,5 +248,5 @@
     return verification;
   }
 
-  return { DB_NAME, DB_VERSION, STATUSES, RETRY_DELAYS, Outbox, operationId, makeOperation, retryDelay, rowsFromLegacyPending, migrateLegacy, stableStringify, reconciliationPayload, classifyReconciliation };
+  return { DB_NAME, DB_VERSION, STATUSES, RETRY_DELAYS, Outbox, operationId, makeOperation, retryDelay, rowsFromLegacyPending, migrateLegacy, stableStringify, reconciliationPayload, classifyReconciliation, validateProductionBaseline };
 });

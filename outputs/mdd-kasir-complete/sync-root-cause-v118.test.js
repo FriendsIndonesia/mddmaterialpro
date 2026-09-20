@@ -1,0 +1,25 @@
+"use strict";
+const assert = require("assert");
+const fs = require("fs");
+const Sync = require("./sync-v2.js");
+const html = fs.readFileSync(__dirname + "/matrialpro.html", "utf8");
+const backend = fs.readFileSync(__dirname + "/../../google-workspace-backend/Code.gs", "utf8");
+const worker = fs.readFileSync(__dirname + "/service-worker.js", "utf8");
+
+const op = Sync.makeOperation("upsert", "sales", "SAL-1", { row: { id: "SAL-1", total: 100 } });
+assert.equal(Sync.classifyReconciliation({ acknowledged: [op.operationId] }, [op]).pending.length, 0);
+assert.equal(Sync.classifyReconciliation({ alreadyPresent: [op.operationId] }, [op]).pending.length, 0);
+assert.equal(Sync.classifyReconciliation({ conflicts: [op.operationId] }, [op]).conflicts.length, 1);
+assert.equal(Sync.classifyReconciliation({}, [op]).pending.length, 1);
+assert.match(html, /const APP_VERSION = 119/);
+assert.match(html, /const PRODUCTION_ENDPOINT = "https:\/\/script\.google\.com\/macros\/s\/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur\/exec"/);
+assert.match(html, /if \(SYNC_ENVIRONMENT === "staging"\)[\s\S]*return PRODUCTION_ENDPOINT;/);
+assert.doesNotMatch(html, /return state\.profile\?\.googleEndpoint \|\| "";/);
+assert.match(html, /const current = await syncOutbox\.get\(row\.operationId\)/);
+assert.match(html, /!\["acknowledged", "conflict"\]\.includes\(current\.status\)/);
+assert.match(html, /reconciled\.alreadyPresent|receipt\.alreadyPresent|response\?\.alreadyPresent/);
+assert.match(backend, /alreadyPresent\.push\(operationId\)/);
+assert.match(backend, /manualReview\.push\(operationId\)/);
+assert.match(worker, /mdd-material-pro-v119-production-baseline/);
+assert.doesNotMatch(worker, /indexedDB\.deleteDatabase|localStorage\.clear/);
+console.log("sync-root-cause-v118: 10 reconciliation and durability gates passed");

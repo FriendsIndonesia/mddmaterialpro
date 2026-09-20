@@ -155,6 +155,15 @@
       });
       return rows.length;
     }
+    async deleteByOperationIds(operationIds) {
+      const ids = [...new Set((operationIds || []).map(String).filter(Boolean))];
+      if (!ids.length) return 0;
+      const db = await this.open();
+      await request(db, "readwrite", OPERATIONS_STORE, (store) => {
+        ids.forEach((id) => store.delete(id));
+      });
+      return ids.length;
+    }
     async deleteMeta(keys) {
       const wanted = (keys || []).map(String).filter(Boolean);
       if (!wanted.length) return 0;

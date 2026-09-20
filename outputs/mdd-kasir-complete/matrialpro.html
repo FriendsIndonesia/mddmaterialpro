@@ -799,8 +799,8 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 119;
-      const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V119";
+      const APP_VERSION = 120;
+      const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V120";
       const PRODUCTION_PRODUCT_COUNT = 2699;
       const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec";
       const EXPECTED_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ";
@@ -888,6 +888,7 @@
       const syncOutbox = new MDDSyncV2.Outbox();
       const syncDeviceId = loadSyncDeviceId();
       let operationSnapshot = JSON.parse(JSON.stringify(state));
+      let baselineInProgress = false;
       let outboxReady = false;
       let lastChangeCursor = "";
       // Cache yang sudah ada menjadi baseline awal. Tanpa baseline ini seluruh
@@ -1139,6 +1140,7 @@
         return operations;
       }
       function captureOperations(action) {
+        if (baselineInProgress) return Promise.resolve([]);
         const operations = buildOperationsFromState(operationSnapshot || state, state, action);
         operationSnapshot = JSON.parse(JSON.stringify(state));
         if (!operations.length) return Promise.resolve([]);
@@ -1168,6 +1170,7 @@
         bootstrap.Toast.getOrCreateInstance(document.getElementById("appToast")).show();
       }
       function queueGoogleWorkspaceSync() {
+        if (baselineInProgress) return;
         if (!state.profile?.onlineMode || !activeBackendEndpoint()) return;
         clearTimeout(syncTimer);
         syncPending = true;
@@ -1459,7 +1462,7 @@
       }
 
       async function refreshGoogleWorkspaceState() {
-        if (isSyncing || syncPending || isPulling || document.hidden) return;
+        if (baselineInProgress || isSyncing || syncPending || isPulling || document.hidden) return;
         isPulling = true;
         try {
           if (!await verifyActiveBackend()) return;
@@ -1631,7 +1634,7 @@
           });
           lastChangeCursor = String((await syncOutbox.getMeta("changeCursor")) || "");
           outboxReady = true;
-          await applyForceProductionBaselineV119();
+          await applyForceProductionBaselineV120();
           operationSnapshot = JSON.parse(JSON.stringify(state));
           const pending = await syncOutbox.list(["pending", "failed", "sending"], 1);
           if (!lastChangeCursor && !pending.length && session) await bootstrapWorkspaceStateOnce();
@@ -1646,47 +1649,64 @@
           setBackendSyncBanner("danger", `SYNC ERROR • IndexedDB gagal disiapkan (${error.message || error})`);
         }
       }
-      async function applyForceProductionBaselineV119() {
+      async function applyForceProductionBaselineV120() {
         if ((await syncOutbox.getMeta("baselineVersion")) === FORCE_PRODUCTION_BASELINE) return false;
-        const pending = await syncOutbox.list(["pending", "sending"], 1);
+        const pending = await syncOutbox.list(["pending", "sending", "failed"], 1);
         if (pending.length || !navigator.onLine || !await verifyActiveBackend()) return false;
+        const previousState = JSON.parse(JSON.stringify(state));
+        const previousStorage = localStorage.getItem(STORAGE_KEY);
+        const legacyRows = await syncOutbox.list(["acknowledged", "conflict"], 1000000);
+        baselineInProgress = true;
+        const shell = document.getElementById("appShell");
+        if (shell) shell.style.pointerEvents = "none";
+        setBackendSyncBanner("warning", "SYNCING • membangun baseline production");
+        try {
+          const [health, snapshot, cursorResponse] = await Promise.all([
+            requestGoogleWorkspaceJsonp("health", { clientVersion: APP_VERSION }),
+            requestGoogleWorkspaceJsonp("state"),
+            requestGoogleWorkspaceJsonp("changes", { cursor: "latest" })
+          ]);
+          if (!health?.ok || String(health.environment || "") !== "production") throw new Error("Environment baseline bukan production");
+          if (!cursorResponse?.ok || !cursorResponse.cursor) throw new Error("Cursor baseline production tidak tersedia");
+          const validation = MDDSyncV2.validateProductionBaseline(snapshot, PRODUCTION_PRODUCT_COUNT, SYNC_TABLE_KEYS, EXPECTED_SPREADSHEET_ID);
+          if (!validation.ok) throw new Error(`Snapshot production tidak valid (${validation.error})`);
 
-        const [health, snapshot] = await Promise.all([
-          requestGoogleWorkspaceJsonp("health", { clientVersion: APP_VERSION }),
-          requestGoogleWorkspaceJsonp("state")
-        ]);
-        if (!health?.ok || String(health.environment || "") !== "production") throw new Error("Environment baseline bukan production");
-        const validation = MDDSyncV2.validateProductionBaseline(snapshot, PRODUCTION_PRODUCT_COUNT, SYNC_TABLE_KEYS, EXPECTED_SPREADSHEET_ID);
-        if (!validation.ok) throw new Error(`Snapshot production tidak valid (${validation.error})`);
+          const preservedSettings = Object.fromEntries(SYNC_SETTING_KEYS.map((key) => [key, state[key] === undefined ? undefined : JSON.parse(JSON.stringify(state[key]))]));
+          const rebuilt = normalizeState(Object.assign(defaultState(), preservedSettings));
+          SYNC_TABLE_KEYS.forEach((key) => { rebuilt[key] = JSON.parse(JSON.stringify(snapshot.data[key])); });
+          normalizeState(rebuilt);
+          Object.keys(state).forEach((key) => delete state[key]);
+          Object.assign(state, rebuilt);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 
-        const preservedSettings = Object.fromEntries(SYNC_SETTING_KEYS.map((key) => [key, JSON.parse(JSON.stringify(state[key]))]));
-        const rebuilt = normalizeState(Object.assign(defaultState(), preservedSettings));
-        SYNC_TABLE_KEYS.forEach((key) => { rebuilt[key] = JSON.parse(JSON.stringify(snapshot.data[key])); });
-        normalizeState(rebuilt);
-        Object.keys(state).forEach((key) => delete state[key]);
-        Object.assign(state, rebuilt);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          const stored = normalizeState(Object.assign(defaultState(), JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}")));
+          const storedValidation = MDDSyncV2.validateProductionBaseline({ ok: true, spreadsheetId: EXPECTED_SPREADSHEET_ID, data: stored }, PRODUCTION_PRODUCT_COUNT, SYNC_TABLE_KEYS, EXPECTED_SPREADSHEET_ID);
+          if (!storedValidation.ok) throw new Error(`Verifikasi cache baseline gagal (${storedValidation.error})`);
 
-        const stored = normalizeState(Object.assign(defaultState(), JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}")));
-        const storedValidation = MDDSyncV2.validateProductionBaseline({ ok: true, spreadsheetId: EXPECTED_SPREADSHEET_ID, data: stored }, PRODUCTION_PRODUCT_COUNT, SYNC_TABLE_KEYS, EXPECTED_SPREADSHEET_ID);
-        if (!storedValidation.ok) throw new Error(`Verifikasi cache baseline gagal (${storedValidation.error})`);
-
-        lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
-        operationSnapshot = JSON.parse(JSON.stringify(state));
-        durablePendingSync = { tables: {}, settings: {} };
-        localStorage.setItem(PENDING_SYNC_STORAGE_KEY, JSON.stringify(durablePendingSync));
-        await syncOutbox.deleteByStatuses(["acknowledged", "failed", "conflict"]);
-        await syncOutbox.deleteMeta(["syncBaselineVersion", "syncBaselineAppliedAt", "legacyReconciliationState", "retryState"]);
-
-        const cursorResponse = await requestGoogleWorkspaceJsonp("changes", { cursor: "latest" });
-        lastChangeCursor = String(cursorResponse?.cursor || "");
-        if (lastChangeCursor) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
-        await syncOutbox.setMeta("baselineVersion", FORCE_PRODUCTION_BASELINE);
-        await syncOutbox.setMeta("baselineCompletedAt", new Date().toISOString());
-        await syncOutbox.setMeta("baselineRevision", String(health.revision || ""));
-        await updateSyncIndicator();
-        if (session) renderSyncedState();
-        return true;
+          lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
+          operationSnapshot = JSON.parse(JSON.stringify(state));
+          durablePendingSync = { tables: {}, settings: {} };
+          localStorage.setItem(PENDING_SYNC_STORAGE_KEY, JSON.stringify(durablePendingSync));
+          lastChangeCursor = String(cursorResponse.cursor);
+          await syncOutbox.setMeta("changeCursor", lastChangeCursor);
+          await syncOutbox.deleteByOperationIds(legacyRows.map((row) => row.operationId));
+          await syncOutbox.deleteMeta(["syncBaselineVersion", "syncBaselineAppliedAt", "legacyReconciliationState", "retryState"]);
+          await syncOutbox.setMeta("baselineVersion", FORCE_PRODUCTION_BASELINE);
+          await syncOutbox.setMeta("baselineCompletedAt", new Date().toISOString());
+          await syncOutbox.setMeta("baselineRevision", String(health.revision || ""));
+          if (session) renderSyncedState();
+          return true;
+        } catch (error) {
+          Object.keys(state).forEach((key) => delete state[key]);
+          Object.assign(state, previousState);
+          localStorage.setItem(STORAGE_KEY, previousStorage === null ? JSON.stringify(previousState) : previousStorage);
+          operationSnapshot = JSON.parse(JSON.stringify(state));
+          throw error;
+        } finally {
+          baselineInProgress = false;
+          if (shell) shell.style.pointerEvents = "";
+          await updateSyncIndicator();
+        }
       }
       async function bootstrapWorkspaceStateOnce() {
         if (!await verifyActiveBackend()) return false;
@@ -4576,7 +4596,7 @@
         }
       }
       async function syncGoogleWorkspace() {
-        if (isSyncing || !outboxReady) return;
+        if (baselineInProgress || isSyncing || !outboxReady) return;
         const endpoint = activeBackendEndpoint();
         if (!endpoint || !navigator.onLine) return updateSyncIndicator();
         isSyncing = true;

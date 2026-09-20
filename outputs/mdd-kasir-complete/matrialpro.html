@@ -2370,7 +2370,7 @@
         });
         const values = labels.map((label) => sourceSales.filter((sale) => transactionDateKey(sale.date) === label).reduce((sum, sale) => sum + toNumber(sale.total), 0));
         if (salesChart) salesChart.destroy();
-        salesChart = new Chart(document.getElementById("salesChart"), { type: "bar", data: { labels: labels.map(displayDate), datasets: [{ label: "Omzet", data: values, backgroundColor: "#2563eb" }] }, options: { responsive: true, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `Omzet: ${idr.format(context.raw || 0)}` } } } } });
+        salesChart = new Chart(document.getElementById("salesChart"), { type: "bar", data: { labels: labels.map(displayDate), datasets: [{ label: "Omzet", data: values, 45000 : 10000 }] }, options: { responsive: true, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `Omzet: ${idr.format(context.raw || 0)}` } } } } });
       }
 
       function renderCashier() {

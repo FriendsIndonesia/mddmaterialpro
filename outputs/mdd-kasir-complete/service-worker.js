@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v122-sync-integrity";
+const CACHE_NAME = "mdd-material-pro-v123-dashboard-date-fix";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
@@ -21,7 +21,7 @@ self.addEventListener("activate", (event) => {
       Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
     ).then(() => self.clients.claim()).then(() =>
       self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) =>
-        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 122 }))
+        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 123 }))
       )
     )
   );

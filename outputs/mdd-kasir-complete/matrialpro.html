@@ -799,7 +799,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 122;
+      const APP_VERSION = 123;
       const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V121";
       const PRODUCTION_PRODUCT_COUNT = 2699;
       const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec";
@@ -2130,12 +2130,15 @@
         if (id.startsWith("SUPPLIER-")) return personName(state.suppliers, id.replace("SUPPLIER-", ""));
         return personName(state.customers, id);
       }
-      function isToday(value) {
+      function transactionDateKey(value) {
         const text = String(value || "").trim();
         const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
-        if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}` === today();
+        if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
         const local = text.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
-        return local ? `${local[3]}-${local[2]}-${local[1]}` === today() : false;
+        return local ? `${local[3]}-${local[2]}-${local[1]}` : "";
+      }
+      function isToday(value) {
+        return transactionDateKey(value) === today();
       }
       function isCashierSale(row) {
         return Boolean(row && Array.isArray(row.items) && row.items.length > 0);
@@ -2361,9 +2364,11 @@
         const labels = Array.from({ length: 14 }, (_, i) => {
           const d = new Date();
           d.setDate(d.getDate() - (13 - i));
-          return d.toISOString().slice(0, 10);
+          // Gunakan tanggal lokal yang sama dengan input transaksi. toISOString
+          // dapat bergeser satu hari dan data lama juga dapat memakai DD/MM/YYYY.
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
         });
-        const values = labels.map((label) => sourceSales.filter((s) => String(s.date || "").slice(0, 10) === label).reduce((sum, s) => sum + toNumber(s.total), 0));
+        const values = labels.map((label) => sourceSales.filter((sale) => transactionDateKey(sale.date) === label).reduce((sum, sale) => sum + toNumber(sale.total), 0));
         if (salesChart) salesChart.destroy();
         salesChart = new Chart(document.getElementById("salesChart"), { type: "bar", data: { labels: labels.map(displayDate), datasets: [{ label: "Omzet", data: values, backgroundColor: "#2563eb" }] }, options: { responsive: true, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `Omzet: ${idr.format(context.raw || 0)}` } } } } });
       }

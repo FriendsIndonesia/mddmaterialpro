@@ -29,7 +29,10 @@ function doGet(e) {
   const callback = e && e.parameter && e.parameter.callback;
   let payload;
   if (action === "revision") payload = { ok: true, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION };
-  else if (action === "health") payload = { ok: true, app: APP_NAME, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION, serverTime: new Date().toISOString() };
+  else if (action === "health") payload = { ok: true, app: APP_NAME, revision: getRevision_(), syncProtocol: 4, environment: PropertiesService.getScriptProperties().getProperty("SYNC_ENVIRONMENT") || "production", minimumClientVersion: MINIMUM_CLIENT_VERSION, serverTime: new Date().toISOString() };
+  else if (action === "acknowledgement") payload = operationAcknowledgement_(ss, String((e && e.parameter && e.parameter.operationIds) || ""));
+  else if (action === "reconcile") payload = reconcileOperations_(ss, String((e && e.parameter && e.parameter.operations) || "[]"));
+  else if (action === "changes") payload = incrementalChanges_(ss, String((e && e.parameter && e.parameter.cursor) || ""));
   else if (action === "state") payload = readState_(ss);
   else if (action === "receipt") payload = { ok: true, processed: hasProcessedSync_(ss, String((e && e.parameter && e.parameter.requestId) || "")) };
   else if (action === "auth") payload = { ok: true, app: APP_NAME, source: "Sheets", data: readProfile_(ss) };
@@ -60,6 +63,10 @@ function doPost(e) {
     }
     const data = payload.data || {};
     const ss = getSpreadsheet_();
+
+    if (Number(payload.syncProtocol || 0) >= 4 && Array.isArray(payload.operations)) {
+      return output_(processOperations_(ss, payload));
+    }
 
     const requestId = String(payload.requestId || "").trim();
     if (requestId && hasProcessedSync_(ss, requestId)) {
@@ -113,6 +120,230 @@ function doPost(e) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function operationReceiptSheet_(ss) {
+  return ensureSheet_(ss, "OperationReceipts", ["operationId", "status", "processedAt", "deviceId", "entity", "entityId", "error"]);
+}
+
+function changeLogSheet_(ss) {
+  return ensureSheet_(ss, "ChangeLog", ["cursor", "changedAt", "operationId", "entity", "entityId", "changeType", "payloadJson"]);
+}
+
+function operationReceiptMap_(ss, operationIds) {
+  const result = {};
+  const sheet = operationReceiptSheet_(ss);
+  const cache = CacheService.getScriptCache();
+  (operationIds || []).filter(Boolean).forEach((rawId) => {
+    const id = String(rawId);
+    const cacheKey = "OP_" + id.slice(-64);
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      result[id] = parseValue_(cached);
+      return;
+    }
+    if (sheet.getLastRow() < 2) return;
+    const matches = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).createTextFinder(id).matchEntireCell(true).findAll();
+    if (!matches.length) return;
+    const row = sheet.getRange(matches[matches.length - 1].getRow(), 1, 1, 7).getValues()[0];
+    result[id] = { status: String(row[1] || ""), error: String(row[6] || "") };
+    cache.put(cacheKey, JSON.stringify(result[id]), 21600);
+  });
+  return result;
+}
+
+function operationAcknowledgement_(ss, idsCsv) {
+  const ids = String(idsCsv || "").split(",").map((id) => id.trim()).filter(Boolean).slice(0, 100);
+  const receipts = operationReceiptMap_(ss, ids);
+  return {
+    ok: true,
+    acknowledged: ids.filter((id) => receipts[id] && receipts[id].status === "acknowledged"),
+    conflicts: ids.filter((id) => receipts[id] && receipts[id].status === "conflict"),
+    pending: ids.filter((id) => !receipts[id]),
+    revision: getRevision_()
+  };
+}
+
+function stableJson_(value) {
+  if (Array.isArray(value)) return "[" + value.map(stableJson_).join(",") + "]";
+  if (value && typeof value === "object") return "{" + Object.keys(value).sort().map(function(key) { return JSON.stringify(key) + ":" + stableJson_(value[key]); }).join(",") + "}";
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+function reconcileOperations_(ss, operationsJson) {
+  let operations = [];
+  try { operations = JSON.parse(operationsJson || "[]"); } catch (error) { return { ok: false, error: "Payload reconciliation tidak valid" }; }
+  const acknowledged = [], alreadyPresent = [], conflicts = [], manualReview = [], pending = [];
+  const receiptMap = operationReceiptMap_(ss, operations.map(function(op) { return String(op.operationId || ""); }));
+  const tableCache = {};
+  operations.slice(0, 25).forEach(function(operation) {
+    const operationId = String(operation.operationId || "");
+    if (!operationId) return;
+    if (receiptMap[operationId] && receiptMap[operationId].status === "acknowledged") { acknowledged.push(operationId); return; }
+    if (receiptMap[operationId] && receiptMap[operationId].status === "conflict") { conflicts.push(operationId); return; }
+    const type = String(operation.type || ""), entity = String(operation.entity || ""), entityId = String(operation.entityId || "");
+    if (["stock_delta", "delete", "settings"].indexOf(type) >= 0) { manualReview.push(operationId); return; }
+    const table = TABLES.find(function(item) { return item.key === entity; });
+    if (!table || !entityId) { manualReview.push(operationId); return; }
+    if (!tableCache[entity]) {
+      tableCache[entity] = {};
+      readTableDefinition_(ss, table).forEach(function(row) { tableCache[entity][String(row.id || "")] = row; });
+    }
+    const backendRow = tableCache[entity][entityId];
+    if (!backendRow) { pending.push(operationId); return; }
+    const fingerprint = String(operation.fingerprint || "");
+    if (!fingerprint) { manualReview.push(operationId); return; }
+    const comparableBackend = {};
+    table.fields.forEach(function(field) { comparableBackend[field] = backendRow[field] === undefined ? "" : backendRow[field]; });
+    if (stableJson_(comparableBackend) === fingerprint) alreadyPresent.push(operationId);
+    else conflicts.push(operationId);
+  });
+  return { ok: true, acknowledged: acknowledged, alreadyPresent: alreadyPresent, conflicts: conflicts, manualReview: manualReview, pending: pending, revision: getRevision_() };
+}
+
+function processOperations_(ss, payload) {
+  const configuredEnvironment = PropertiesService.getScriptProperties().getProperty("SYNC_ENVIRONMENT") || "production";
+  if (String(payload.environment || "production") !== configuredEnvironment) {
+    return { ok: false, environmentMismatch: true, error: "Endpoint " + configuredEnvironment + " menolak payload " + payload.environment };
+  }
+  const operations = (payload.operations || []).slice(0, 25);
+  const existing = operationReceiptMap_(ss, operations.map((operation) => operation.operationId));
+  const receiptSheet = operationReceiptSheet_(ss);
+  const acknowledged = [];
+  const conflicts = [];
+  const seenBatch = {};
+  operations.forEach((operation) => {
+    const operationId = String(operation.operationId || "").trim();
+    if (!operationId) return;
+    if (seenBatch[operationId]) {
+      if (seenBatch[operationId] === "conflict") conflicts.push(operationId);
+      else acknowledged.push(operationId);
+      return;
+    }
+    if (existing[operationId] && ["acknowledged", "conflict"].indexOf(existing[operationId].status) >= 0) {
+      if (existing[operationId].status === "conflict") conflicts.push(operationId);
+      else acknowledged.push(operationId);
+      seenBatch[operationId] = existing[operationId].status;
+      return;
+    }
+    let status = "acknowledged";
+    let error = "";
+    try {
+      applyOperation_(ss, operation);
+      appendChangeLog_(ss, operation);
+      acknowledged.push(operationId);
+    } catch (operationError) {
+      status = String(operationError && operationError.name || "") === "ConflictError" ? "conflict" : "failed";
+      error = String(operationError && operationError.message ? operationError.message : operationError);
+      if (status === "conflict") conflicts.push(operationId);
+    }
+    receiptSheet.appendRow([operationId, status, new Date(), payload.deviceId || operation.deviceId || "", operation.entity || "", operation.entityId || "", error]);
+    CacheService.getScriptCache().put("OP_" + operationId.slice(-64), JSON.stringify({ status: status, error: error }), 21600);
+    seenBatch[operationId] = status;
+  });
+  trimTechnicalSheet_(receiptSheet, 100000);
+  const revision = touchRevision_();
+  return { ok: true, acknowledged: acknowledged, conflicts: conflicts, revision: revision };
+}
+
+function applyOperation_(ss, operation) {
+  const type = String(operation.type || "");
+  const entity = String(operation.entity || "");
+  const table = TABLES.find((item) => item.key === entity);
+  if (type === "stock_delta") return applyStockDelta_(ss, operation);
+  if (type === "payment_delta") return applyPaymentDelta_(ss, operation);
+  if (type === "settings") return writeProfile_(ss, operation.payload && operation.payload.settings || {});
+  if (!table) throw new Error("Entitas operasi tidak dikenal: " + entity);
+  if (type === "upsert") {
+    const row = operation.payload && operation.payload.row;
+    if (!row || !String(row.id || operation.entityId || "").trim()) throw new Error("Upsert tidak memiliki ID stabil");
+    if (!row.id) row.id = operation.entityId;
+    return applyTableChanges_(ss, table, { upserts: [row], deletes: [], baseRows: operation.payload.base ? { [row.id]: operation.payload.base } : {} });
+  }
+  if (type === "delete") return applyTableChanges_(ss, table, { upserts: [], deletes: [operation.entityId], deleteMode: "explicit" });
+  throw new Error("Tipe operasi tidak dikenal: " + type);
+}
+
+function applyStockDelta_(ss, operation) {
+  const table = TABLES.find((item) => item.key === "products");
+  const sheet = ensureSheet_(ss, table.sheet, table.fields);
+  const id = String(operation.payload && operation.payload.productId || operation.entityId || "").trim();
+  const delta = Number(operation.payload && operation.payload.delta || 0);
+  if (!id || !isFinite(delta)) throw new Error("Stock delta tidak valid");
+  const idColumn = table.fields.indexOf("id") + 1;
+  const stockColumn = table.fields.indexOf("stock") + 1;
+  const stockAkhirColumn = table.fields.indexOf("stockAkhir") + 1;
+  const stockInColumn = table.fields.indexOf("stockIn") + 1;
+  const stockOutColumn = table.fields.indexOf("stockOut") + 1;
+  const ids = sheet.getLastRow() > 1 ? sheet.getRange(2, idColumn, sheet.getLastRow() - 1, 1).getDisplayValues() : [];
+  const index = ids.findIndex((row) => String(row[0] || "").trim() === id);
+  if (index < 0) throw new Error("Produk stock delta tidak ditemukan: " + id);
+  const rowNumber = index + 2;
+  const current = Number(sheet.getRange(rowNumber, stockColumn).getValue() || 0);
+  const next = current + delta;
+  if (next < -0.000001) {
+    const conflict = new Error("Stok tidak cukup. Stok terbaru " + current + ", delta " + delta);
+    conflict.name = "ConflictError";
+    throw conflict;
+  }
+  sheet.getRange(rowNumber, stockColumn).setValue(Math.max(0, next));
+  sheet.getRange(rowNumber, stockAkhirColumn).setValue(Math.max(0, next));
+  if (delta > 0) sheet.getRange(rowNumber, stockInColumn).setValue(Number(sheet.getRange(rowNumber, stockInColumn).getValue() || 0) + delta);
+  if (delta < 0) sheet.getRange(rowNumber, stockOutColumn).setValue(Number(sheet.getRange(rowNumber, stockOutColumn).getValue() || 0) + Math.abs(delta));
+}
+
+function applyPaymentDelta_(ss, operation) {
+  const payment = operation.payload && operation.payload.payment;
+  if (!payment || !payment.id) throw new Error("Payment delta tidak valid");
+  const paymentTable = TABLES.find((item) => item.key === "payments");
+  applyTableChanges_(ss, paymentTable, { upserts: [payment], deletes: [] });
+  if (/^DP\s/i.test(String(payment.method || ""))) return;
+  const isDebt = String(payment.type || "").toLowerCase() === "hutang";
+  const targetTable = TABLES.find((item) => item.key === (isDebt ? "purchases" : "sales"));
+  const sheet = ensureSheet_(ss, targetTable.sheet, targetTable.fields);
+  const idColumn = targetTable.fields.indexOf("id") + 1;
+  const ids = sheet.getLastRow() > 1 ? sheet.getRange(2, idColumn, sheet.getLastRow() - 1, 1).getDisplayValues() : [];
+  const index = ids.findIndex((row) => String(row[0] || "").trim() === String(payment.refId || "").trim());
+  if (index < 0) throw new Error("Referensi pembayaran tidak ditemukan: " + payment.refId);
+  const rowNumber = index + 2;
+  const paidColumn = targetTable.fields.indexOf("paid") + 1;
+  const dueColumn = targetTable.fields.indexOf("due") + 1;
+  const amount = Number(payment.amount || 0);
+  const paid = Number(sheet.getRange(rowNumber, paidColumn).getValue() || 0);
+  const due = Number(sheet.getRange(rowNumber, dueColumn).getValue() || 0);
+  sheet.getRange(rowNumber, paidColumn).setValue(paid + amount);
+  sheet.getRange(rowNumber, dueColumn).setValue(Math.max(0, due - amount));
+}
+
+function appendChangeLog_(ss, operation) {
+  const sheet = changeLogSheet_(ss);
+  const cursor = String(Date.now()) + "-" + Utilities.getUuid().slice(0, 8);
+  sheet.appendRow([cursor, new Date(), operation.operationId, operation.entity, operation.entityId, operation.type, JSON.stringify(operation.payload || {})]);
+  trimTechnicalSheet_(sheet, 5000);
+}
+
+function incrementalChanges_(ss, cursor) {
+  const sheet = changeLogSheet_(ss);
+  if (sheet.getLastRow() < 2) return { ok: true, cursor: cursor || "", changes: [] };
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 7).getValues();
+  if (cursor === "latest") return { ok: true, cursor: rows.length ? String(rows[rows.length - 1][0]) : "", changes: [] };
+  let start = 0;
+  if (cursor) {
+    const found = rows.findIndex((row) => String(row[0]) === cursor);
+    start = found >= 0 ? found + 1 : Math.max(0, rows.length - 250);
+  }
+  const selected = rows.slice(start, start + 250);
+  return {
+    ok: true,
+    cursor: selected.length ? String(selected[selected.length - 1][0]) : String(cursor || ""),
+    hasMore: start + selected.length < rows.length,
+    changes: selected.map((row) => ({ cursor: String(row[0]), changedAt: row[1], operationId: String(row[2]), entity: String(row[3]), entityId: String(row[4]), type: String(row[5]), payload: parseValue_(row[6]) }))
+  };
+}
+
+function trimTechnicalSheet_(sheet, maxRows) {
+  const excess = sheet.getLastRow() - Number(maxRows || 5000) - 1;
+  if (excess > 0) sheet.deleteRows(2, excess);
 }
 
 function setupMddMaterialPro() {

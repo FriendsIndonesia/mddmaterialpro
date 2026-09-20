@@ -200,7 +200,12 @@
       type: String(operation?.type || ""),
       entity: String(operation?.entity || ""),
       entityId: String(operation?.entityId || ""),
-      fingerprint: stableStringify(operation?.payload?.row || operation?.payload?.payment || null)
+      fingerprint: stableStringify(operation?.payload?.row || operation?.payload?.payment || null),
+      // Reconciliation needs the original baseline as well as the requested
+      // values. A fingerprint alone cannot distinguish a legitimate update
+      // from a stale overwrite of the same stable entity.
+      row: operation?.payload?.row || operation?.payload?.payment || null,
+      base: operation?.payload?.base || null
     };
   }
 

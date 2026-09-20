@@ -799,7 +799,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 121;
+      const APP_VERSION = 122;
       const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V121";
       const PRODUCTION_PRODUCT_COUNT = 2699;
       const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec";
@@ -1107,8 +1107,14 @@
         ["stock", "stockAkhir", "stockIn", "stockOut"].forEach((key) => delete copy[key]);
         return copy;
       }
+      function operationWithoutPaymentBalance(row) {
+        const copy = JSON.parse(JSON.stringify(row || {}));
+        ["paid", "due", "status"].forEach((key) => delete copy[key]);
+        return copy;
+      }
       function buildOperationsFromState(previous, current, action) {
         const operations = [];
+        const newPaymentsByReference = new Set((current.payments || []).filter((row) => !(previous.payments || []).some((old) => String(old.id) === String(row.id))).map((row) => String(row.refId || "")).filter(Boolean));
         SYNC_TABLE_KEYS.forEach((key) => {
           const before = new Map((previous[key] || []).map((row) => [operationRowId(key, row), row]).filter(([id]) => id));
           const after = new Map((current[key] || []).map((row) => [operationRowId(key, row), row]).filter(([id]) => id));
@@ -1122,6 +1128,13 @@
               const oldNonStock = operationWithoutStock(old);
               const newNonStock = operationWithoutStock(row);
               if (JSON.stringify(oldNonStock) !== JSON.stringify(newNonStock)) operations.push(MDDSyncV2.makeOperation("upsert", key, id, { row: newNonStock, base: oldNonStock }, common));
+            } else if (["sales", "purchases"].includes(key) && old && newPaymentsByReference.has(String(id))) {
+              // The payment_delta operation is the sole authority for paid/due.
+              // Send other edits on the invoice, but never a stale absolute
+              // balance that would cause the same payment to be applied twice.
+              const oldBusiness = operationWithoutPaymentBalance(old);
+              const newBusiness = operationWithoutPaymentBalance(row);
+              if (JSON.stringify(oldBusiness) !== JSON.stringify(newBusiness)) operations.push(MDDSyncV2.makeOperation("upsert", key, id, { row: newBusiness, base: oldBusiness }, common));
             } else if (key === "payments" && !old) {
               operations.push(MDDSyncV2.makeOperation("payment_delta", key, id, { payment: row }, common));
             } else {
@@ -1500,6 +1513,9 @@
         if (await syncOutbox.get(change.operationId)) return false;
         const key = change.entity;
         const payload = change.payload || {};
+        if (change.type === "refresh") {
+          return loadGoogleWorkspaceState(payload.scope || "state");
+        }
         if (change.type === "settings") {
           Object.assign(state, payload.settings || {});
           return true;

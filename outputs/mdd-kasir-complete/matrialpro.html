@@ -748,6 +748,7 @@
             <section class="panel">
               <div class="panel-header"><h3>Grafik Pendapatan</h3><span class="chip">14 hari</span></div>
               <canvas id="salesChart" height="140"></canvas>
+              <div id="salesChartToday" class="small text-secondary text-center mt-2"></div>
             </section>
             <section class="panel">
               <div class="panel-header"><h3>Warning Stok</h3><span id="lowStockCount" class="chip">0 item</span></div>
@@ -799,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 123;
+      const APP_VERSION = 124;
       const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V121";
       const PRODUCTION_PRODUCT_COUNT = 2699;
       const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec";
@@ -1346,7 +1347,7 @@
           const timer = setTimeout(() => {
             cleanup();
             resolve(false);
-          }, ["state", "finance", "masterlite", "master", "products", "receipt"].includes(action) ? 30000 : 10000);
+          }, ["state", "finance", "masterlite", "master", "products", "baselinepart", "receipt"].includes(action) ? 45000 : 10000);
           window[callbackName] = (response) => {
             clearTimeout(timer);
             cleanup();
@@ -1663,6 +1664,12 @@
             scheduleProductionBaselineRetry();
             return;
           }
+          const baselineComplete = (await syncOutbox.getMeta("baselineVersion")) === FORCE_PRODUCTION_BASELINE;
+          if (SYNC_ENVIRONMENT === "production" && !baselineComplete) {
+            await updateSyncIndicator();
+            scheduleProductionBaselineRetry();
+            return;
+          }
           operationSnapshot = JSON.parse(JSON.stringify(state));
           const pending = await syncOutbox.list(["pending", "failed", "sending"], 1);
           if (!lastChangeCursor && !pending.length && session) await bootstrapWorkspaceStateOnce();
@@ -1710,12 +1717,31 @@
         if (shell) shell.style.pointerEvents = "none";
         setBackendSyncBanner("warning", "SYNCING • membangun baseline production");
         try {
-          const [health, snapshot, cursorResponse] = await Promise.all([
+          const health = await requestGoogleWorkspaceJsonp("health", { clientVersion: APP_VERSION });
+          if (!health?.ok || String(health.environment || "") !== "production") throw new Error("Environment baseline bukan production");
+          const startingRevision = String(health.revision || "");
+          // Gunakan endpoint production yang sudah aktif dan teruji. Membagi
+          // baseline menjadi tiga respons mencegah satu JSONP sangat besar
+          // menggantung di perangkat Android dengan memori terbatas.
+          const baselineActions = ["products", "masterlite", "finance"];
+          const snapshot = { ok: true, spreadsheetId: EXPECTED_SPREADSHEET_ID, data: {} };
+          for (let index = 0; index < baselineActions.length; index += 1) {
+            setBackendSyncBanner("warning", `INITIALIZING • mengunduh database production ${index + 1}/${baselineActions.length}`);
+            const part = await requestGoogleWorkspaceJsonp(baselineActions[index]);
+            if (!part?.ok || !part.data || String(part.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) {
+              throw new Error(`Bagian baseline ${index + 1}/${baselineActions.length} tidak valid`);
+            }
+            Object.assign(snapshot.data, part.data || {});
+          }
+          // History bukan sumber saldo/stok dan endpoint ringan production
+          // memang tidak memuatnya. Pertahankan cache history perangkat agar
+          // baseline tidak menghapus riwayat lokal yang masih dibutuhkan.
+          snapshot.data.history = Array.isArray(previousState.history) ? JSON.parse(JSON.stringify(previousState.history)) : [];
+          const [endingHealth, cursorResponse] = await Promise.all([
             requestGoogleWorkspaceJsonp("health", { clientVersion: APP_VERSION }),
-            requestGoogleWorkspaceJsonp("state"),
             requestGoogleWorkspaceJsonp("changes", { cursor: "latest" })
           ]);
-          if (!health?.ok || String(health.environment || "") !== "production") throw new Error("Environment baseline bukan production");
+          if (!endingHealth?.ok || String(endingHealth.revision || "") !== startingRevision) throw new Error("Revision production berubah saat baseline dibangun");
           if (!cursorResponse?.ok || !cursorResponse.cursor) throw new Error("Cursor baseline production tidak tersedia");
           const validation = MDDSyncV2.validateProductionBaseline(snapshot, PRODUCTION_PRODUCT_COUNT, SYNC_TABLE_KEYS, EXPECTED_SPREADSHEET_ID);
           if (!validation.ok) throw new Error(`Snapshot production tidak valid (${validation.error})`);
@@ -2370,7 +2396,25 @@
         });
         const values = labels.map((label) => sourceSales.filter((sale) => transactionDateKey(sale.date) === label).reduce((sum, sale) => sum + toNumber(sale.total), 0));
         if (salesChart) salesChart.destroy();
-        salesChart = new Chart(document.getElementById("salesChart"), { type: "bar", data: { labels: labels.map(displayDate), datasets: [{ label: "Omzet", data: values, backgroundColor: "#2563eb" }] }, options: { responsive: true, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `Omzet: ${idr.format(context.raw || 0)}` } } } } });
+        const todayValue = values[values.length - 1] || 0;
+        const todaySummary = document.getElementById("salesChartToday");
+        if (todaySummary) todaySummary.innerHTML = `<strong>Omzet hari ini: ${idr.format(todayValue)}</strong><br><span>Batang bernilai kecil tetap dibuat terlihat agar tidak tampak sebagai nol.</span>`;
+        const todayValueLabelPlugin = {
+          id: "todayValueLabel",
+          afterDatasetsDraw(chart) {
+            if (!todayValue) return;
+            const bar = chart.getDatasetMeta(0)?.data?.[values.length - 1];
+            if (!bar) return;
+            const context = chart.ctx;
+            context.save();
+            context.fillStyle = "#0f172a";
+            context.font = "bold 11px sans-serif";
+            context.textAlign = "right";
+            context.fillText(idr.format(todayValue), chart.chartArea.right, Math.max(bar.y - 8, chart.chartArea.top + 12));
+            context.restore();
+          }
+        };
+        salesChart = new Chart(document.getElementById("salesChart"), { type: "bar", data: { labels: labels.map(displayDate), datasets: [{ label: "Omzet", data: values, backgroundColor: "#2563eb", minBarLength: 4 }] }, plugins: [todayValueLabelPlugin], options: { responsive: true, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `Omzet: ${idr.format(context.raw || 0)}` } } } } });
       }
 
       function renderCashier() {

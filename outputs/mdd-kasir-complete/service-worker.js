@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v118-sync-root-fix";
+const CACHE_NAME = "mdd-material-pro-v118-final-migration-reset";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

@@ -800,6 +800,8 @@
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
       const APP_VERSION = 118;
+      const POST_RECOVERY_BASELINE = "POST_RECOVERY_V118";
+      const POST_RECOVERY_PRODUCT_COUNT = 2699;
       const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec";
       const EXPECTED_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ";
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
@@ -1629,6 +1631,7 @@
           });
           lastChangeCursor = String((await syncOutbox.getMeta("changeCursor")) || "");
           outboxReady = true;
+          await applyPostRecoveryMigrationBaseline();
           operationSnapshot = JSON.parse(JSON.stringify(state));
           const pending = await syncOutbox.list(["pending", "failed", "sending"], 1);
           if (!lastChangeCursor && !pending.length && session) await bootstrapWorkspaceStateOnce();
@@ -1642,6 +1645,47 @@
         } catch (error) {
           setBackendSyncBanner("danger", `SYNC ERROR • IndexedDB gagal disiapkan (${error.message || error})`);
         }
+      }
+      async function applyPostRecoveryMigrationBaseline() {
+        if ((await syncOutbox.getMeta("syncBaselineVersion")) === POST_RECOVERY_BASELINE) return false;
+        const pending = await syncOutbox.list(["pending", "sending", "failed"], 1);
+        if (pending.length || !navigator.onLine || !await verifyActiveBackend()) return false;
+
+        const responses = await Promise.all(["finance", "masterlite", "products"].map((action) => requestGoogleWorkspaceJsonp(action)));
+        if (!responses.every((response) => response?.ok && response.data)) throw new Error("Snapshot production pascarecovery belum lengkap");
+        const production = Object.assign({}, ...responses.map((response) => response.data));
+        const products = Array.isArray(production.products) ? production.products : [];
+        const productIds = new Set(products.map((row) => String(row?.id || "").trim()).filter(Boolean));
+        const activeProducts = products.filter((row) => ![false, 0, "0", "false", "inactive"].includes(row?.active)).length;
+        if (products.length !== POST_RECOVERY_PRODUCT_COUNT || productIds.size !== POST_RECOVERY_PRODUCT_COUNT || activeProducts !== POST_RECOVERY_PRODUCT_COUNT) {
+          throw new Error("Snapshot Products production tidak sesuai baseline 2.699");
+        }
+
+        Object.keys(production).forEach((key) => {
+          if (Array.isArray(production[key])) state[key] = JSON.parse(JSON.stringify(production[key]));
+          else if (SYNC_SETTING_KEYS.includes(key) && production[key] && typeof production[key] === "object") state[key] = JSON.parse(JSON.stringify(production[key]));
+        });
+        normalizeState(state);
+        lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
+        operationSnapshot = JSON.parse(JSON.stringify(state));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+
+        const legacyConflicts = await syncOutbox.list(["conflict"], 100000);
+        if (legacyConflicts.length) {
+          await syncOutbox.mark(legacyConflicts.map((row) => row.operationId), "acknowledged", {
+            acknowledgedAt: new Date().toISOString(),
+            lastError: "",
+            resolvedBy: POST_RECOVERY_BASELINE
+          });
+        }
+        const cursorResponse = await requestGoogleWorkspaceJsonp("changes", { cursor: "latest" });
+        lastChangeCursor = String(cursorResponse?.cursor || "");
+        if (lastChangeCursor) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
+        await syncOutbox.setMeta("syncBaselineVersion", POST_RECOVERY_BASELINE);
+        await syncOutbox.setMeta("syncBaselineAppliedAt", new Date().toISOString());
+        await updateSyncIndicator();
+        if (session) renderSyncedState();
+        return true;
       }
       async function bootstrapWorkspaceStateOnce() {
         if (!await verifyActiveBackend()) return false;

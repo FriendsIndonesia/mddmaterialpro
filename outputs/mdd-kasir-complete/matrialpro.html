@@ -800,6 +800,7 @@
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
       const APP_VERSION = 118;
+      const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec";
       const EXPECTED_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ";
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
@@ -906,12 +907,15 @@
 
       function activeBackendEndpoint() {
         if (SYNC_ENVIRONMENT === "staging") return localStorage.getItem(STAGING_ENDPOINT_KEY) || "";
-        return state.profile?.googleEndpoint || "";
+        // Production must never inherit a stale per-device endpoint from the
+        // legacy state/profile cache. The profile field remains preserved for
+        // backward compatibility, but runtime sync uses the audited deployment.
+        return PRODUCTION_ENDPOINT;
       }
 
       function defaultState() {
         return {
-          profile: { name: STORE_PRINT_NAME, address: STORE_PRINT_ADDRESS, phone: STORE_PRINT_PHONE, tax: "", googleEndpoint: "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec", googleAccount: "friendsindonesia28@gmail.com", githubRepo: "https://github.com/FriendsIndonesia/mddmaterialpro", onlineMode: true },
+          profile: { name: STORE_PRINT_NAME, address: STORE_PRINT_ADDRESS, phone: STORE_PRINT_PHONE, tax: "", googleEndpoint: PRODUCTION_ENDPOINT, googleAccount: "friendsindonesia28@gmail.com", githubRepo: "https://github.com/FriendsIndonesia/mddmaterialpro", onlineMode: true },
           hardware: { receipt: "Thermal 58/80mm", invoice: "Printer Faktur", barcode: "USB/HID Barcode Scanner", drawer: "RJ11 Cash Drawer", tag: "Printer Barcode" },
           accessCodes: { owner: "060361", admin: "123456", kasir: "111111" },
           userAccounts: defaultUsers.map((user) => ({ ...user })),

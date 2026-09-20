@@ -1,8 +1,9 @@
-const CACHE_NAME = "mdd-material-pro-v115-batched-outbox";
+const CACHE_NAME = "mdd-material-pro-v118-sync-root-fix";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
   "./conversion-utils.js",
+  "./sync-v2.js",
   "./manifest.webmanifest",
   "./mdd-material-pro-logo.png",
   "./mdd-material-pro-app-icon.png",
@@ -20,7 +21,7 @@ self.addEventListener("activate", (event) => {
       Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
     ).then(() => self.clients.claim()).then(() =>
       self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) =>
-        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 115 }))
+        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 118 }))
       )
     )
   );

@@ -14,6 +14,7 @@
   <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="conversion-utils.js"></script>
+  <script src="sync-v2.js"></script>
   <style>
     :root {
       --sidebar: #17212b;
@@ -796,7 +797,9 @@
 
       const STORAGE_KEY = "mdd_material_pro_clean_v1";
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
-      const APP_VERSION = 115;
+      const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
+      const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
+      const APP_VERSION = 118;
       const EXPECTED_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ";
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
@@ -846,7 +849,6 @@
       };
       const DEFAULT_PRODUCTS = [];
       const cloneAccessRules = (rules) => JSON.parse(JSON.stringify(rules));
-      cleanupLegacyStorage();
       const state = loadState();
       let session = null;
       let activeCart = [];
@@ -880,6 +882,11 @@
       const REPORT_DISPLAY_STORAGE_KEY = "mdd_report_display_hidden_v1";
       let hiddenReportRows = loadHiddenReportRows();
       let durablePendingSync = loadDurablePendingSync();
+      const syncOutbox = new MDDSyncV2.Outbox();
+      const syncDeviceId = loadSyncDeviceId();
+      let operationSnapshot = JSON.parse(JSON.stringify(state));
+      let outboxReady = false;
+      let lastChangeCursor = "";
       // Cache yang sudah ada menjadi baseline awal. Tanpa baseline ini seluruh
       // cache lama dapat salah dianggap sebagai perubahan baru lalu menimpa Sheet.
       let lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
@@ -887,6 +894,20 @@
       const SYNC_SETTING_KEYS = ["profile", "hardware", "accessCodes", "accessRules", "userAccounts", "deletionTombstones"];
 
       document.addEventListener("DOMContentLoaded", init);
+
+      function loadSyncDeviceId() {
+        let value = localStorage.getItem("mdd_sync_v2_device_id");
+        if (!value) {
+          value = MDDSyncV2.operationId();
+          localStorage.setItem("mdd_sync_v2_device_id", value);
+        }
+        return value;
+      }
+
+      function activeBackendEndpoint() {
+        if (SYNC_ENVIRONMENT === "staging") return localStorage.getItem(STAGING_ENDPOINT_KEY) || "";
+        return state.profile?.googleEndpoint || "";
+      }
 
       function defaultState() {
         return {
@@ -924,11 +945,8 @@
           return normalizeState(defaultState());
         }
       }
-      function cleanupLegacyStorage() {
-        try {
-          LEGACY_STORAGE_KEYS.forEach((key) => localStorage.removeItem(key));
-        } catch {}
-      }
+      // Storage lama sengaja dipertahankan. Migrasi v2 hanya menyalin dan
+      // memverifikasi data; tidak ada localStorage yang dihapus otomatis.
       function normalizeState(data) {
         data.deletionTombstones = data.deletionTombstones || {};
         ["products", "customers", "suppliers", "employees", "categories", "discounts", "cashAccounts", "packages", "sales", "purchases", "cashTx", "payments", "stockMoves", "returns", "pendingSales", "pendingPurchases", "history"].forEach((key) => {
@@ -1053,7 +1071,8 @@
       }
       function clearDurablePendingSync() {
         durablePendingSync = { tables: {}, settings: {} };
-        try { localStorage.removeItem(PENDING_SYNC_STORAGE_KEY); } catch {}
+        // Jangan hapus antrean legacy. Backup ini dipertahankan sampai proses
+        // recovery OWNER/KASIR/GUDANG selesai dan diverifikasi terpisah.
       }
       function rupiahInput(value) {
         const digits = String(value ?? "").replace(/\D/g, "").replace(/^0+(?=\d)/, "");
@@ -1071,11 +1090,67 @@
           input.addEventListener("input", () => { input.value = rupiahInput(input.value); });
         });
       }
+      function operationRowId(key, row) {
+        return String(row?.id || (key === "syncQueue" ? row?.type : "") || "").trim();
+      }
+      function operationWithoutStock(row) {
+        const copy = JSON.parse(JSON.stringify(row || {}));
+        ["stock", "stockAkhir", "stockIn", "stockOut"].forEach((key) => delete copy[key]);
+        return copy;
+      }
+      function buildOperationsFromState(previous, current, action) {
+        const operations = [];
+        SYNC_TABLE_KEYS.forEach((key) => {
+          const before = new Map((previous[key] || []).map((row) => [operationRowId(key, row), row]).filter(([id]) => id));
+          const after = new Map((current[key] || []).map((row) => [operationRowId(key, row), row]).filter(([id]) => id));
+          after.forEach((row, id) => {
+            const old = before.get(id);
+            if (old && JSON.stringify(old) === JSON.stringify(row)) return;
+            const common = { baseRevision: lastBackendRevision, deviceId: syncDeviceId };
+            if (key === "products" && old) {
+              const stockDelta = Number(row.stock ?? row.stockAkhir ?? 0) - Number(old.stock ?? old.stockAkhir ?? 0);
+              if (Math.abs(stockDelta) > 0.000001) operations.push(MDDSyncV2.makeOperation("stock_delta", "products", id, { productId: id, delta: stockDelta, reason: action || "Perubahan stok" }, common));
+              const oldNonStock = operationWithoutStock(old);
+              const newNonStock = operationWithoutStock(row);
+              if (JSON.stringify(oldNonStock) !== JSON.stringify(newNonStock)) operations.push(MDDSyncV2.makeOperation("upsert", key, id, { row: newNonStock, base: oldNonStock }, common));
+            } else if (key === "payments" && !old) {
+              operations.push(MDDSyncV2.makeOperation("payment_delta", key, id, { payment: row }, common));
+            } else {
+              operations.push(MDDSyncV2.makeOperation("upsert", key, id, { row, base: old || null }, common));
+            }
+          });
+          before.forEach((_row, id) => {
+            if (!after.has(id) && (current.deletionTombstones?.[key] || []).map(String).includes(id)) {
+              operations.push(MDDSyncV2.makeOperation("delete", key, id, { id }, { baseRevision: lastBackendRevision, deviceId: syncDeviceId }));
+            }
+          });
+        });
+        const settings = {};
+        SYNC_SETTING_KEYS.forEach((key) => {
+          if (JSON.stringify(previous[key]) !== JSON.stringify(current[key])) settings[key] = current[key];
+        });
+        if (Object.keys(settings).length) operations.push(MDDSyncV2.makeOperation("settings", "settings", "settings", { settings }, { baseRevision: lastBackendRevision, deviceId: syncDeviceId }));
+        return operations;
+      }
+      function captureOperations(action) {
+        const operations = buildOperationsFromState(operationSnapshot || state, state, action);
+        operationSnapshot = JSON.parse(JSON.stringify(state));
+        if (!operations.length) return Promise.resolve([]);
+        return syncOutbox.putMany(operations).then(() => {
+          updateSyncIndicator();
+          queueGoogleWorkspaceSync();
+          return operations;
+        }).catch((error) => {
+          setBackendSyncBanner("danger", `SYNC ERROR • transaksi tetap berada di penyimpanan lokal (${error.message || error})`);
+          throw error;
+        });
+      }
       function saveState(action, options = {}) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         if (action) addHistory(action);
-        persistDurablePendingSync();
-        if (!options.skipSync) queueGoogleWorkspaceSync();
+        // localStorage tetap disimpan untuk kompatibilitas/backup. Outbox v2
+        // adalah sumber antrean pengiriman dan tidak dihapus sebelum ACK server.
+        if (!options.skipSync) captureOperations(action).catch(() => {});
       }
       function addHistory(action) {
         state.history.unshift({ id: uid("HIS"), date: new Date().toLocaleString("id-ID"), user: session?.name || "Sistem", action });
@@ -1087,7 +1162,7 @@
         bootstrap.Toast.getOrCreateInstance(document.getElementById("appToast")).show();
       }
       function queueGoogleWorkspaceSync() {
-        if (!state.profile?.onlineMode || !state.profile?.googleEndpoint) return;
+        if (!state.profile?.onlineMode || !activeBackendEndpoint()) return;
         clearTimeout(syncTimer);
         syncPending = true;
         syncTimer = setTimeout(() => {
@@ -1112,6 +1187,22 @@
         if (!banner) return;
         banner.className = `alert alert-${kind} py-2 small mb-3`;
         banner.textContent = message;
+      }
+      async function updateSyncIndicator(forcedStatus) {
+        if (!document.getElementById("backendSyncBanner")) return;
+        if (!navigator.onLine) return setBackendSyncBanner("secondary", "OFFLINE");
+        let pending = [];
+        let conflicts = [];
+        try {
+          pending = await syncOutbox.list(["pending", "sending", "failed"], 100000);
+          conflicts = await syncOutbox.list(["conflict"], 100000);
+        } catch {
+          return setBackendSyncBanner("danger", "SYNC ERROR • IndexedDB tidak dapat dibaca");
+        }
+        if (conflicts.length) return setBackendSyncBanner("danger", `CONFLICT • ${conflicts.length} data perlu diperiksa`);
+        if (forcedStatus === "syncing" || pending.some((row) => row.status === "sending")) return setBackendSyncBanner("warning", `SYNCING • ${pending.length} DATA PENDING`);
+        if (pending.length) return setBackendSyncBanner(pending.some((row) => row.status === "failed") ? "danger" : "warning", `${pending.length} DATA PENDING${pending.some((row) => row.status === "failed") ? " • SYNC ERROR" : ""}`);
+        setBackendSyncBanner("success", "ONLINE - SYNCED");
       }
 
       function mergeStateFromBackend(remoteData, options = {}) {
@@ -1215,10 +1306,11 @@
 
       function requestGoogleWorkspaceJsonp(action = "state", params = {}) {
         return new Promise((resolve) => {
-          if (!state.profile?.onlineMode || !state.profile?.googleEndpoint) return resolve(false);
+          const endpoint = activeBackendEndpoint();
+          if (!state.profile?.onlineMode || !endpoint) return resolve(false);
           const callbackName = `mddBackendState${Date.now()}${Math.random().toString(36).slice(2)}`;
           const script = document.createElement("script");
-          const separator = state.profile.googleEndpoint.includes("?") ? "&" : "?";
+          const separator = endpoint.includes("?") ? "&" : "?";
           const cleanup = () => {
             delete window[callbackName];
             script.remove();
@@ -1238,7 +1330,7 @@
             resolve(false);
           };
           const query = new URLSearchParams({ action, callback: callbackName, _: String(Date.now()), ...params });
-          script.src = `${state.profile.googleEndpoint}${separator}${query.toString()}`;
+          script.src = `${endpoint}${separator}${query.toString()}`;
           document.head.appendChild(script);
         });
       }
@@ -1343,9 +1435,10 @@
       }
 
       async function loadGoogleWorkspaceState(action = "state") {
-        if (!state.profile?.onlineMode || !state.profile?.googleEndpoint) return false;
-        const separator = state.profile.googleEndpoint.includes("?") ? "&" : "?";
-        const stateUrl = `${state.profile.googleEndpoint}${separator}action=${action}&_=${Date.now()}`;
+        const endpoint = activeBackendEndpoint();
+        if (!state.profile?.onlineMode || !endpoint) return false;
+        const separator = endpoint.includes("?") ? "&" : "?";
+        const stateUrl = `${endpoint}${separator}action=${action}&_=${Date.now()}`;
         try {
           const response = await fetch(stateUrl, { cache: "no-store", redirect: "follow" });
           if (response.ok) {
@@ -1363,34 +1456,62 @@
         if (isSyncing || syncPending || isPulling || document.hidden) return;
         isPulling = true;
         try {
-          const status = await requestGoogleWorkspaceJsonp("revision");
-          if (!status?.ok || !status.revision) {
-            setBackendSyncBanner("warning", "Data pusat belum dapat diperiksa. Angka di layar mungkin hanya cache perangkat ini.");
-            return;
+          if (!await verifyActiveBackend()) return;
+          const response = await requestGoogleWorkspaceJsonp("changes", { cursor: lastChangeCursor || "latest" });
+          if (!response?.ok) throw new Error("Change cursor backend tidak tersedia");
+          let changed = false;
+          for (const change of response.changes || []) changed = (await applyIncrementalChange(change)) || changed;
+          lastChangeCursor = String(response.cursor || lastChangeCursor || "");
+          await syncOutbox.setMeta("changeCursor", lastChangeCursor);
+          await updateSyncIndicator();
+          if (changed) {
+            normalizeState(state);
+            operationSnapshot = JSON.parse(JSON.stringify(state));
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+            renderSyncedState();
           }
-          if (status.revision === lastBackendRevision && verifiedBackendEndpoint === state.profile.googleEndpoint) {
-            setBackendSyncBanner(hasLocalSyncChanges() ? "warning" : "success", hasLocalSyncChanges() ? "Data pusat terbaca, tetapi ada perubahan perangkat yang belum dikonfirmasi." : `Data pusat sesuai • diperiksa ${new Date().toLocaleTimeString("id-ID")} • versi ${APP_VERSION}`);
-            return;
-          }
-          const responses = await Promise.all(["finance", "masterlite", "products"].map((action) => requestGoogleWorkspaceJsonp(action)));
-          if (responses.some((response) => !response?.ok || !response.data)) {
-            setBackendSyncBanner("warning", "Sebagian data pusat belum berhasil dimuat. Angka dapat berbeda antarperangkat; aplikasi akan mencoba lagi otomatis.");
-            return;
-          }
-          if (responses.some((response) => response.spreadsheetId !== EXPECTED_SPREADSHEET_ID)) {
-            setBackendSyncBanner("danger", "Aplikasi terhubung ke database yang berbeda. Transaksi ditahan agar data tidak masuk ke tempat yang salah.");
-            return;
-          }
-          verifiedBackendEndpoint = state.profile.googleEndpoint;
-          const results = responses.map((response) => mergeSubsetFromBackend(response.data));
-          lastBackendRevision = status.revision;
-          setBackendSyncBanner(hasLocalSyncChanges() ? "warning" : "success", hasLocalSyncChanges() ? "Data pusat terbaca, tetapi ada perubahan perangkat yang belum dikonfirmasi." : `Data pusat sesuai • diperiksa ${new Date().toLocaleTimeString("id-ID")} • versi ${APP_VERSION}`);
-          if (results.some(Boolean)) renderSyncedState();
+          if (response.hasMore) setTimeout(refreshGoogleWorkspaceState, 100);
         } catch {
-          setBackendSyncBanner("warning", "Koneksi data pusat terputus. Angka di layar mungkin hanya cache perangkat ini; aplikasi akan mencoba lagi otomatis.");
+          await updateSyncIndicator();
         } finally {
           isPulling = false;
         }
+      }
+
+      async function applyIncrementalChange(change) {
+        if (!change?.entity || !change.operationId) return false;
+        // Operasi dari perangkat ini sudah diterapkan secara optimistik sebelum
+        // dikirim. Jangan menerapkan stock/payment delta yang sama dua kali.
+        if (await syncOutbox.get(change.operationId)) return false;
+        const key = change.entity;
+        const payload = change.payload || {};
+        if (change.type === "settings") {
+          Object.assign(state, payload.settings || {});
+          return true;
+        }
+        if (!Array.isArray(state[key])) return false;
+        if (change.type === "delete") {
+          state[key] = state[key].filter((row) => operationRowId(key, row) !== String(change.entityId));
+          return true;
+        }
+        if (change.type === "upsert" && payload.row) {
+          const index = state[key].findIndex((row) => operationRowId(key, row) === String(change.entityId));
+          if (index >= 0) state[key][index] = Object.assign({}, state[key][index], payload.row);
+          else state[key].unshift(payload.row);
+          return true;
+        }
+        if (change.type === "stock_delta") {
+          const product = state.products.find((row) => String(row.id) === String(payload.productId || change.entityId));
+          if (!product) return false;
+          product.stock = Math.max(0, Number(product.stock || product.stockAkhir || 0) + Number(payload.delta || 0));
+          product.stockAkhir = product.stock;
+          return true;
+        }
+        if (change.type === "payment_delta" && payload.payment) {
+          if (!state.payments.some((row) => row.id === payload.payment.id)) state.payments.unshift(payload.payment);
+          return true;
+        }
+        return false;
       }
 
       function renderSyncedState() {
@@ -1492,6 +1613,69 @@
           loadGoogleWorkspaceState("auth").catch(() => {});
         }
         registerAppUpdater();
+        initializeSyncV2();
+      }
+      async function initializeSyncV2() {
+        try {
+          await syncOutbox.open();
+          await MDDSyncV2.migrateLegacy(syncOutbox, localStorage, {
+            storageKey: STORAGE_KEY,
+            pendingKey: PENDING_SYNC_STORAGE_KEY,
+            operationOptions: { baseRevision: lastBackendRevision, deviceId: syncDeviceId }
+          });
+          lastChangeCursor = String((await syncOutbox.getMeta("changeCursor")) || "");
+          outboxReady = true;
+          operationSnapshot = JSON.parse(JSON.stringify(state));
+          const pending = await syncOutbox.list(["pending", "failed", "sending"], 1);
+          if (!lastChangeCursor && !pending.length && session) await bootstrapWorkspaceStateOnce();
+          else if (!lastChangeCursor) {
+            const cursorResponse = await requestGoogleWorkspaceJsonp("changes", { cursor: "latest" });
+            lastChangeCursor = String(cursorResponse?.cursor || "");
+            if (lastChangeCursor) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
+          }
+          await updateSyncIndicator();
+          if (pending.length) queueGoogleWorkspaceSync();
+        } catch (error) {
+          setBackendSyncBanner("danger", `SYNC ERROR • IndexedDB gagal disiapkan (${error.message || error})`);
+        }
+      }
+      async function bootstrapWorkspaceStateOnce() {
+        if (!await verifyActiveBackend()) return false;
+        const responses = await Promise.all(["finance", "masterlite", "products"].map((action) => requestGoogleWorkspaceJsonp(action)));
+        if (responses.every((response) => response?.ok && response.data)) responses.forEach((response) => mergeSubsetFromBackend(response.data));
+        const cursorResponse = await requestGoogleWorkspaceJsonp("changes", { cursor: "latest" });
+        lastChangeCursor = String(cursorResponse?.cursor || "");
+        if (lastChangeCursor) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
+        operationSnapshot = JSON.parse(JSON.stringify(state));
+        return true;
+      }
+      async function verifyActiveBackend() {
+        const endpoint = activeBackendEndpoint();
+        if (!endpoint) return false;
+        if (verifiedBackendEndpoint === endpoint) return true;
+        const health = await requestGoogleWorkspaceJsonp("health", { clientVersion: APP_VERSION });
+        if (!health?.ok || Number(health.syncProtocol || 0) < 4 || String(health.environment || "production") !== SYNC_ENVIRONMENT) {
+          setBackendSyncBanner("danger", `SYNC ERROR • endpoint ${SYNC_ENVIRONMENT} tidak valid`);
+          return false;
+        }
+        if (SYNC_ENVIRONMENT === "production") {
+          const status = await requestGoogleWorkspaceJsonp("status");
+          if (!status?.ok || status.spreadsheetId !== EXPECTED_SPREADSHEET_ID) {
+            setBackendSyncBanner("danger", "SYNC ERROR • database production tidak sesuai");
+            return false;
+          }
+        }
+        verifiedBackendEndpoint = endpoint;
+        return true;
+      }
+      async function ensureWorkspaceBootstrap() {
+        if (!outboxReady) return setTimeout(ensureWorkspaceBootstrap, 250);
+        const hasOperationalData = ["products", "sales", "purchases", "customers", "suppliers"].some((key) => Array.isArray(state[key]) && state[key].length);
+        const pending = await syncOutbox.list(["pending", "failed", "sending", "conflict"], 1);
+        if (!hasOperationalData && !pending.length) {
+          await bootstrapWorkspaceStateOnce();
+          renderSyncedState();
+        }
       }
       function bind() {
         document.getElementById("loginForm").addEventListener("submit", login);
@@ -1563,6 +1747,7 @@
         lastBackendRevision = "";
         setBackendSyncBanner("warning", "Memeriksa data pusat. Angka yang tampil sementara berasal dari perangkat ini.");
         setTimeout(refreshGoogleWorkspaceState, 0);
+        setTimeout(ensureWorkspaceBootstrap, 50);
         // Kirim kembali perubahan yang sempat tersimpan ketika perangkat
         // ditutup/offline. Outbox ini bertahan melewati refresh dan restart.
         setTimeout(() => { if (hasLocalSyncChanges()) queueGoogleWorkspaceSync(); }, 600);
@@ -1570,7 +1755,7 @@
         clearInterval(autoPullTimer);
         // Lima detik cukup responsif untuk tiga perangkat, tetapi jauh lebih aman
         // terhadap kuota Apps Script dibanding polling setiap 1,5 detik.
-        autoPullTimer = setInterval(refreshGoogleWorkspaceState, 5000);
+        autoPullTimer = setInterval(refreshGoogleWorkspaceState, 30000);
         window.onfocus = refreshGoogleWorkspaceState;
         window.ononline = () => { queueGoogleWorkspaceSync(); refreshGoogleWorkspaceState(); };
         // Pemeriksaan kesehatan tidak menghalangi login atau pekerjaan user.
@@ -4342,77 +4527,94 @@
         }
       }
       async function syncGoogleWorkspace() {
-        if (isSyncing) return;
-        if (isPulling) {
-          syncPending = true;
-          clearTimeout(syncTimer);
-          syncTimer = setTimeout(syncGoogleWorkspace, 500);
-          return;
-        }
-        if (!state.profile.googleEndpoint) {
-          openGoogleEndpointModal(true);
-          return toast("Isi endpoint Google Workspace untuk menjalankan sinkron.");
-        }
+        if (isSyncing || !outboxReady) return;
+        const endpoint = activeBackendEndpoint();
+        if (!endpoint || !navigator.onLine) return updateSyncIndicator();
         isSyncing = true;
         syncPending = false;
+        let batch = [];
         try {
-          const allChanges = buildSyncChanges();
-          const allSettings = buildSyncSettings();
-          if (!Object.keys(allChanges.tables).length && !Object.keys(allSettings).length) return;
-          const batch = takeSyncBatch(allChanges, allSettings);
-          const changes = batch.changes;
-          const settings = batch.settings;
-          setBackendSyncBanner("warning", "Perubahan sedang dikirim ke data pusat. Jangan anggap transaksi selesai tersinkron sebelum status hijau.");
-          if (verifiedBackendEndpoint !== state.profile.googleEndpoint) {
-            const endpointStatus = await requestGoogleWorkspaceJsonp("status");
-            if (!endpointStatus?.ok || endpointStatus.spreadsheetId !== EXPECTED_SPREADSHEET_ID) throw new Error("Database pusat tidak sesuai atau belum dapat diverifikasi.");
-            verifiedBackendEndpoint = state.profile.googleEndpoint;
+          if (!await verifyActiveBackend()) throw new Error("Endpoint backend tidak terverifikasi");
+          batch = await syncOutbox.due(25);
+          if (!batch.length) return updateSyncIndicator();
+          batch = await syncOutbox.markSending(batch);
+          await updateSyncIndicator("syncing");
+          const reconciled = await reconcilePendingOperations(batch);
+          if (reconciled.acknowledged.length) await syncOutbox.mark(reconciled.acknowledged, "acknowledged", { acknowledgedAt: new Date().toISOString(), lastError: "", resolvedBy: "stable-entity-reconciliation" });
+          if (reconciled.conflicts.length) await syncOutbox.mark(reconciled.conflicts, "conflict", { lastError: "Payload lokal berbeda dari backend" });
+          if (reconciled.manualReview.length) await syncOutbox.mark(reconciled.manualReview, "conflict", { lastError: "MANUAL_REVIEW: status commit tidak dapat dibuktikan" });
+          batch = batch.filter((row) => reconciled.pending.includes(row.operationId));
+          if (!batch.length) {
+            syncRetryAttempt = 0;
+            await updateSyncIndicator();
+            return;
           }
-          const sentState = JSON.parse(JSON.stringify(state));
-          const requestId = await syncRequestId(changes, settings);
-          try {
-            await fetch(state.profile.googleEndpoint, { method: "POST", mode: "no-cors", body: JSON.stringify({ app: "MDD Material Pro", clientVersion: APP_VERSION, syncProtocol: 3, requestId, account: state.profile.googleAccount || "friendsindonesia28@gmail.com", githubRepo: state.profile.githubRepo || "https://github.com/FriendsIndonesia/mddmaterialpro", sentAt: new Date().toISOString(), queue: state.syncQueue, changes, settings }) });
-          } catch {
-            // POST no-cors dapat dilaporkan gagal oleh browser walaupun Apps
-            // Script tetap menerima paket. Receipt adalah sumber kebenaran.
+          const payload = {
+            app: "MDD Material Pro",
+            clientVersion: APP_VERSION,
+            syncProtocol: 4,
+            environment: SYNC_ENVIRONMENT,
+            deviceId: syncDeviceId,
+            sentAt: new Date().toISOString(),
+            operations: batch
+          };
+          // Apps Script Web App memberi response opaque pada beberapa browser.
+          // Pengiriman boleh no-cors, tetapi penghapusan outbox hanya dilakukan
+          // setelah endpoint acknowledgement mengonfirmasi setiap operationId.
+          await fetch(endpoint, { method: "POST", mode: "no-cors", cache: "no-store", body: JSON.stringify(payload) });
+          const ids = batch.map((row) => row.operationId);
+          const receipt = await waitForOperationAcknowledgements(ids);
+          const acknowledged = new Set([...(receipt.acknowledged || []), ...(receipt.alreadyPresent || [])]);
+          const conflicts = new Set(receipt.conflicts || []);
+          if (acknowledged.size) await syncOutbox.mark([...acknowledged], "acknowledged", { acknowledgedAt: new Date().toISOString(), lastError: "" });
+          if (conflicts.size) await syncOutbox.mark([...conflicts], "conflict", { lastError: "Konflik dengan perubahan backend yang lebih baru" });
+          const unresolved = batch.filter((row) => !acknowledged.has(row.operationId) && !conflicts.has(row.operationId));
+          if (unresolved.length) {
+            await syncOutbox.markFailed(unresolved, new Error("ACK backend belum lengkap"));
+            throw Object.assign(new Error("ACK backend belum lengkap"), { unresolvedHandled: true });
           }
-          const receiptConfirmed = await waitForSyncReceipt(requestId);
-          if (!receiptConfirmed) throw new Error("Backend belum mengonfirmasi paket sinkronisasi.");
-          const refreshActions = syncRefreshActions(changes, settings);
-          const verifiedResponses = await Promise.all(refreshActions.map(async (action) => {
-            const verifiedResponse = await requestGoogleWorkspaceJsonp(action);
-            if (!verifiedResponse?.ok || !verifiedResponse.data) throw new Error(`Backend belum mengirim pembaruan ${action}.`);
-            return { action, data: verifiedResponse.data };
-          }));
-          const readbackData = Object.assign({}, ...verifiedResponses.map((response) => response.data));
-          if (!syncChangesConfirmed(readbackData, changes)) throw new Error("Transaksi belum ditemukan pada pembacaan ulang backend; antrean lokal tetap disimpan.");
-          if (changes.tables.products) verifyConversionReadback(Object.assign({}, ...verifiedResponses.map((response) => response.data)), changes);
-          // Advance the baseline only after read-back succeeds. Capture edits
-          // made during ALL network awaits, not just before the first refresh.
-          acknowledgeSyncBatch(changes, settings, sentState);
-          for (const response of verifiedResponses) {
-            if (response.action === "state") mergeStateFromBackend(response.data, { preserveLocal: true });
-            else mergeSubsetFromBackend(response.data);
-          }
-          const pendingAfterSend = { ...buildSyncChanges(), settings: buildSyncSettings() };
-          if (!Object.keys(pendingAfterSend.tables || {}).length && !Object.keys(pendingAfterSend.settings || {}).length) state.syncQueue = [];
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-          lastBackendRevision = ""; // Pastikan perangkat lain dan laporan menarik revisi terbaru.
-          const hasMoreChanges = Boolean(pendingAfterSend && (Object.keys(pendingAfterSend.tables || {}).length || Object.keys(pendingAfterSend.settings || {}).length));
-          setBackendSyncBanner(hasMoreChanges ? "warning" : "success", hasMoreChanges ? "Sebagian perubahan sudah tercatat; perubahan berikutnya masih dikirim otomatis." : `Transaksi tercatat di data pusat • ${new Date().toLocaleTimeString("id-ID")} • versi ${APP_VERSION}`);
           syncRetryAttempt = 0;
+          lastBackendRevision = "";
+          await updateSyncIndicator();
           renderSyncedState();
-          if (hasMoreChanges) queueGoogleWorkspaceSync();
-        } catch {
-          syncPending = true;
-          setBackendSyncBanner("danger", "Perubahan belum terkonfirmasi di data pusat. Data tersimpan di perangkat ini dan akan dicoba lagi otomatis.");
-          clearTimeout(syncTimer);
+          if ((await syncOutbox.due(1)).length) queueGoogleWorkspaceSync();
+        } catch (error) {
+          // Jangan pernah menurunkan operasi yang sudah ACK menjadi failed.
+          if (batch.length && !error?.unresolvedHandled) {
+            const unresolved = [];
+            for (const row of batch) {
+              const current = await syncOutbox.get(row.operationId);
+              if (current && !["acknowledged", "conflict"].includes(current.status)) unresolved.push(current);
+            }
+            if (unresolved.length) await syncOutbox.markFailed(unresolved, error);
+          }
           syncRetryAttempt += 1;
-          const retryDelay = Math.min(60000, 5000 * Math.pow(2, Math.min(syncRetryAttempt - 1, 4)));
-          syncTimer = setTimeout(syncGoogleWorkspace, retryDelay);
+          await updateSyncIndicator();
+          clearTimeout(syncTimer);
+          syncTimer = setTimeout(syncGoogleWorkspace, MDDSyncV2.retryDelay(syncRetryAttempt));
         } finally {
           isSyncing = false;
         }
+      }
+      async function reconcilePendingOperations(operations) {
+        if (!operations.length) return { acknowledged: [], conflicts: [], manualReview: [], pending: [] };
+        const compact = operations.map(MDDSyncV2.reconciliationPayload);
+        const response = await requestGoogleWorkspaceJsonp("reconcile", { operations: JSON.stringify(compact) });
+        if (!response?.ok) return { acknowledged: [], conflicts: [], manualReview: [], pending: operations.map((row) => row.operationId) };
+        return MDDSyncV2.classifyReconciliation(response, operations);
+      }
+      async function waitForOperationAcknowledgements(operationIds, timeoutMs = 90000) {
+        const startedAt = Date.now();
+        let delayMs = 2000;
+        while (Date.now() - startedAt < timeoutMs) {
+          await wait(delayMs);
+          const receipt = await requestGoogleWorkspaceJsonp("acknowledgement", { operationIds: operationIds.join(",") });
+          const acknowledged = receipt?.acknowledged || [];
+          const conflicts = receipt?.conflicts || [];
+          if (acknowledged.length + conflicts.length >= operationIds.length) return { acknowledged, conflicts };
+          delayMs = Math.min(8000, delayMs * 2);
+        }
+        return { acknowledged: [], conflicts: [] };
       }
       async function exportElementPdf(elementId, filename) {
         if (!window.jspdf || !window.html2canvas) {

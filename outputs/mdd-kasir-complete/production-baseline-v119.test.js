@@ -15,8 +15,8 @@ assert.equal(Sync.validateProductionBaseline(valid, 2699, keys, "STAGING").ok, f
 
 const html = fs.readFileSync(__dirname + "/matrialpro.html", "utf8");
 const worker = fs.readFileSync(__dirname + "/service-worker.js", "utf8");
-assert.match(html, /const APP_VERSION = 120/);
-assert.match(html, /FORCE_PRODUCTION_BASELINE_V120/);
+assert.match(html, /const APP_VERSION = 121/);
+assert.match(html, /FORCE_PRODUCTION_BASELINE_V121/);
 assert.match(html, /syncOutbox\.list\(\["pending", "sending", "failed"\], 1\)/, "pending harus menghentikan migration");
 assert.match(html, /validateProductionBaseline\(snapshot, PRODUCTION_PRODUCT_COUNT/);
 assert.ok(html.indexOf("localStorage.setItem(STORAGE_KEY") < html.indexOf("deleteByOperationIds"), "legacy outbox hanya dibersihkan setelah cache ditulis");
@@ -26,9 +26,11 @@ assert.match(html, /baselineInProgress = true/);
 assert.match(html, /if \(baselineInProgress\) return Promise\.resolve\(\[\]\)/, "capture operasi harus dibekukan saat baseline");
 assert.match(html, /if \(baselineInProgress \|\| isSyncing/, "sync rutin harus dibekukan saat baseline");
 assert.match(html, /Object\.assign\(state, previousState\)/, "state lama harus dipulihkan bila baseline gagal");
+assert.match(html, /INITIALIZING • mengunduh database production/, "status hijau dilarang sebelum baseline terverifikasi");
+assert.match(html, /scheduleProductionBaselineRetry/, "bootstrap gagal harus retry otomatis");
 assert.doesNotMatch(html, /indexedDB\.deleteDatabase|localStorage\.clear\(/);
 assert.match(html, /if \(\(await syncOutbox\.getMeta\("baselineVersion"\)\) === FORCE_PRODUCTION_BASELINE\) return false;/, "second run harus idempoten");
 assert.match(html, /captureOperations\(action\)/, "operasi baru tetap masuk outbox");
-assert.match(worker, /mdd-material-pro-v120-atomic-production-baseline/);
+assert.match(worker, /mdd-material-pro-v121-verified-bootstrap/);
 assert.doesNotMatch(worker, /indexedDB\.deleteDatabase|localStorage\.clear/);
-console.log("production-baseline-v120: atomic safety gates passed");
+console.log("production-baseline-v121: verified bootstrap safety gates passed");

@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v120-atomic-production-baseline";
+const CACHE_NAME = "mdd-material-pro-v121-verified-bootstrap";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
@@ -21,7 +21,7 @@ self.addEventListener("activate", (event) => {
       Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
     ).then(() => self.clients.claim()).then(() =>
       self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) =>
-        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 120 }))
+        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 121 }))
       )
     )
   );

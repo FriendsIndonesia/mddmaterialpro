@@ -13,7 +13,7 @@ assert.doesNotMatch(backend, /Backward-compatible import: merge rows/);
 assert.match(backend, /hasExplicitRemaining \? Math\.max\(0, remaining\)/);
 assert.match(backend, /!isNewRow && table\.key === "products" && !base/);
 assert.match(backend, /if \(!existingRowNumber && !isCreditRecord\) return/);
-assert.match(html, /const APP_VERSION = 120/);
+assert.match(html, /const APP_VERSION = 121/);
 assert.match(html, /syncOutbox\.due\(25\)/);
 assert.match(html, /syncOutbox\.mark\(\[\.\.\.acknowledged\], "acknowledged"/);
 assert.match(html, /"products", "receipt"\]\.includes\(action\) \? 30000 : 10000/);
@@ -30,7 +30,7 @@ assert.doesNotMatch(backend, /lock\.waitLock\(30000\)/);
 assert.doesNotMatch(backend, /normalizeCashAccountNames_\(ss\);\s*ensureWorkbook_\(ss\);/);
 
 const worker = fs.readFileSync(__dirname + "/service-worker.js", "utf8");
-assert.match(worker, /mdd-material-pro-v120-atomic-production-baseline/);
+assert.match(worker, /mdd-material-pro-v121-verified-bootstrap/);
 assert.match(worker, /sync-v2\.js/);
 assert.match(worker, /MDD_FORCE_RELOAD/);
 

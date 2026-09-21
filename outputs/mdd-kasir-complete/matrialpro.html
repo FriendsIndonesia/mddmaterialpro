@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 124;
+      const APP_VERSION = 125;
       const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V121";
       const PRODUCTION_PRODUCT_COUNT = 2699;
       const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec";
@@ -810,7 +810,18 @@
       const STORE_PRINT_NAME = "MUTIARA JAYA";
       const STORE_PRINT_ADDRESS = "JL. RAYA KARAKAL RT.03 / RW. 03, CIAWI, BOGOR";
       const STORE_PRINT_PHONE = "082312233247";
-      const today = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jakarta", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+      const today = () => {
+        const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Jakarta", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date()).map((part) => [part.type, part.value]));
+        return `${parts.year}-${parts.month}-${parts.day}`;
+      };
+      const businessDate = (value) => {
+        const text = String(value || "").trim();
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text)) return value;
+        const date = new Date(text);
+        if (Number.isNaN(date.getTime())) return value;
+        const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Jakarta", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date).map((part) => [part.type, part.value]));
+        return `${parts.year}-${parts.month}-${parts.day}`;
+      };
       const displayDate = (value) => {
         if (!value) return "-";
         const text = String(value).trim();
@@ -958,6 +969,13 @@
       // Storage lama sengaja dipertahankan. Migrasi v2 hanya menyalin dan
       // memverifikasi data; tidak ada localStorage yang dihapus otomatis.
       function normalizeState(data) {
+        ["sales", "purchases", "cashTx", "payments", "stockMoves", "returns", "pendingSales", "pendingPurchases", "employees"].forEach((key) => {
+          (Array.isArray(data[key]) ? data[key] : []).forEach((row) => {
+            ["date", "dueDate", "startDate"].forEach((field) => {
+              if (row[field]) row[field] = businessDate(row[field]);
+            });
+          });
+        });
         data.deletionTombstones = data.deletionTombstones || {};
         ["products", "customers", "suppliers", "employees", "categories", "discounts", "cashAccounts", "packages", "sales", "purchases", "cashTx", "payments", "stockMoves", "returns", "pendingSales", "pendingPurchases", "history"].forEach((key) => {
           data.deletionTombstones[key] = [...new Set(data.deletionTombstones[key] || [])];
@@ -2388,11 +2406,9 @@
       function drawSalesChart(sourceSales = state.sales) {
         if (!window.Chart) return;
         const labels = Array.from({ length: 14 }, (_, i) => {
-          const d = new Date();
-          d.setDate(d.getDate() - (13 - i));
-          // Gunakan tanggal lokal yang sama dengan input transaksi. toISOString
-          // dapat bergeser satu hari dan data lama juga dapat memakai DD/MM/YYYY.
-          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+          const [year, month, day] = today().split("-").map(Number);
+          const calendarDay = new Date(Date.UTC(year, month - 1, day - (13 - i)));
+          return calendarDay.toISOString().slice(0, 10);
         });
         const values = labels.map((label) => sourceSales.filter((sale) => transactionDateKey(sale.date) === label).reduce((sum, sale) => sum + toNumber(sale.total), 0));
         if (salesChart) salesChart.destroy();
@@ -2552,7 +2568,7 @@
         const pending = state.pendingSales.find((p) => p.id === id);
         if (!pending) return toast("Invoice pending tidak ditemukan.");
         activeCart = structuredClone(pending.items || []);
-        saleDraft = { invoiceNo: pending.invoiceNo, ongkir: pending.ongkir || 0, discount: pending.discount || 0, dp: pending.dp || 0, cashReceived: pending.dp || pending.cashReceived || 0, note: pending.note || "", method: toNumber(pending.dp) > 0 ? "DP (Uang Muka)" : (pending.method || "Cash"), customerId: pending.customerId || "", customerName: pending.customerName || "", customerType: pending.customerType || "", customerAddress: pending.customerAddress || "", customerWhatsapp: pending.customerWhatsapp || "" };
+        saleDraft = { invoiceNo: pending.invoiceNo, date: transactionDateKey(pending.date) || today(), ongkir: pending.ongkir || 0, discount: pending.discount || 0, dp: pending.dp || 0, cashReceived: pending.dp || pending.cashReceived || 0, note: pending.note || "", method: toNumber(pending.dp) > 0 ? "DP (Uang Muka)" : (pending.method || "Cash"), customerId: pending.customerId || "", customerName: pending.customerName || "", customerType: pending.customerType || "", customerAddress: pending.customerAddress || "", customerWhatsapp: pending.customerWhatsapp || "" };
         markExplicitDeletion("pendingSales", id);
         state.pendingSales = state.pendingSales.filter((p) => p.id !== id);
         saveState(`${payNow ? "Lanjut bayar" : "Edit"} invoice pending ${pending.invoiceNo || id}`);
@@ -2744,7 +2760,7 @@
         updateSaleDraftTotals();
         updateSaleCustomerDraft();
         const customer = selectedSaleCustomerData();
-        state.pendingSales.unshift({ id: uid("PSO"), invoiceNo: saleDraft.invoiceNo, date: today(), customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, method: saleDraft.method, items: structuredClone(activeCart), ongkir: saleDraft.ongkir, discount: saleDraft.discount, dp: saleDraft.dp, bankCharge: 0, cashReceived: saleDraft.cashReceived, change: saleCashChange(), note: saleDraft.note, total: saleGrandTotal() });
+        state.pendingSales.unshift({ id: uid("PSO"), invoiceNo: saleDraft.invoiceNo, date: document.getElementById("saleDate").value || today(), customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, method: saleDraft.method, items: structuredClone(activeCart), ongkir: saleDraft.ongkir, discount: saleDraft.discount, dp: saleDraft.dp, bankCharge: 0, cashReceived: saleDraft.cashReceived, change: saleCashChange(), note: saleDraft.note, total: saleGrandTotal() });
         activeCart = [];
         resetSaleDraft();
         saveState("Pending penjualan dibuat");
@@ -2977,7 +2993,7 @@
         if (!purchaseCart.length) return toast("Keranjang pembelian kosong.");
         updatePurchaseDraftTotals();
         const supplier = selectedSupplierData(purchaseDraft.supplierId);
-        state.pendingPurchases.unshift({ id: uid("PPO"), invoiceNo: purchaseDraft.invoiceNo, supplierInvoiceNo: purchaseDraft.supplierInvoiceNo, date: today(), dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", method: purchaseDraft.method, items: structuredClone(purchaseCart), ongkir: purchaseDraft.ongkir, discount: purchaseDraft.discount, dp: purchaseDraft.dp, bankCharge: purchaseDraft.bankCharge, cashReceived: purchaseDraft.cashReceived, change: purchaseCashChange(), note: purchaseDraft.note, total: purchaseGrandTotal() });
+        state.pendingPurchases.unshift({ id: uid("PPO"), invoiceNo: purchaseDraft.invoiceNo, supplierInvoiceNo: purchaseDraft.supplierInvoiceNo, date: document.getElementById("purchaseDate").value || today(), dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", method: purchaseDraft.method, items: structuredClone(purchaseCart), ongkir: purchaseDraft.ongkir, discount: purchaseDraft.discount, dp: purchaseDraft.dp, bankCharge: purchaseDraft.bankCharge, cashReceived: purchaseDraft.cashReceived, change: purchaseCashChange(), note: purchaseDraft.note, total: purchaseGrandTotal() });
         purchaseCart = [];
         resetPurchaseDraft();
         saveState("Pending pembelian dibuat");

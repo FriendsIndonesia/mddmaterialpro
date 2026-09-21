@@ -1080,7 +1080,13 @@ function readTable_(ss, sheetName) {
   return values.map((row) => {
     const item = {};
     headers.forEach((header, index) => {
-      if (header) item[header] = textFields.indexOf(header) >= 0 ? String(row[index] ?? "").trim() : parseValue_(row[index]);
+      if (!header) return;
+      const value = row[index];
+      // Sheets can coerce a date-only value into local midnight. JSON would
+      // serialize that Date in UTC and move WIB dates back one calendar day.
+      item[header] = /(?:^date$|Date$)/.test(header) && value instanceof Date && !isNaN(value.getTime())
+        ? Utilities.formatDate(value, ss.getSpreadsheetTimeZone(), "yyyy-MM-dd")
+        : textFields.indexOf(header) >= 0 ? String(value ?? "").trim() : parseValue_(value);
     });
     return item;
   });

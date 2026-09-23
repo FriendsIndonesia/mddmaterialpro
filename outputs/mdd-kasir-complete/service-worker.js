@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v127-ledger-balance-fix";
+const CACHE_NAME = "mdd-material-pro-v128-jakarta-transaction-date-fix";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
@@ -21,7 +21,7 @@ self.addEventListener("activate", (event) => {
       Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
     ).then(() => self.clients.claim()).then(() =>
       self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) =>
-        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 127 }))
+        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 128 }))
       )
     )
   );

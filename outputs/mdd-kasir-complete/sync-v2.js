@@ -230,7 +230,7 @@
     const products = response.data.products || [];
     const ids = new Set(products.map((row) => String(row?.id || "").trim()).filter(Boolean));
     const active = products.filter((row) => ![false, 0, "0", "false", "inactive"].includes(row?.active)).length;
-    if (products.length !== expectedProductCount || ids.size !== expectedProductCount || active !== expectedProductCount) {
+    if (products.length === 0 || ids.size !== products.length || (Number(expectedProductCount || 0) > 0 && (products.length !== Number(expectedProductCount) || active !== Number(expectedProductCount)))) {
       return { ok: false, error: "products-invalid", products: products.length, unique: ids.size, active };
     }
     return { ok: true, products: products.length, unique: ids.size, active };

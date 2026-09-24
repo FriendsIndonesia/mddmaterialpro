@@ -800,10 +800,11 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 131;
-      const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V131";
-
-      const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec";
+      const APP_VERSION = 132;
+      // Every client older than the enforced backend version is upgraded before
+      // it can use its legacy per-device endpoint or stale production identity.
+      const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V132";
+      const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbymrIJog6vOOi21lhCdci5Dj5D_vrJBZHbsiHjfC1kH2owOH4FGCd01UK-Io2VXwMoO/exec";
       const EXPECTED_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ";
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
@@ -1774,6 +1775,8 @@
           ]);
           if (!endingHealth?.ok || String(endingHealth.revision || "") !== startingRevision) throw new Error("Revision production berubah saat baseline dibangun");
           if (!cursorResponse?.ok || !cursorResponse.cursor) throw new Error("Cursor baseline production tidak tersedia");
+          // Verify the actual production snapshot and its stable IDs. Do not
+          // hard-code a former product total: production master data grows.
           const validation = MDDSyncV2.validateProductionBaseline(snapshot, 0, SYNC_TABLE_KEYS, EXPECTED_SPREADSHEET_ID);
           if (!validation.ok) throw new Error(`Snapshot production tidak valid (${validation.error})`);
 

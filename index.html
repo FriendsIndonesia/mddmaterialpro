@@ -4,10 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MDD Material Pro</title>
-  <meta http-equiv="refresh" content="0; url=outputs/mdd-kasir-complete/matrialpro.html">
   <link rel="canonical" href="outputs/mdd-kasir-complete/matrialpro.html">
 </head>
 <body>
-  <p>Membuka <a href="outputs/mdd-kasir-complete/matrialpro.html">MDD Material Pro</a>...</p>
+  <script>
+    // Always enter a versioned shell. This bypasses only stale application-shell
+    // cache entries; it does not touch local business data or the durable outbox.
+    (function () {
+      var target = new URL("outputs/mdd-kasir-complete/matrialpro.html", location.href);
+      target.searchParams.set("appVersion", "130");
+      if (new URLSearchParams(location.search).get("environment") === "staging") target.searchParams.set("environment", "staging");
+      location.replace(target.href);
+    }());
+  </script>
+  <p>Membuka <a href="outputs/mdd-kasir-complete/matrialpro.html?appVersion=130">MDD Material Pro</a>...</p>
 </body>
 </html>

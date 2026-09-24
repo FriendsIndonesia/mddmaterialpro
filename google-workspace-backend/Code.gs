@@ -250,6 +250,7 @@ function processOperations_(ss, payload) {
     let error = "";
     try {
       applyOperation_(ss, operation);
+      syncLedgerForOperation_(ss, operation);
       appendChangeLog_(ss, operation);
       acknowledged.push(operationId);
     } catch (operationError) {
@@ -264,6 +265,57 @@ function processOperations_(ss, payload) {
   trimTechnicalSheet_(receiptSheet, 100000);
   const revision = touchRevision_();
   return { ok: true, acknowledged: acknowledged, conflicts: conflicts, revision: revision };
+}
+
+// Operasi sync-v2 menulis Sales/Purchases secara targeted. Sinkronkan hanya
+// baris Hutang/Piutang yang terkait agar stok dan dokumen transaksi tidak
+// pernah berhasil tersimpan sementara saldo tagihannya tertinggal.
+function syncLedgerForOperation_(ss, operation) {
+  const entity = String(operation.entity || "");
+  const type = String(operation.type || "");
+  let kind = "";
+  let entityId = "";
+  if (type === "upsert" && (entity === "purchases" || entity === "sales")) {
+    kind = entity === "purchases" ? "debt" : "receivable";
+    entityId = String(operation.entityId || (operation.payload && operation.payload.row && operation.payload.row.id) || "");
+  } else if (type === "payment_delta") {
+    const payment = (operation.payload && operation.payload.payment) || {};
+    kind = String(payment.type || "").toLowerCase() === "hutang" ? "debt" : "receivable";
+    entityId = String(payment.refId || "");
+  } else { return; }
+  if (!entityId) return;
+  const table = TABLES.find((item) => item.key === (kind === "debt" ? "purchases" : "sales"));
+  const row = readTableDefinition_(ss, table).find((item) => String(item.id || "") === entityId);
+  if (row) syncSingleLedgerRow_(ss, kind, row);
+}
+
+function syncSingleLedgerRow_(ss, kind, row) {
+  const sheetName = kind === "debt" ? "Hutang" : "Piutang";
+  const headers = kind === "debt"
+    ? ["Tanggal", "Jatuh Tempo", "No. Faktur", "Supplier", "Hutang Aktif", "Bayar", "Retur", "Sisa Hutang", "Metode", "Catatan"]
+    : ["Tanggal", "Jatuh Tempo", "No. Faktur", "Pelanggan", "Piutang Aktif", "Bayar", "Retur", "Sisa Piutang", "Metode", "Catatan"];
+  const sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
+  const currentHeaders = sheet.getRange(1, 1, 1, headers.length).getDisplayValues()[0];
+  if (JSON.stringify(currentHeaders) !== JSON.stringify(headers)) sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  const invoice = String(row.invoiceNo || row.id || "").trim();
+  if (!invoice) return;
+  const method = String(row.method || "").toLowerCase();
+  const creditMethod = kind === "debt" ? /hutang|dp/.test(method) : /piutang|dp/.test(method);
+  const isCreditRecord = Number(row.due || 0) > 0 || creditMethod;
+  const matches = sheet.getLastRow() < 2 ? [] : sheet.getRange(2, 3, sheet.getLastRow() - 1, 1).getDisplayValues()
+    .map((cells, index) => String(cells[0] || "").trim().toLowerCase() === invoice.toLowerCase() ? index + 2 : 0).filter(Boolean);
+  // Faktur duplikat lama tidak aman untuk dipilih otomatis. Tidak ada baris
+  // yang dihapus atau ditimpa pada kondisi itu; canonical tetap dipakai aplikasi.
+  if (matches.length > 1) return;
+  if (!matches.length && !isCreditRecord) return;
+  const values = [[ledgerDateValue_(row.date), ledgerDateValue_(row.dueDate), invoice,
+    kind === "debt" ? (row.salesName || row.company || "-") : (row.customerName || "-"),
+    Number(row.total || 0), Number(row.paid || 0), Number(row.returnAmount || 0), Number(row.due || 0), row.method || "Tempo", row.note || ""]];
+  const rowNumber = matches[0] || sheet.getLastRow() + 1;
+  sheet.getRange(rowNumber, 1, 1, headers.length).setValues(values);
+  sheet.getRange(rowNumber, 1, 1, 2).setNumberFormat("dd/MM/yyyy");
+  sheet.getRange(rowNumber, 5, 1, 4).setNumberFormat("#,##0");
+  sheet.setFrozenRows(1);
 }
 
 function applyOperation_(ss, operation) {
@@ -440,8 +492,9 @@ function mergeLedgerRows_(canonicalRows, ledgerRows) {
     const invoiceCandidates = result.map((row, index) => ({ row: row, index: index })).filter((item) => !matched[item.index] && String(item.row.invoiceNo || "").trim().toLowerCase() === invoice);
     const targetIndex = exactIndex >= 0 ? exactIndex : (invoiceCandidates.length === 1 ? invoiceCandidates[0].index : -1);
     if (targetIndex >= 0) {
-      // Pertahankan ID canonical aplikasi, tetapi baca nilai terbaru dari ledger.
-      result[targetIndex] = Object.assign({}, result[targetIndex], ledger, { id: result[targetIndex].id });
+      // Sales/Purchases adalah dokumen transaksi canonical. Ledger Hutang/Piutang
+      // hanya merupakan proyeksi finansialnya, sehingga catatan ledger lama tidak
+      // boleh menimpa total, pembayaran, atau sisa tagihan dokumen pusat.
       matched[targetIndex] = true;
     } else {
       result.push(ledger);

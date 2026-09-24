@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 128;
+      const APP_VERSION = 129;
       const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V121";
       const PRODUCTION_PRODUCT_COUNT = 2699;
       const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec";
@@ -1038,7 +1038,14 @@
           row.paid = toNumber(row.paid ?? row.bayar ?? row.dibayar);
           row.returnAmount = toNumber(row.returnAmount ?? row.retur ?? row.returned);
           row.due = toNumber(row.due ?? row.remaining ?? row.sisaPiutang ?? row.sisa);
-          if (!hasExplicitDue && row.total > row.paid + row.returnAmount) row.due = Math.max(0, row.total - row.paid - row.returnAmount); const hasUnexplainedZeroDue = row.due === 0 && row.total > row.paid + row.returnAmount; if (hasUnexplainedZeroDue) { row.due = Math.max(0, row.total - row.paid - row.returnAmount); row.status = "Piutang"; }
+          if (!hasExplicitDue && row.total > row.paid + row.returnAmount) row.due = Math.max(0, row.total - row.paid - row.returnAmount);
+          // Nilai sisa 0 hanya sah bila total telah ditutup oleh pembayaran atau
+          // retur. Beberapa baris legacy tidak membawa metode/status Piutang,
+          // sehingga identitas faktur tidak boleh menentukan saldo.
+          if (row.due === 0 && row.total > row.paid + row.returnAmount) {
+            row.due = Math.max(0, row.total - row.paid - row.returnAmount);
+            row.status = "Piutang";
+          }
           return row;
         }).filter((row) => isLedgerReceivableRow(row) || !deletedSales.has(row.id));
         data.purchases = (data.purchases || []).map((row) => {
@@ -1050,7 +1057,11 @@
           row.paid = toNumber(row.paid ?? row.bayar ?? row.dibayar);
           row.returnAmount = toNumber(row.returnAmount ?? row.retur ?? row.returned);
           row.due = toNumber(row.due ?? row.remaining ?? row.sisaHutang ?? row.sisa);
-          if (!hasExplicitDue && row.total > row.paid + row.returnAmount) row.due = Math.max(0, row.total - row.paid - row.returnAmount); const hasUnexplainedZeroDue = row.due === 0 && row.total > row.paid + row.returnAmount; if (hasUnexplainedZeroDue) { row.due = Math.max(0, row.total - row.paid - row.returnAmount); row.status = "Hutang"; }
+          if (!hasExplicitDue && row.total > row.paid + row.returnAmount) row.due = Math.max(0, row.total - row.paid - row.returnAmount);
+          if (row.due === 0 && row.total > row.paid + row.returnAmount) {
+            row.due = Math.max(0, row.total - row.paid - row.returnAmount);
+            row.status = "Hutang";
+          }
           return row;
         }).filter((row) => isLedgerDebtRow(row) || !deletedPurchases.has(row.id));
         return data;
@@ -1365,7 +1376,8 @@
           const timer = setTimeout(() => {
             cleanup();
             resolve(false);
-          }, ["state", "finance", "masterlite", "master", "products", "baselinepart", "receipt"].includes(action) ? 45000 : 10000);
+          // Android dapat melewati batas 10 detik saat Apps Script cold-start atau redirect.
+          }, ["state", "finance", "masterlite", "master", "products", "baselinepart", "receipt", "health", "changes", "reconcile", "acknowledgement"].includes(action) ? 45000 : 10000);
           window[callbackName] = (response) => {
             clearTimeout(timer);
             cleanup();
@@ -1593,7 +1605,8 @@
       }
 
       async function checkApplicationHealth() {
-        if (!state.profile?.onlineMode || !state.profile?.googleEndpoint || !navigator.onLine) return false;
+        // Runtime production memakai endpoint audited yang hard-coded, bukan endpoint legacy dalam localStorage.
+        if (!state.profile?.onlineMode || !activeBackendEndpoint() || !navigator.onLine) return false;
         try {
           const health = await requestGoogleWorkspaceJsonp("health", { clientVersion: APP_VERSION });
           if (!health?.ok) return false;
@@ -2207,17 +2220,6 @@
         const last = all.map((sale) => Number(String(sale.invoiceNo || sale.id || "").match(new RegExp(`INV-${stamp}-(\\d+)`))?.[1] || 0)).reduce((max, value) => Math.max(max, value), 0);
         return `INV-${stamp}-${String(last + 1).padStart(4, "0")}-${deviceDocumentSuffix()}`;
       }
-      function resolveTransactionDate(inputId, editing, draft, nextDocumentNo) {
-        const input = document.getElementById(inputId);
-        const selected = String(input?.value || draft?.date || today());
-        const untouchedDefault = Boolean(input && input.value === input.defaultValue);
-        const date = !editing && untouchedDefault ? today() : selected;
-        if (input && input.value !== date) input.value = date;
-        if (!editing && untouchedDefault && draft) draft.invoiceNo = nextDocumentNo();
-        if (draft) draft.date = date;
-        return date;
-      }
-
       function ensureSaleDraft() {
         if (!saleDraft.invoiceNo) saleDraft.invoiceNo = nextInvoiceNo();
         if (toNumber(saleDraft.dp) > 0 && saleDraft.method === "Piutang") {
@@ -2771,7 +2773,6 @@
         updateSaleDraftTotals();
         updateSaleCustomerDraft();
         const customer = selectedSaleCustomerData();
-        const pendingSaleDate = resolveTransactionDate("saleDate", false, saleDraft, nextInvoiceNo);
         state.pendingSales.unshift({ id: uid("PSO"), invoiceNo: saleDraft.invoiceNo, date: document.getElementById("saleDate").value || today(), customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, method: saleDraft.method, items: structuredClone(activeCart), ongkir: saleDraft.ongkir, discount: saleDraft.discount, dp: saleDraft.dp, bankCharge: 0, cashReceived: saleDraft.cashReceived, change: saleCashChange(), note: saleDraft.note, total: saleGrandTotal() });
         activeCart = [];
         resetSaleDraft();
@@ -2796,7 +2797,6 @@
         const dp = isDownPaymentMethod(method) ? Math.max(0, Math.min(total, toNumber(saleDraft.cashReceived))) : 0;
         if (isDownPaymentMethod(method) && dp <= 0) return toast("Masukkan nominal DP (Uang Muka) pada kolom Uang Diterima.");
         if (isCashMethod(method) && toNumber(saleDraft.cashReceived) < total) return toast("Uang diterima kurang dari Total Transaksi.");
-        const saleTransactionDate = resolveTransactionDate("saleDate", Boolean(editingSaleId), saleDraft, nextInvoiceNo);
         saleCheckoutBusy = true;
         const previousSale = editingSaleId ? state.sales.find((item) => item.id === editingSaleId) : null;
         if (previousSale) {
@@ -3006,7 +3006,6 @@
         if (!purchaseCart.length) return toast("Keranjang pembelian kosong.");
         updatePurchaseDraftTotals();
         const supplier = selectedSupplierData(purchaseDraft.supplierId);
-        const pendingPurchaseDate = resolveTransactionDate("purchaseDate", false, purchaseDraft, nextPurchaseNo);
         state.pendingPurchases.unshift({ id: uid("PPO"), invoiceNo: purchaseDraft.invoiceNo, supplierInvoiceNo: purchaseDraft.supplierInvoiceNo, date: document.getElementById("purchaseDate").value || today(), dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", method: purchaseDraft.method, items: structuredClone(purchaseCart), ongkir: purchaseDraft.ongkir, discount: purchaseDraft.discount, dp: purchaseDraft.dp, bankCharge: purchaseDraft.bankCharge, cashReceived: purchaseDraft.cashReceived, change: purchaseCashChange(), note: purchaseDraft.note, total: purchaseGrandTotal() });
         purchaseCart = [];
         resetPurchaseDraft();
@@ -3032,7 +3031,6 @@
         const isPaidPurchase = !isDebtPurchase;
         if (isPaidPurchase && isCashMethod(method) && toNumber(purchaseDraft.cashReceived) < total) return toast("Uang diterima kurang dari Total Transaksi.");
         if (isDpPurchase && (purchaseDraft.dp <= 0 || purchaseDraft.dp >= total)) return toast("DP harus lebih dari Rp 0 dan lebih kecil dari Total Transaksi.");
-        const purchaseTransactionDate = resolveTransactionDate("purchaseDate", Boolean(editingPurchaseId), purchaseDraft, nextPurchaseNo);
         purchaseCheckoutBusy = true;
         const previousPurchase = editingPurchaseId ? state.purchases.find((item) => item.id === editingPurchaseId) : null;
         if (previousPurchase) {

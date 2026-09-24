@@ -1,4 +1,4 @@
-const CACHE_NAME = "mdd-material-pro-v128-jakarta-transaction-date-fix";
+const CACHE_NAME = "mdd-material-pro-v129-mobile-endpoint-fix";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
@@ -21,7 +21,7 @@ self.addEventListener("activate", (event) => {
       Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
     ).then(() => self.clients.claim()).then(() =>
       self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) =>
-        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 128 }))
+        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 126 }))
       )
     )
   );
@@ -33,6 +33,7 @@ self.addEventListener("message", (event) => {
 
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
+  if (new URL(event.request.url).origin !== self.location.origin) return;
   if (event.request.mode === "navigate") {
     event.respondWith(
       fetch(event.request).then((response) => {
@@ -46,10 +47,13 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(
     caches.match(event.request).then((cached) =>
       cached || fetch(event.request).then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        if (response && response.ok) {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        }
         return response;
-      }).catch(() => caches.match("./matrialpro.html"))
+      })
     )
   );
 });
+

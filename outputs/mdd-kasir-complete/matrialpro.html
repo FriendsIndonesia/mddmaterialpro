@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 145;
+      const APP_VERSION = 146;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -829,6 +829,7 @@
       // This cache is never business source-of-truth and is retained only so a
       // transient read failure cannot blank an already valid Owner dashboard.
       const DASHBOARD_LAST_KNOWN_GOOD_KEY = "mdd_dashboard_last_known_good_v145";
+      const REVENUE_CHART_LAST_KNOWN_GOOD_KEY = "mdd_revenue_chart_last_known_good_v146";
       const PRODUCTION_MODULE_REVISION_KEY = "mdd_production_module_revisions_v141";
       // This is the original, permanent production deployment. Do not replace
       // it when publishing a new Apps Script version: edit that deployment in
@@ -916,6 +917,12 @@
       let reportTransactionQuery = "";
       const financeBulkSelection = new Set();
       let salesChart = null;
+      let revenueChartRows = null;
+      let revenueChartRequestGeneration = 0;
+      let revenueChartRefreshPromise = null;
+      let revenueChartRefreshAttempt = 0;
+      let revenueChartRetryTimer = null;
+      let revenueChartLoadState = "CHART_LOADING";
       let syncTimer = null;
       let syncPending = false;
       let syncRetryAttempt = 0;
@@ -1436,7 +1443,7 @@
             resolve(false);
           // Bootstrap/module are intentionally bounded.  A mobile UI may use
           // last-known-good cache rather than remain blocked by a slow request.
-          }, ["state", "finance", "masterlite", "master", "products", "baselinepart"].includes(action) ? 45000 : (action === "dashboardSummary" ? 20000 : (action === "bootstrap" || action === "module" || action === "health" ? 7000 : 10000)));
+          }, ["state", "finance", "masterlite", "master", "products", "baselinepart"].includes(action) ? 45000 : (action === "dashboardSummary" ? 20000 : (action === "revenueChart" ? 12000 : (action === "bootstrap" || action === "module" || action === "health" ? 7000 : 10000))));
           window[callbackName] = (response) => {
             clearTimeout(timer);
             cleanup();
@@ -1468,7 +1475,7 @@
         const controller = typeof AbortController === "function" ? new AbortController() : null;
         // DashboardSummary is small but Apps Script can have a cold-start. Give
         // that one read a reasonable budget before the JSONP fallback.
-        const timeout = setTimeout(() => controller?.abort(), action === "state" ? 15000 : (action === "dashboardSummary" ? 20000 : (action === "bootstrap" || action === "module" || action === "health" ? 4500 : 8000)));
+        const timeout = setTimeout(() => controller?.abort(), action === "state" ? 15000 : (action === "dashboardSummary" ? 20000 : (action === "revenueChart" ? 12000 : (action === "bootstrap" || action === "module" || action === "health" ? 4500 : 8000))));
         try {
           const separator = endpoint.includes("?") ? "&" : "?";
           const query = new URLSearchParams({ action, _: String(Date.now()), ...params });
@@ -1629,6 +1636,75 @@
         // Retain compatibility with the previous small-summary cache key.
         localStorage.setItem(PRODUCTION_BOOTSTRAP_CACHE_KEY, JSON.stringify(cached));
       }
+      function isValidRevenueChartPayload(payload) {
+        const rows = payload?.data?.rows;
+        return Boolean(payload?.ok && String(payload.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID &&
+          String(payload.environment || "") === PRODUCTION_CONFIG.environment &&
+          Number(payload.syncProtocol || 0) >= PRODUCTION_CONFIG.protocolVersion && Array.isArray(rows) && rows.length === 14 &&
+          rows.every((row) => /^\d{4}-\d{2}-\d{2}$/.test(String(row?.date || "")) && Number.isFinite(Number(row.transactionCount)) && Number.isFinite(Number(row.revenue))));
+      }
+      function loadLastKnownGoodRevenueChart() {
+        try {
+          const cached = JSON.parse(localStorage.getItem(REVENUE_CHART_LAST_KNOWN_GOOD_KEY) || "null");
+          if (!Array.isArray(cached?.rows) || cached.rows.length !== 14) return false;
+          revenueChartRows = cached.rows;
+          revenueChartLoadState = "CHART_STALE";
+          return true;
+        } catch { return false; }
+      }
+      function persistLastKnownGoodRevenueChart(rows, revision) {
+        localStorage.setItem(REVENUE_CHART_LAST_KNOWN_GOOD_KEY, JSON.stringify({ rows, revision: String(revision || ""), savedAt: new Date().toISOString() }));
+      }
+      function renderRevenueChartIfActive() {
+        if (!session || !isDashboardViewActive()) return;
+        if (revenueChartRows) drawRevenueChart(revenueChartRows);
+      }
+      function scheduleRevenueChartRetry() {
+        if (revenueChartRetryTimer || revenueChartRefreshAttempt >= 3 || !navigator.onLine) return;
+        const delay = [1000, 3000, 8000][revenueChartRefreshAttempt - 1] || 8000;
+        revenueChartRetryTimer = setTimeout(() => {
+          revenueChartRetryTimer = null;
+          refreshRevenueChart();
+        }, delay);
+      }
+      async function refreshRevenueChart() {
+        // Chart refresh is deliberately separate from DashboardSummary and all
+        // module hydration. Concurrent focus/online/render calls share it.
+        if (revenueChartRefreshPromise) return revenueChartRefreshPromise;
+        const generation = ++revenueChartRequestGeneration;
+        revenueChartLoadState = revenueChartRows ? "CHART_REFRESHING" : "CHART_LOADING";
+        revenueChartRefreshPromise = (async () => {
+          try {
+            const response = await requestProductionTransport("revenueChart", { clientVersion: APP_VERSION });
+            if (!isValidRevenueChartPayload(response)) throw new Error("RevenueChart production tidak valid");
+            if (generation !== revenueChartRequestGeneration) return false;
+            revenueChartRows = response.data.rows;
+            revenueChartLoadState = "CHART_READY";
+            revenueChartRefreshAttempt = 0;
+            clearTimeout(revenueChartRetryTimer);
+            revenueChartRetryTimer = null;
+            persistLastKnownGoodRevenueChart(revenueChartRows, response.revision);
+            renderRevenueChartIfActive();
+            return true;
+          } catch {
+            if (generation !== revenueChartRequestGeneration) return false;
+            revenueChartRefreshAttempt += 1;
+            if (revenueChartRows) {
+              revenueChartLoadState = "CHART_STALE";
+              renderRevenueChartIfActive();
+              scheduleRevenueChartRetry();
+              return false;
+            }
+            revenueChartLoadState = revenueChartRefreshAttempt < 3 ? "CHART_LOADING" : "CHART_LOAD_ERROR";
+            if (isDashboardViewActive() && revenueChartLoadState === "CHART_LOAD_ERROR") renderDashboard();
+            else scheduleRevenueChartRetry();
+            return false;
+          } finally {
+            if (generation === revenueChartRequestGeneration) revenueChartRefreshPromise = null;
+          }
+        })();
+        return revenueChartRefreshPromise;
+      }
       function scheduleDashboardRetry() {
         if (dashboardRetryTimer || dashboardRefreshAttempt >= 3 || !navigator.onLine) return;
         const delay = [1000, 3000, 8000][dashboardRefreshAttempt - 1] || 8000;
@@ -1679,6 +1755,7 @@
             }, 0);
             setTimeout(ensureProductsFirstPage, 0);
             setTimeout(syncModulesInBackground, 0);
+            setTimeout(refreshRevenueChart, 0);
             return true;
           } catch (error) {
             // Never blank a valid Dashboard because a transient network read
@@ -2332,7 +2409,10 @@
         // Restore only the prior server-derived Dashboard projection. This does
         // not restore or overwrite business records, the durable outbox, or
         // any module cache.
-        if (SYNC_ENVIRONMENT === "production") loadLastKnownGoodDashboard();
+        if (SYNC_ENVIRONMENT === "production") {
+          loadLastKnownGoodDashboard();
+          loadLastKnownGoodRevenueChart();
+        }
         renderAll();
         // READY depends only on an authoritative, lightweight bootstrap.
         // Products and other modules hydrate asynchronously after the UI opens.
@@ -2374,6 +2454,9 @@
         renderAll();
         if (view === "dashboardView" && backendRuntimeEnabled() && !dashboardRefreshPromise) {
           setTimeout(refreshAuthoritativeProductionSnapshot, 0);
+        }
+        if (view === "dashboardView" && backendRuntimeEnabled() && !revenueChartRefreshPromise) {
+          setTimeout(refreshRevenueChart, 0);
         }
         if (view === "financeView" && backendRuntimeEnabled()) {
           loadGoogleWorkspaceState("finance").then((loaded) => {
@@ -2815,9 +2898,16 @@
           document.getElementById("lowStockCount").textContent = `${number.format(toNumber(productionSummary.lowStockCount))} item`;
           const warningSearch = document.getElementById("dashboardWarningSearch");
           if (warningSearch) { warningSearch.oninput = () => renderDashboardWarningSearch(lowRows); renderDashboardWarningSearch(lowRows); }
-          if (salesChart) { salesChart.destroy(); salesChart = null; }
           const todaySummary = document.getElementById("salesChartToday");
-          if (todaySummary) todaySummary.innerHTML = `<strong>Grafik dimuat setelah modul Penjualan selesai.</strong><br><span>Dashboard utama sudah memakai ringkasan production saat ini.</span>`;
+          if (revenueChartRows) {
+            drawRevenueChart(revenueChartRows);
+          } else {
+            if (salesChart) { salesChart.destroy(); salesChart = null; }
+            if (todaySummary) todaySummary.innerHTML = revenueChartLoadState === "CHART_LOAD_ERROR"
+              ? `<strong>CHART_LOAD_ERROR</strong><br><span>Grafik Pendapatan belum dapat dimuat. Dashboard utama tetap menggunakan ringkasan production.</span>`
+              : `<strong>Memuat Grafik Pendapatan...</strong><br><span>Ringkasan Dashboard sudah siap dan grafik dimuat secara terpisah.</span>`;
+          }
+          if (!revenueChartRefreshPromise) setTimeout(refreshRevenueChart, 0);
           return;
         }
         const salesTotal = state.sales.reduce((s, x) => s + toNumber(x.total), 0);
@@ -2885,17 +2975,23 @@
         target.innerHTML = rows.map((product) => { const stock = stockAkhirProduk(product); return `<tr><td>${esc(product.name)}</td><td class="text-end">${number.format(stock)} ${esc(product.unit)}</td><td><span class="status-dot ${stock === 0 ? "danger" : "warn"}"></span> ${stock === 0 ? "Out of stock" : "Limit stok"}</td></tr>`; }).join("") || `<tr><td colspan="3" class="text-center text-secondary">${query ? "Barang warning stock tidak ditemukan." : "Gunakan Pencarian Warning Stock untuk melihat barang kosong atau di bawah minimum."}</td></tr>`;
       }
       function drawSalesChart(sourceSales = state.sales) {
-        if (!window.Chart) return;
         const labels = Array.from({ length: 14 }, (_, i) => {
           const [year, month, day] = today().split("-").map(Number);
           const calendarDay = new Date(Date.UTC(year, month - 1, day - (13 - i)));
           return calendarDay.toISOString().slice(0, 10);
         });
-        const values = labels.map((label) => sourceSales.filter((sale) => transactionDateKey(sale.date) === label).reduce((sum, sale) => sum + toNumber(sale.total), 0));
+        const rows = labels.map((date) => ({ date, transactionCount: sourceSales.filter((sale) => transactionDateKey(sale.date) === date).length, revenue: sourceSales.filter((sale) => transactionDateKey(sale.date) === date).reduce((sum, sale) => sum + toNumber(sale.total), 0) }));
+        drawRevenueChart(rows);
+      }
+      function drawRevenueChart(rows) {
+        if (!window.Chart || !Array.isArray(rows) || rows.length !== 14) return;
+        const labels = rows.map((row) => String(row.date || ""));
+        const values = rows.map((row) => toNumber(row.revenue));
         if (salesChart) salesChart.destroy();
         const todayValue = values[values.length - 1] || 0;
         const todaySummary = document.getElementById("salesChartToday");
-        if (todaySummary) todaySummary.innerHTML = `<strong>Omzet hari ini: ${idr.format(todayValue)}</strong><br><span>Batang bernilai kecil tetap dibuat terlihat agar tidak tampak sebagai nol.</span>`;
+        const todayTransactions = toNumber(rows[rows.length - 1]?.transactionCount);
+        if (todaySummary) todaySummary.innerHTML = `<strong>Omzet hari ini: ${idr.format(todayValue)}</strong><br><span>${number.format(todayTransactions)} transaksi tercatat. Batang bernilai kecil tetap dibuat terlihat agar tidak tampak sebagai nol.</span>`;
         const todayValueLabelPlugin = {
           id: "todayValueLabel",
           afterDatasetsDraw(chart) {

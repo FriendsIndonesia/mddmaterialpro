@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 139;
+      const APP_VERSION = 140;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -822,6 +822,8 @@
       // production snapshot.  Only conflicts already present before that
       // instant are legacy; conflicts created later remain visible normally.
       const AUTHORITATIVE_PRODUCTION_BASELINE = "AUTHORITATIVE_PRODUCTION_BASELINE_V138";
+      const PRODUCTION_SNAPSHOT_REVISION_KEY = "mdd_production_snapshot_revision_v1";
+      const PRODUCTION_CHANGE_CURSOR_KEY = "mdd_production_change_cursor_v1";
       // This is the original, permanent production deployment. Do not replace
       // it when publishing a new Apps Script version: edit that deployment in
       // place so every installed client keeps one production identity.
@@ -917,6 +919,7 @@
       let isPulling = false;
       let verifiedBackendEndpoint = "";
       let authoritativeSnapshotReady = false;
+      let productionBootstrapInFlight = false;
       const REPORT_DISPLAY_STORAGE_KEY = "mdd_report_display_hidden_v1";
       let hiddenReportRows = loadHiddenReportRows();
       let durablePendingSync = loadDurablePendingSync();
@@ -927,7 +930,7 @@
       let baselineRetryTimer = null;
       let baselineRetryAttempt = 0;
       let outboxReady = false;
-      let lastChangeCursor = "";
+      let lastChangeCursor = localStorage.getItem(PRODUCTION_CHANGE_CURSOR_KEY) || "";
       // Cache yang sudah ada menjadi baseline awal. Tanpa baseline ini seluruh
       // cache lama dapat salah dianggap sebagai perubahan baru lalu menimpa Sheet.
       let lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
@@ -1419,6 +1422,37 @@
       function requestGoogleWorkspaceJsonp(action = "state", params = {}) {
         return requestGoogleWorkspaceJsonpAt(activeBackendEndpoint(), action, params);
       }
+      function normalizeProductionResponse(payload) {
+        if (!payload || typeof payload !== "object") return false;
+        // Apps Script JSON and JSONP share this canonical response shape. Keep
+        // one internal schema even when WebView uses a different transport.
+        return payload.data && typeof payload.data === "string"
+          ? Object.assign({}, payload, { data: JSON.parse(payload.data) })
+          : payload;
+      }
+      async function requestGoogleWorkspaceFetchAt(endpoint, action = "state", params = {}) {
+        if (!endpoint || typeof fetch !== "function") return false;
+        const controller = typeof AbortController === "function" ? new AbortController() : null;
+        const timeout = setTimeout(() => controller?.abort(), action === "state" ? 15000 : 8000);
+        try {
+          const separator = endpoint.includes("?") ? "&" : "?";
+          const query = new URLSearchParams({ action, _: String(Date.now()), ...params });
+          const response = await fetch(`${endpoint}${separator}${query.toString()}`, { cache: "no-store", redirect: "follow", signal: controller?.signal });
+          if (!response.ok) return false;
+          return normalizeProductionResponse(await response.json());
+        } catch {
+          return false;
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+      async function requestProductionTransport(action = "state", params = {}) {
+        const endpoint = activeBackendEndpoint();
+        const fetched = await requestGoogleWorkspaceFetchAt(endpoint, action, params);
+        // CORS/WebView failures fall through immediately; JSONP is retained as
+        // the compatible Apps Script transport, with the same response schema.
+        return fetched || normalizeProductionResponse(await requestGoogleWorkspaceJsonpAt(endpoint, action, params));
+      }
       async function loadGoogleWorkspaceJsonp(action = "state") {
         const response = await requestGoogleWorkspaceJsonp(action);
         if (!response?.ok || !response?.data || String(response.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) return false;
@@ -1522,47 +1556,70 @@
       }
 
       async function loadGoogleWorkspaceState(action = "state") {
-        const endpoint = activeBackendEndpoint();
-        if (!backendRuntimeEnabled() || !endpoint) return false;
-        const separator = endpoint.includes("?") ? "&" : "?";
-        const stateUrl = `${endpoint}${separator}action=${action}&_=${Date.now()}`;
-        const controller = typeof AbortController === "function" ? new AbortController() : null;
-        const timeout = setTimeout(() => controller?.abort(), 12000);
-        try {
-          const response = await fetch(stateUrl, { cache: "no-store", redirect: "follow", signal: controller?.signal });
-          if (response.ok) {
-            const payload = await response.json();
-            if (payload?.ok && payload?.data && String(payload.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID) {
-              action === "state" ? mergeStateFromBackend(payload.data) : mergeSubsetFromBackend(payload.data);
-              if (action === "state") authoritativeSnapshotReady = true;
-              return true;
-            }
-          }
-        } catch (error) {
-          console.warn("Google Workspace fetch fallback to JSONP", error);
-        } finally {
-          clearTimeout(timeout);
-        }
-        return loadGoogleWorkspaceJsonp(action);
+        if (!backendRuntimeEnabled() || !activeBackendEndpoint()) return false;
+        const payload = await requestProductionTransport(action);
+        if (!payload?.ok || !payload?.data || String(payload.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) return false;
+        action === "state" ? mergeStateFromBackend(payload.data) : mergeSubsetFromBackend(payload.data);
+        if (action === "state") authoritativeSnapshotReady = true;
+        return true;
       }
       async function refreshAuthoritativeProductionSnapshot() {
+        if (productionBootstrapInFlight) return false;
+        productionBootstrapInFlight = true;
+        try {
         if (!await verifyActiveBackend()) {
           authoritativeSnapshotReady = false;
           if (session) renderAll();
           return false;
         }
-        const loaded = await loadGoogleWorkspaceState("state");
+        const cachedRevision = localStorage.getItem(PRODUCTION_SNAPSHOT_REVISION_KEY) || "";
+        if (cachedRevision && cachedRevision === lastBackendRevision && !hasLocalSyncChanges()) {
+          authoritativeSnapshotReady = true;
+          if (session) renderAll();
+          await updateSyncIndicator();
+          return true;
+        }
+        const loaded = await applyAuthoritativeChangesToCurrentRevision() || await loadGoogleWorkspaceState("state");
         authoritativeSnapshotReady = loaded;
         if (loaded) {
           operationSnapshot = JSON.parse(JSON.stringify(state));
+          localStorage.setItem(PRODUCTION_SNAPSHOT_REVISION_KEY, lastBackendRevision);
+          const latestCursor = await requestProductionTransport("changes", { cursor: "latest" });
+          if (latestCursor?.ok && latestCursor.cursor) {
+            lastChangeCursor = String(latestCursor.cursor);
+            localStorage.setItem(PRODUCTION_CHANGE_CURSOR_KEY, lastChangeCursor);
+            if (outboxReady) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
+          }
           await retirePreBaselineLegacyConflicts();
           if (session) renderAll();
           await updateSyncIndicator();
         } else if (session) {
-          setBackendSyncBanner("danger", "Data belum dapat dimuat dari server");
+          setBackendSyncBanner("danger", "SNAPSHOT_FAILED • data production belum dapat dimuat dari server");
           renderAll();
         }
         return loaded;
+        } finally {
+          productionBootstrapInFlight = false;
+        }
+      }
+      async function applyAuthoritativeChangesToCurrentRevision() {
+        if (!lastChangeCursor || hasLocalSyncChanges()) return false;
+        let cursor = lastChangeCursor;
+        let batches = 0;
+        while (batches < 10) {
+          const response = await requestProductionTransport("changes", { cursor });
+          if (!response?.ok || !response.cursor) return false;
+          for (const change of response.changes || []) await applyIncrementalChange(change);
+          cursor = String(response.cursor || cursor);
+          batches += 1;
+          if (!response.hasMore) {
+            lastChangeCursor = cursor;
+            localStorage.setItem(PRODUCTION_CHANGE_CURSOR_KEY, cursor);
+            if (outboxReady) await syncOutbox.setMeta("changeCursor", cursor);
+            return true;
+          }
+        }
+        return false;
       }
 
       async function retirePreBaselineLegacyConflicts() {
@@ -1607,11 +1664,12 @@
         isPulling = true;
         try {
           if (!await verifyActiveBackend()) return;
-          const response = await requestGoogleWorkspaceJsonp("changes", { cursor: lastChangeCursor || "latest" });
+          const response = await requestProductionTransport("changes", { cursor: lastChangeCursor || "latest" });
           if (!response?.ok) throw new Error("Change cursor backend tidak tersedia");
           let changed = false;
           for (const change of response.changes || []) changed = (await applyIncrementalChange(change)) || changed;
           lastChangeCursor = String(response.cursor || lastChangeCursor || "");
+          localStorage.setItem(PRODUCTION_CHANGE_CURSOR_KEY, lastChangeCursor);
           await syncOutbox.setMeta("changeCursor", lastChangeCursor);
           await updateSyncIndicator();
           if (changed) {
@@ -2017,7 +2075,7 @@
         const endpoint = activeBackendEndpoint();
         if (!endpoint) return false;
         if (verifiedBackendEndpoint === endpoint) return true;
-        const health = await requestGoogleWorkspaceJsonpAt(endpoint, "health", { clientVersion: APP_VERSION });
+        const health = await requestProductionTransport("health", { clientVersion: APP_VERSION });
         // Apps Script health is the actual deployment contract: environment and
         // syncProtocol live at the response top-level. Spreadsheet identity is
         // verified from the authoritative state snapshot below, not from an
@@ -2025,7 +2083,7 @@
         const healthData = health?.data || health || {};
         if (!health?.ok || Number(healthData.syncProtocol || 0) < PRODUCTION_CONFIG.protocolVersion || String(healthData.environment || "") !== PRODUCTION_CONFIG.environment) {
           verifiedBackendEndpoint = "";
-          setBackendSyncBanner("danger", "SYNC ERROR • koneksi server production belum tervalidasi");
+          setBackendSyncBanner("danger", health?.ok ? "PROTOCOL_MISMATCH • protocol production tidak kompatibel" : "SERVER_UNREACHABLE • server production tidak dapat dihubungi");
           return false;
         }
         lastBackendRevision = String(healthData.revision || lastBackendRevision || "");
@@ -2112,7 +2170,8 @@
         authoritativeSnapshotReady = false;
         setBackendSyncBanner("warning", "INITIALIZING • memuat data production dari server");
         setTimeout(refreshAuthoritativeProductionSnapshot, 0);
-        setTimeout(ensureWorkspaceBootstrap, 50);
+        // refreshAuthoritativeProductionSnapshot is the sole startup reader.
+        // Do not start the older three-part bootstrap in parallel on mobile.
         // Kirim kembali perubahan yang sempat tersimpan ketika perangkat
         // ditutup/offline. Outbox ini bertahan melewati refresh dan restart.
         setTimeout(() => { if (hasLocalSyncChanges()) queueGoogleWorkspaceSync(); }, 600);

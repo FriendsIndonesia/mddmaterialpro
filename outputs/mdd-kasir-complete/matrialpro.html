@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 140;
+      const APP_VERSION = 141;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -824,6 +824,8 @@
       const AUTHORITATIVE_PRODUCTION_BASELINE = "AUTHORITATIVE_PRODUCTION_BASELINE_V138";
       const PRODUCTION_SNAPSHOT_REVISION_KEY = "mdd_production_snapshot_revision_v1";
       const PRODUCTION_CHANGE_CURSOR_KEY = "mdd_production_change_cursor_v1";
+      const PRODUCTION_BOOTSTRAP_CACHE_KEY = "mdd_production_bootstrap_v141";
+      const PRODUCTION_MODULE_REVISION_KEY = "mdd_production_module_revisions_v141";
       // This is the original, permanent production deployment. Do not replace
       // it when publishing a new Apps Script version: edit that deployment in
       // place so every installed client keeps one production identity.
@@ -920,6 +922,8 @@
       let verifiedBackendEndpoint = "";
       let authoritativeSnapshotReady = false;
       let productionBootstrapInFlight = false;
+      let productionBootstrap = null;
+      let productionModuleRevisions = {};
       const REPORT_DISPLAY_STORAGE_KEY = "mdd_report_display_hidden_v1";
       let hiddenReportRows = loadHiddenReportRows();
       let durablePendingSync = loadDurablePendingSync();
@@ -1402,8 +1406,9 @@
           const timer = setTimeout(() => {
             cleanup();
             resolve(false);
-          // Android dapat melewati batas 10 detik saat Apps Script cold-start atau redirect.
-          }, ["state", "finance", "masterlite", "master", "products", "baselinepart", "receipt", "health", "status", "changes", "reconcile", "acknowledgement"].includes(action) ? 45000 : 10000);
+          // Bootstrap/module are intentionally bounded.  A mobile UI may use
+          // last-known-good cache rather than remain blocked by a slow request.
+          }, ["state", "finance", "masterlite", "master", "products", "baselinepart"].includes(action) ? 45000 : (action === "bootstrap" || action === "module" || action === "health" ? 7000 : 10000));
           window[callbackName] = (response) => {
             clearTimeout(timer);
             cleanup();
@@ -1433,7 +1438,7 @@
       async function requestGoogleWorkspaceFetchAt(endpoint, action = "state", params = {}) {
         if (!endpoint || typeof fetch !== "function") return false;
         const controller = typeof AbortController === "function" ? new AbortController() : null;
-        const timeout = setTimeout(() => controller?.abort(), action === "state" ? 15000 : 8000);
+        const timeout = setTimeout(() => controller?.abort(), action === "state" ? 15000 : (action === "bootstrap" || action === "module" || action === "health" ? 4500 : 8000));
         try {
           const separator = endpoint.includes("?") ? "&" : "?";
           const query = new URLSearchParams({ action, _: String(Date.now()), ...params });
@@ -1567,37 +1572,39 @@
         if (productionBootstrapInFlight) return false;
         productionBootstrapInFlight = true;
         try {
-        if (!await verifyActiveBackend()) {
-          authoritativeSnapshotReady = false;
-          if (session) renderAll();
-          return false;
-        }
-        const cachedRevision = localStorage.getItem(PRODUCTION_SNAPSHOT_REVISION_KEY) || "";
-        if (cachedRevision && cachedRevision === lastBackendRevision && !hasLocalSyncChanges()) {
+          if (!await verifyActiveBackend()) {
+            authoritativeSnapshotReady = false;
+            if (session) renderAll();
+            return false;
+          }
+          // v141 readiness is a small, authoritative bootstrap response. Full
+          // state is deliberately excluded from this critical path.
+          const bootstrap = await requestProductionTransport("bootstrap", { clientVersion: APP_VERSION });
+          const data = bootstrap?.data || {};
+          const valid = bootstrap?.ok && String(bootstrap.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID &&
+            String(bootstrap.environment || "") === PRODUCTION_CONFIG.environment &&
+            Number(bootstrap.syncProtocol || 0) >= PRODUCTION_CONFIG.protocolVersion && data.summary;
+          if (!valid) {
+            authoritativeSnapshotReady = false;
+            setBackendSyncBanner("danger", "SNAPSHOT_FAILED • data production belum dapat dimuat dari server");
+            if (session) renderAll();
+            return false;
+          }
+          productionBootstrap = data;
+          productionModuleRevisions = data.entityRevisions || {};
+          lastBackendRevision = String(bootstrap.revision || lastBackendRevision || "");
           authoritativeSnapshotReady = true;
-          if (session) renderAll();
-          await updateSyncIndicator();
-          return true;
-        }
-        const loaded = await applyAuthoritativeChangesToCurrentRevision() || await loadGoogleWorkspaceState("state");
-        authoritativeSnapshotReady = loaded;
-        if (loaded) {
-          operationSnapshot = JSON.parse(JSON.stringify(state));
-          localStorage.setItem(PRODUCTION_SNAPSHOT_REVISION_KEY, lastBackendRevision);
+          localStorage.setItem(PRODUCTION_BOOTSTRAP_CACHE_KEY, JSON.stringify({ revision: lastBackendRevision, data, savedAt: new Date().toISOString() }));
           const latestCursor = await requestProductionTransport("changes", { cursor: "latest" });
           if (latestCursor?.ok && latestCursor.cursor) {
             lastChangeCursor = String(latestCursor.cursor);
             localStorage.setItem(PRODUCTION_CHANGE_CURSOR_KEY, lastChangeCursor);
             if (outboxReady) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
           }
-          await retirePreBaselineLegacyConflicts();
           if (session) renderAll();
           await updateSyncIndicator();
-        } else if (session) {
-          setBackendSyncBanner("danger", "SNAPSHOT_FAILED • data production belum dapat dimuat dari server");
-          renderAll();
-        }
-        return loaded;
+          setTimeout(syncModulesInBackground, 0);
+          return true;
         } catch (error) {
           authoritativeSnapshotReady = false;
           setBackendSyncBanner("danger", "BOOTSTRAP_FAILED • bootstrap production tidak selesai");
@@ -1605,6 +1612,44 @@
           return false;
         } finally {
           productionBootstrapInFlight = false;
+        }
+      }
+
+      async function loadModulePage(module, cursor = 0, limit = 300) {
+        const response = await requestProductionTransport("module", { module, cursor: String(cursor), limit: String(limit), updatedSince: productionModuleRevisions?.[module]?.revision || "" });
+        if (!response?.ok || String(response.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID || !Array.isArray(response.data?.rows)) return false;
+        const rows = response.data.rows;
+        const existing = new Map((state[module] || []).map((row) => [operationRowId(module, row), row]));
+        rows.forEach((row) => existing.set(operationRowId(module, row), row));
+        state[module] = [...existing.values()];
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        return { next: Number(response.cursor || 0), hasMore: Boolean(response.hasMore), revision: String(response.revision || ""), count: Number(response.data.count || state[module].length) };
+      }
+
+      async function syncModulesInBackground() {
+        if (!authoritativeSnapshotReady || !navigator.onLine) return;
+        // Products are chunked; other modules remain independent background
+        // requests and cannot make the dashboard leave READY.
+        for (const module of ["products", "sales", "purchases", "payments", "cashTx", "stockMoves", "returns", "customers", "suppliers", "cashAccounts", "categories", "discounts", "packages", "employees"]) {
+          let cachedRevisions = {};
+          try { cachedRevisions = JSON.parse(localStorage.getItem(PRODUCTION_MODULE_REVISION_KEY) || "{}"); } catch {}
+          const serverMeta = productionModuleRevisions[module] || {};
+          if (serverMeta.revision && cachedRevisions[module]?.revision === serverMeta.revision && (state[module] || []).length >= Number(serverMeta.count || 0)) continue;
+          let cursor = 0, pages = 0;
+          let finalPage = null;
+          do {
+            const page = await loadModulePage(module, cursor, 300);
+            if (!page) break;
+            finalPage = page;
+            cursor = page.next;
+            pages += 1;
+            if (!page.hasMore) break;
+          } while (pages < 20);
+          if (finalPage && !finalPage.hasMore) {
+            cachedRevisions[module] = { revision: finalPage.revision, count: finalPage.count, syncedAt: new Date().toISOString() };
+            localStorage.setItem(PRODUCTION_MODULE_REVISION_KEY, JSON.stringify(cachedRevisions));
+          }
+          await new Promise((resolve) => setTimeout(resolve, 0));
         }
       }
       async function applyAuthoritativeChangesToCurrentRevision() {
@@ -1846,7 +1891,13 @@
           // recovery. Existing business cache and durable outbox remain intact.
           operationSnapshot = JSON.parse(JSON.stringify(state));
           const pending = await syncOutbox.list(["pending", "failed", "sending"], 1);
-          if (!lastChangeCursor && !pending.length && session) await bootstrapWorkspaceStateOnce();
+          // v141 never hydrates the full business snapshot during login.
+          // The lightweight bootstrap establishes READY; modules hydrate later.
+          if (!lastChangeCursor && !pending.length && session) {
+            const cursorResponse = await requestGoogleWorkspaceJsonp("changes", { cursor: "latest" });
+            lastChangeCursor = String(cursorResponse?.cursor || "");
+            if (lastChangeCursor) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
+          }
           else if (!lastChangeCursor) {
             const cursorResponse = await requestGoogleWorkspaceJsonp("changes", { cursor: "latest" });
             lastChangeCursor = String(cursorResponse?.cursor || "");
@@ -2174,20 +2225,16 @@
         const active = document.querySelector(".view-section.active")?.id || "dashboardView";
         if (!canAccessView(active)) setView(firstAllowedView(), true);
         renderAll();
-        // Dashboard tampil dari cache lokal lebih dahulu; jaringan berjalan di
-        // latar belakang agar login tidak menunggu database produk yang besar.
-        // Satu siklus pembacaan yang utuh: transaksi, master, dan produk harus
-        // semuanya berhasil sebelum revisi ditandai selesai pada perangkat.
+        // READY depends only on an authoritative, lightweight bootstrap.
+        // Products and other modules hydrate asynchronously after the UI opens.
         lastBackendRevision = "";
         authoritativeSnapshotReady = false;
         setBackendSyncBanner("warning", "INITIALIZING • memuat data production dari server");
         setTimeout(refreshAuthoritativeProductionSnapshot, 0);
         // refreshAuthoritativeProductionSnapshot is the sole startup reader.
-        // Do not start the older three-part bootstrap in parallel on mobile.
         // Kirim kembali perubahan yang sempat tersimpan ketika perangkat
         // ditutup/offline. Outbox ini bertahan melewati refresh dan restart.
         setTimeout(() => { if (hasLocalSyncChanges()) queueGoogleWorkspaceSync(); }, 600);
-        // Revisi baru diakui hanya setelah finance, master, dan products berhasil dibaca.
         clearInterval(autoPullTimer);
         // Lima detik cukup responsif untuk tiga perangkat, tetapi jauh lebih aman
         // terhadap kuota Apps Script dibanding polling setiap 1,5 detik.
@@ -2622,6 +2669,38 @@
           const stockRows = document.getElementById("dashboardStockRows");
           if (stockRows) stockRows.innerHTML = `<tr><td colspan="3" class="text-center text-secondary">Data belum dapat dimuat dari server.</td></tr>`;
           if (salesChart) { salesChart.destroy(); salesChart = null; }
+          return;
+        }
+        // v141 dashboard is rendered from the small server-side aggregate. It
+        // never waits for Products/Sales/Purchases to hydrate on this device.
+        const productionSummary = SYNC_ENVIRONMENT === "production" ? productionBootstrap?.summary : null;
+        if (productionSummary) {
+          const metric = (icon, label, value, cls, source) => `<div class="metric-card"><div class="metric-icon ${cls}"><i class="bi ${icon}"></i></div><div><span>${label}</span><strong>${value}</strong><small class="metric-source">Sumber: ${source}</small></div></div>`;
+          document.getElementById("metricGrid").innerHTML = [
+            metric("bi-box-seam", "Total Produk Terjual", number.format(toNumber(productionSummary.productsSoldToday)), "bg-blue", `${number.format(toNumber(productionSummary.salesInvoiceToday))} invoice tanggal hari ini`),
+            metric("bi-cash-stack", "Omzet Hari Ini", idr.format(toNumber(productionSummary.salesToday)), "bg-green", "DashboardSummary production"),
+            metric("bi-truck", "Pembelian Hari Ini", idr.format(toNumber(productionSummary.purchasesToday)), "bg-cyan", "DashboardSummary production"),
+            metric("bi-exclamation-triangle", "Stock Kritis Per Hari Ini", number.format(toNumber(productionSummary.lowStockCount)), "bg-amber", "Produk aktif dengan stok akhir ≤ minimum"),
+            metric("bi-arrow-left-right", "Pembayaran Piutang Hari Ini", idr.format(toNumber(productionSummary.receivablePaymentsToday)), "bg-rose", "DashboardSummary production"),
+            metric("bi-wallet2", "Pembayaran Hutang Hari Ini", idr.format(toNumber(productionSummary.debtPaymentsToday)), "bg-blue", "DashboardSummary production"),
+            metric("bi-bank", "Saldo Kas Per Hari Ini", idr.format(toNumber(productionSummary.cashBalance)), "bg-green", "DashboardSummary production"),
+            metric("bi-box2-heart", "Nilai Stok Per Hari Ini", idr.format(toNumber(productionSummary.stockValue)), "bg-cyan", "DashboardSummary production")
+          ].join("");
+          const reportBox = document.getElementById("ownerReportRows");
+          if (reportBox) reportBox.innerHTML = [
+            ["Jumlah Piutang Tersisa", idr.format(toNumber(productionSummary.receivable))], ["Jumlah Hutang Tersisa", idr.format(toNumber(productionSummary.payable))],
+            ["Total Pembayaran Piutang Tercatat", idr.format(toNumber(productionSummary.receivablePaymentsTotal))], ["Total Pembayaran Hutang Tercatat", idr.format(toNumber(productionSummary.debtPaymentsTotal))],
+            ["Petty Cash Hari Ini", idr.format(toNumber(productionSummary.pettyCashToday))], ["Selisih Stock", number.format(toNumber(productionSummary.stockDifference))],
+            ["Nilai Aset Bersih", idr.format(toNumber(productionSummary.netAssetValue))], ["Total Transaksi Kasir Hari Ini", number.format(toNumber(productionSummary.salesInvoiceToday))],
+            ["Total Invoice Pending", number.format(toNumber(productionSummary.pendingSalesCount))]
+          ].map(([label, value]) => `<div class="owner-report-item"><span>${label}</span><strong>${value}</strong></div>`).join("") + `<div class="audit-box"><strong>Data production:</strong> ringkasan server revision ${esc(lastBackendRevision)}.</div>`;
+          const lowRows = productionSummary.lowStockPreview || [];
+          document.getElementById("lowStockCount").textContent = `${number.format(toNumber(productionSummary.lowStockCount))} item`;
+          const warningSearch = document.getElementById("dashboardWarningSearch");
+          if (warningSearch) { warningSearch.oninput = () => renderDashboardWarningSearch(lowRows); renderDashboardWarningSearch(lowRows); }
+          if (salesChart) { salesChart.destroy(); salesChart = null; }
+          const todaySummary = document.getElementById("salesChartToday");
+          if (todaySummary) todaySummary.innerHTML = `<strong>Grafik dimuat setelah modul Penjualan selesai.</strong><br><span>Dashboard utama sudah memakai ringkasan production saat ini.</span>`;
           return;
         }
         const salesTotal = state.sales.reduce((s, x) => s + toNumber(x.total), 0);

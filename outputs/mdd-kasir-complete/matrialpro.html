@@ -800,13 +800,14 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 135;
+      const APP_VERSION = 136;
       // Every client older than the enforced backend version is upgraded before
       // it can use its legacy per-device endpoint or stale production identity.
-      const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V135";
-      // One explicitly approved, Owner-only migration. It is versioned so
+      const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V136";
+      // Explicitly approved, device-local legacy cleanup. It is versioned so
       // later, genuine conflicts never receive this treatment.
-      const OWNER_LEGACY_CONFLICT_DISPOSITION = "OWNER_APPROVED_LEGACY_CONFLICT_DISPOSITION_V135";
+      const LEGACY_CONFLICT_DISPOSITION = "APPROVED_LEGACY_CONFLICT_DISPOSITION_V136";
+      const PREVIOUS_OWNER_CONFLICT_DISPOSITION = "OWNER_APPROVED_LEGACY_CONFLICT_DISPOSITION_V135";
       // This is the original, permanent production deployment. Do not replace
       // it when publishing a new Apps Script version: edit that deployment in
       // place so every installed client keeps one production identity.
@@ -1760,7 +1761,7 @@
         // available.  Missing operations are returned to the durable outbox
         // for their normal idempotent retry, while true conflicts remain for
         // review with their original payload intact.
-        const disposition = await disposeApprovedOwnerLegacyConflictsOnce();
+        const disposition = await disposeApprovedLegacyConflictsOnce();
         if (disposition.unresolved) return false;
         await reconcileExistingConflictsBeforeBaseline();
         const pendingAfterReconcile = await syncOutbox.list(["pending", "sending", "failed"], 1);
@@ -1868,18 +1869,23 @@
         const unresolved = (await syncOutbox.list(["conflict"], 100000)).length;
         return { acknowledged, requeued, unresolved };
       }
-      async function disposeApprovedOwnerLegacyConflictsOnce() {
-        // This is not a general conflict resolver. It runs once, only for the
-        // Owner device and only because the Owner approved abandoning this
-        // legacy migration set. Every affected operation remains retained as
-        // an audit record with its original payload in IndexedDB.
-        if (String(session?.role || "").toLowerCase() !== "owner") return { abandoned: 0, acknowledged: 0, unresolved: 0 };
-        if ((await syncOutbox.getMeta("legacyConflictDispositionVersion")) === OWNER_LEGACY_CONFLICT_DISPOSITION) {
+      async function disposeApprovedLegacyConflictsOnce() {
+        // This is not a general conflict resolver. It runs once per device for
+        // the explicitly approved legacy backlog. Every affected operation is
+        // retained as an audit record with its original payload in IndexedDB.
+        const previousDisposition = await syncOutbox.getMeta("legacyConflictDispositionVersion");
+        if (previousDisposition === LEGACY_CONFLICT_DISPOSITION) {
+          return { abandoned: 0, acknowledged: 0, unresolved: 0 };
+        }
+        // v135 already completed the same one-time action for this Owner
+        // device. Do not touch any conflict created after that completion.
+        if (previousDisposition === PREVIOUS_OWNER_CONFLICT_DISPOSITION) {
+          await syncOutbox.setMeta("legacyConflictDispositionVersion", LEGACY_CONFLICT_DISPOSITION);
           return { abandoned: 0, acknowledged: 0, unresolved: 0 };
         }
         const conflicts = await syncOutbox.list(["conflict"], 100000);
         if (!conflicts.length) {
-          await syncOutbox.setMeta("legacyConflictDispositionVersion", OWNER_LEGACY_CONFLICT_DISPOSITION);
+          await syncOutbox.setMeta("legacyConflictDispositionVersion", LEGACY_CONFLICT_DISPOSITION);
           await syncOutbox.setMeta("legacyConflictDispositionCompletedAt", new Date().toISOString());
           return { abandoned: 0, acknowledged: 0, unresolved: 0 };
         }
@@ -1905,7 +1911,7 @@
             await syncOutbox.mark(abandonedIds, "abandoned", {
               abandonedAt: new Date().toISOString(),
               lastError: "",
-              resolvedBy: "owner-approved-one-time-production-baseline",
+              resolvedBy: "approved-one-time-production-baseline",
               abandonmentReason: "legacy-conflict-kept-for-audit; re-enter-only-if-absent-from-production"
             });
             abandoned += abandonedIds.length;
@@ -1924,7 +1930,7 @@
         }
         const unresolved = (await syncOutbox.list(["conflict"], 100000)).length;
         if (unresolved) return { acknowledged, abandoned, unresolved };
-        await syncOutbox.setMeta("legacyConflictDispositionVersion", OWNER_LEGACY_CONFLICT_DISPOSITION);
+        await syncOutbox.setMeta("legacyConflictDispositionVersion", LEGACY_CONFLICT_DISPOSITION);
         await syncOutbox.setMeta("legacyConflictDispositionCompletedAt", new Date().toISOString());
         await syncOutbox.setMeta("legacyConflictDispositionAudit", audit);
         return { acknowledged, abandoned, unresolved: 0 };

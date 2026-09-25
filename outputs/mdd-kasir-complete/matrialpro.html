@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-const APP_VERSION = 142;
+const APP_VERSION = 143;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -2134,17 +2134,9 @@ const APP_VERSION = 142;
         return { acknowledged, abandoned, unresolved: 0 };
       }
       async function bootstrapWorkspaceStateOnce() {
-        if (!await verifyActiveBackend()) return false;
-        const responses = await Promise.all(["finance", "masterlite", "products"].map((action) => requestGoogleWorkspaceJsonp(action)));
-        if (responses.every((response) => response?.ok && response.data && String(response.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID)) {
-          responses.forEach((response) => mergeSubsetFromBackend(response.data));
-          authoritativeSnapshotReady = true;
-        }
-        const cursorResponse = await requestGoogleWorkspaceJsonp("changes", { cursor: "latest" });
-        lastChangeCursor = String(cursorResponse?.cursor || "");
-        if (lastChangeCursor) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
-        operationSnapshot = JSON.parse(JSON.stringify(state));
-        return true;
+        // Kept as a compatibility no-op for older UI hooks. A desktop login
+        // never pulls the legacy aggregate state/subsets from this path.
+        return false;
       }
       async function verifyActiveBackend() {
         const endpoint = activeBackendEndpoint();
@@ -2173,13 +2165,8 @@ const APP_VERSION = 142;
         return true;
       }
       async function ensureWorkspaceBootstrap() {
-        if (!outboxReady) return setTimeout(ensureWorkspaceBootstrap, 250);
-        const hasOperationalData = ["products", "sales", "purchases", "customers", "suppliers"].some((key) => Array.isArray(state[key]) && state[key].length);
-        const pending = await syncOutbox.list(["pending", "failed", "sending", "conflict"], 1);
-        if (!hasOperationalData && !pending.length) {
-          await bootstrapWorkspaceStateOnce();
-          renderSyncedState();
-        }
+        // Compatibility no-op: bootstrap uses DashboardSummary and module APIs.
+        return false;
       }
       function bind() {
         document.getElementById("loginForm").addEventListener("submit", login);

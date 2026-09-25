@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-const APP_VERSION = 144;
+      const APP_VERSION = 145;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -825,6 +825,10 @@ const APP_VERSION = 144;
       const PRODUCTION_SNAPSHOT_REVISION_KEY = "mdd_production_snapshot_revision_v1";
       const PRODUCTION_CHANGE_CURSOR_KEY = "mdd_production_change_cursor_v1";
       const PRODUCTION_BOOTSTRAP_CACHE_KEY = "mdd_production_bootstrap_v141";
+      // Dashboard is an independently refreshable, server-derived projection.
+      // This cache is never business source-of-truth and is retained only so a
+      // transient read failure cannot blank an already valid Owner dashboard.
+      const DASHBOARD_LAST_KNOWN_GOOD_KEY = "mdd_dashboard_last_known_good_v145";
       const PRODUCTION_MODULE_REVISION_KEY = "mdd_production_module_revisions_v141";
       // This is the original, permanent production deployment. Do not replace
       // it when publishing a new Apps Script version: edit that deployment in
@@ -924,6 +928,11 @@ const APP_VERSION = 144;
       let productionBootstrapInFlight = false;
       let productionBootstrap = null;
       let productionModuleRevisions = {};
+      let dashboardRequestGeneration = 0;
+      let dashboardRefreshPromise = null;
+      let dashboardRefreshAttempt = 0;
+      let dashboardRetryTimer = null;
+      let dashboardLoadState = "DASHBOARD_LOAD_ERROR";
       const REPORT_DISPLAY_STORAGE_KEY = "mdd_report_display_hidden_v1";
       let hiddenReportRows = loadHiddenReportRows();
       let durablePendingSync = loadDurablePendingSync();
@@ -1278,9 +1287,11 @@ const APP_VERSION = 144;
         return document.querySelector(".view-section.active")?.id === "dashboardView";
       }
       function reportDashboardLoadError() {
-        // A dashboard-only request must never turn a healthy Products/POS
-        // screen into a global error state.
-        if (isDashboardViewActive()) setBackendSyncBanner("danger", "DASHBOARD_LOAD_ERROR • ringkasan production belum dapat dimuat");
+        // A dashboard-only failure is shown only when there has never been a
+        // valid DashboardSummary. Products/POS must never inherit this state.
+        if (isDashboardViewActive() && !productionBootstrap?.summary && dashboardLoadState === "DASHBOARD_LOAD_ERROR") {
+          setBackendSyncBanner("danger", "DASHBOARD_LOAD_ERROR • ringkasan production belum dapat dimuat");
+        }
       }
       async function updateSyncIndicator(forcedStatus) {
         if (!document.getElementById("backendSyncBanner")) return;
@@ -1292,6 +1303,14 @@ const APP_VERSION = 144;
           conflicts = await syncOutbox.list(["conflict"], 100000);
         } catch {
           return setBackendSyncBanner("danger", "SYNC ERROR • IndexedDB tidak dapat dibaca");
+        }
+        if (SYNC_ENVIRONMENT === "production" && dashboardLoadState === "DASHBOARD_STALE" && productionBootstrap?.summary) {
+          if (isDashboardViewActive()) return setBackendSyncBanner("warning", "ONLINE - DATA TERAKHIR • memperbarui Dashboard di latar belakang");
+          return setBackendSyncBanner("success", "ONLINE - MODULES READY");
+        }
+        if (SYNC_ENVIRONMENT === "production" && dashboardLoadState === "DASHBOARD_REFRESHING" && productionBootstrap?.summary) {
+          if (isDashboardViewActive()) return setBackendSyncBanner("warning", "DASHBOARD_REFRESHING • memperbarui data production");
+          return setBackendSyncBanner("success", "ONLINE - MODULES READY");
         }
         if (SYNC_ENVIRONMENT === "production" && !authoritativeSnapshotReady) {
           if (isDashboardViewActive()) return setBackendSyncBanner("warning", "Data Dashboard belum dapat dimuat dari server");
@@ -1417,7 +1436,7 @@ const APP_VERSION = 144;
             resolve(false);
           // Bootstrap/module are intentionally bounded.  A mobile UI may use
           // last-known-good cache rather than remain blocked by a slow request.
-          }, ["state", "finance", "masterlite", "master", "products", "baselinepart"].includes(action) ? 45000 : (action === "bootstrap" || action === "module" || action === "health" ? 7000 : 10000));
+          }, ["state", "finance", "masterlite", "master", "products", "baselinepart"].includes(action) ? 45000 : (action === "dashboardSummary" ? 20000 : (action === "bootstrap" || action === "module" || action === "health" ? 7000 : 10000)));
           window[callbackName] = (response) => {
             clearTimeout(timer);
             cleanup();
@@ -1447,7 +1466,9 @@ const APP_VERSION = 144;
       async function requestGoogleWorkspaceFetchAt(endpoint, action = "state", params = {}) {
         if (!endpoint || typeof fetch !== "function") return false;
         const controller = typeof AbortController === "function" ? new AbortController() : null;
-        const timeout = setTimeout(() => controller?.abort(), action === "state" ? 15000 : (action === "bootstrap" || action === "module" || action === "health" ? 4500 : 8000));
+        // DashboardSummary is small but Apps Script can have a cold-start. Give
+        // that one read a reasonable budget before the JSONP fallback.
+        const timeout = setTimeout(() => controller?.abort(), action === "state" ? 15000 : (action === "dashboardSummary" ? 20000 : (action === "bootstrap" || action === "module" || action === "health" ? 4500 : 8000)));
         try {
           const separator = endpoint.includes("?") ? "&" : "?";
           const query = new URLSearchParams({ action, _: String(Date.now()), ...params });
@@ -1577,54 +1598,118 @@ const APP_VERSION = 144;
         if (action === "state") authoritativeSnapshotReady = true;
         return true;
       }
-      async function refreshAuthoritativeProductionSnapshot() {
-        if (productionBootstrapInFlight) return false;
-        productionBootstrapInFlight = true;
-        try {
-          // Dashboard readiness has a dedicated small production route. It
-          // cannot depend on legacy bootstrap/profile/module metadata.
-          const dashboardResponse = await requestProductionTransport("dashboardSummary", { clientVersion: APP_VERSION });
-          const data = dashboardResponse?.data || {};
-          const valid = dashboardResponse?.ok && String(dashboardResponse.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID &&
-            String(dashboardResponse.environment || "") === PRODUCTION_CONFIG.environment &&
-            Number(dashboardResponse.syncProtocol || 0) >= PRODUCTION_CONFIG.protocolVersion && data.summary;
-          if (!valid) {
-            authoritativeSnapshotReady = false;
-            reportDashboardLoadError();
-            if (session) renderAll();
-            return false;
-          }
-          productionBootstrap = Object.assign({}, productionBootstrap || {}, data);
-          if (data.entityRevisions) productionModuleRevisions = data.entityRevisions;
-          lastBackendRevision = String(dashboardResponse.revision || lastBackendRevision || "");
-          verifiedBackendEndpoint = activeBackendEndpoint();
-          authoritativeSnapshotReady = true;
-          localStorage.setItem(PRODUCTION_BOOTSTRAP_CACHE_KEY, JSON.stringify({ revision: lastBackendRevision, data, savedAt: new Date().toISOString() }));
-          if (session) renderAll();
-          await updateSyncIndicator();
-          // Cursor tracking is diagnostic/background work. It must not delay a
-          // successful DashboardSummary render.
-          setTimeout(async () => {
-            try {
-              const latestCursor = await requestProductionTransport("changes", { cursor: "latest" });
-              if (latestCursor?.ok && latestCursor.cursor) {
-                lastChangeCursor = String(latestCursor.cursor);
-                localStorage.setItem(PRODUCTION_CHANGE_CURSOR_KEY, lastChangeCursor);
-                if (outboxReady) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
-              }
-            } catch {}
-          }, 0);
-          setTimeout(ensureProductsFirstPage, 0);
-          setTimeout(syncModulesInBackground, 0);
-          return true;
-        } catch (error) {
-          authoritativeSnapshotReady = false;
-          reportDashboardLoadError();
-          if (session) renderAll();
-          return false;
-        } finally {
-          productionBootstrapInFlight = false;
+      function isValidDashboardPayload(payload) {
+        const data = payload?.data || {};
+        return Boolean(payload?.ok && String(payload.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID &&
+          String(payload.environment || "") === PRODUCTION_CONFIG.environment &&
+          Number(payload.syncProtocol || 0) >= PRODUCTION_CONFIG.protocolVersion && data.summary && typeof data.summary === "object");
+      }
+      function renderDashboardIfActive() {
+        if (session && isDashboardViewActive()) renderDashboard();
+      }
+      function loadLastKnownGoodDashboard() {
+        const keys = [DASHBOARD_LAST_KNOWN_GOOD_KEY, PRODUCTION_BOOTSTRAP_CACHE_KEY];
+        for (const key of keys) {
+          try {
+            const cached = JSON.parse(localStorage.getItem(key) || "null");
+            const data = cached?.data;
+            if (!data?.summary || typeof data.summary !== "object") continue;
+            productionBootstrap = Object.assign({}, productionBootstrap || {}, data);
+            lastBackendRevision = String(cached.revision || lastBackendRevision || "");
+            authoritativeSnapshotReady = true;
+            dashboardLoadState = "DASHBOARD_STALE";
+            return true;
+          } catch {}
         }
+        return false;
+      }
+      function persistLastKnownGoodDashboard(data, revision) {
+        const cached = { revision: String(revision || ""), data, savedAt: new Date().toISOString() };
+        localStorage.setItem(DASHBOARD_LAST_KNOWN_GOOD_KEY, JSON.stringify(cached));
+        // Retain compatibility with the previous small-summary cache key.
+        localStorage.setItem(PRODUCTION_BOOTSTRAP_CACHE_KEY, JSON.stringify(cached));
+      }
+      function scheduleDashboardRetry() {
+        if (dashboardRetryTimer || dashboardRefreshAttempt >= 3 || !navigator.onLine) return;
+        const delay = [1000, 3000, 8000][dashboardRefreshAttempt - 1] || 8000;
+        dashboardRetryTimer = setTimeout(() => {
+          dashboardRetryTimer = null;
+          refreshAuthoritativeProductionSnapshot({ retry: true });
+        }, delay);
+      }
+      async function refreshAuthoritativeProductionSnapshot() {
+        // Single-flight prevents startup, focus, online and incremental-change
+        // hooks from issuing competing DashboardSummary reads.
+        if (dashboardRefreshPromise) return dashboardRefreshPromise;
+        const generation = ++dashboardRequestGeneration;
+        productionBootstrapInFlight = true;
+        dashboardLoadState = productionBootstrap?.summary ? "DASHBOARD_REFRESHING" : "DASHBOARD_REFRESHING";
+        await updateSyncIndicator();
+        dashboardRefreshPromise = (async () => {
+          try {
+            const dashboardResponse = await requestProductionTransport("dashboardSummary", { clientVersion: APP_VERSION });
+            if (!isValidDashboardPayload(dashboardResponse)) throw new Error("DashboardSummary production tidak valid");
+            // A late response from an invalidated generation cannot overwrite a
+            // newer successful Dashboard state.
+            if (generation !== dashboardRequestGeneration) return false;
+            const data = dashboardResponse.data;
+            productionBootstrap = Object.assign({}, productionBootstrap || {}, data);
+            if (data.entityRevisions) productionModuleRevisions = data.entityRevisions;
+            lastBackendRevision = String(dashboardResponse.revision || lastBackendRevision || "");
+            verifiedBackendEndpoint = activeBackendEndpoint();
+            authoritativeSnapshotReady = true;
+            dashboardLoadState = "DASHBOARD_READY";
+            dashboardRefreshAttempt = 0;
+            clearTimeout(dashboardRetryTimer);
+            dashboardRetryTimer = null;
+            persistLastKnownGoodDashboard(data, lastBackendRevision);
+            renderDashboardIfActive();
+            await updateSyncIndicator();
+            // Cursor tracking is diagnostic/background work. It must not delay
+            // or alter DashboardSummary readiness.
+            setTimeout(async () => {
+              try {
+                const latestCursor = await requestProductionTransport("changes", { cursor: "latest" });
+                if (latestCursor?.ok && latestCursor.cursor) {
+                  lastChangeCursor = String(latestCursor.cursor);
+                  localStorage.setItem(PRODUCTION_CHANGE_CURSOR_KEY, lastChangeCursor);
+                  if (outboxReady) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
+                }
+              } catch {}
+            }, 0);
+            setTimeout(ensureProductsFirstPage, 0);
+            setTimeout(syncModulesInBackground, 0);
+            return true;
+          } catch (error) {
+            // Never blank a valid Dashboard because a transient network read
+            // failed.  Only a first load with no cache can surface an error.
+            if (generation !== dashboardRequestGeneration) return false;
+            dashboardRefreshAttempt += 1;
+            if (productionBootstrap?.summary) {
+              authoritativeSnapshotReady = true;
+              dashboardLoadState = "DASHBOARD_STALE";
+              renderDashboardIfActive();
+              await updateSyncIndicator();
+              scheduleDashboardRetry();
+              return false;
+            }
+            authoritativeSnapshotReady = false;
+            if (dashboardRefreshAttempt < 3) {
+              dashboardLoadState = "DASHBOARD_REFRESHING";
+              await updateSyncIndicator();
+              scheduleDashboardRetry();
+              return false;
+            }
+            dashboardLoadState = "DASHBOARD_LOAD_ERROR";
+            reportDashboardLoadError();
+            renderDashboardIfActive();
+            return false;
+          } finally {
+            if (generation === dashboardRequestGeneration) productionBootstrapInFlight = false;
+            dashboardRefreshPromise = null;
+          }
+        })();
+        return dashboardRefreshPromise;
       }
 
       async function loadModulePage(module, cursor = 0, limit = 300) {
@@ -2244,12 +2329,21 @@ const APP_VERSION = 144;
         renderNav();
         const active = document.querySelector(".view-section.active")?.id || "dashboardView";
         if (!canAccessView(active)) setView(firstAllowedView(), true);
+        // Restore only the prior server-derived Dashboard projection. This does
+        // not restore or overwrite business records, the durable outbox, or
+        // any module cache.
+        if (SYNC_ENVIRONMENT === "production") loadLastKnownGoodDashboard();
         renderAll();
         // READY depends only on an authoritative, lightweight bootstrap.
         // Products and other modules hydrate asynchronously after the UI opens.
-        lastBackendRevision = "";
-        authoritativeSnapshotReady = false;
-        setBackendSyncBanner("warning", "INITIALIZING • memuat data production dari server");
+        if (productionBootstrap?.summary) {
+          dashboardLoadState = "DASHBOARD_REFRESHING";
+          updateSyncIndicator();
+        } else {
+          authoritativeSnapshotReady = false;
+          dashboardLoadState = "DASHBOARD_REFRESHING";
+          setBackendSyncBanner("warning", "DASHBOARD_REFRESHING • memuat ringkasan production dari server");
+        }
         setTimeout(refreshAuthoritativeProductionSnapshot, 0);
         // refreshAuthoritativeProductionSnapshot is the sole startup reader.
         // Kirim kembali perubahan yang sempat tersimpan ketika perangkat
@@ -2278,6 +2372,9 @@ const APP_VERSION = 144;
         document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
         bootstrap.Offcanvas.getInstance(document.getElementById("sidebar"))?.hide();
         renderAll();
+        if (view === "dashboardView" && backendRuntimeEnabled() && !dashboardRefreshPromise) {
+          setTimeout(refreshAuthoritativeProductionSnapshot, 0);
+        }
         if (view === "financeView" && backendRuntimeEnabled()) {
           loadGoogleWorkspaceState("finance").then((loaded) => {
             if (loaded && document.querySelector(".view-section.active")?.id === "financeView") renderFinance();
@@ -2680,7 +2777,7 @@ const APP_VERSION = 144;
         const storeContactEl = document.getElementById("dashboardStoreContact");
         if (storeNameEl) storeNameEl.textContent = state.profile.name || "Nama Toko Material";
         if (storeContactEl) storeContactEl.textContent = `${state.profile.address || "Alamat toko belum diisi"} | Telp & WhatsApp : ${state.profile.phone || "Nomor belum diisi"}`;
-        if (SYNC_ENVIRONMENT === "production" && !authoritativeSnapshotReady) {
+        if (SYNC_ENVIRONMENT === "production" && !productionBootstrap?.summary) {
           document.getElementById("metricGrid").innerHTML = `<div class="audit-box"><strong>Data belum dapat dimuat dari server.</strong><br><span>Dashboard tidak menampilkan angka Rp0/0 dari cache saat koneksi production belum tervalidasi.</span></div>`;
           const reportBox = document.getElementById("ownerReportRows");
           if (reportBox) reportBox.innerHTML = `<div class="audit-box"><strong>Data Dashboard belum dapat dimuat dari server.</strong> Modul lain tetap dapat digunakan secara terpisah.</div>`;

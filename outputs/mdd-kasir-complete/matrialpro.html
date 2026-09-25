@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 137;
+      const APP_VERSION = 138;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -818,6 +818,10 @@
       // later, genuine conflicts never receive this treatment.
       const LEGACY_CONFLICT_DISPOSITION = "APPROVED_LEGACY_CONFLICT_DISPOSITION_V136";
       const PREVIOUS_OWNER_CONFLICT_DISPOSITION = "OWNER_APPROVED_LEGACY_CONFLICT_DISPOSITION_V135";
+      // Marks the instant this device first proved it can read the immutable
+      // production snapshot.  Only conflicts already present before that
+      // instant are legacy; conflicts created later remain visible normally.
+      const AUTHORITATIVE_PRODUCTION_BASELINE = "AUTHORITATIVE_PRODUCTION_BASELINE_V138";
       // This is the original, permanent production deployment. Do not replace
       // it when publishing a new Apps Script version: edit that deployment in
       // place so every installed client keeps one production identity.
@@ -1547,6 +1551,7 @@
         authoritativeSnapshotReady = loaded;
         if (loaded) {
           operationSnapshot = JSON.parse(JSON.stringify(state));
+          await retirePreBaselineLegacyConflicts();
           if (session) renderAll();
           await updateSyncIndicator();
         } else if (session) {
@@ -1554,6 +1559,43 @@
           renderAll();
         }
         return loaded;
+      }
+
+      async function retirePreBaselineLegacyConflicts() {
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady || !authoritativeSnapshotReady) return false;
+        const existingBaseline = await syncOutbox.getMeta("authoritativeProductionBaseline");
+        // Establish this marker only after a validated authoritative snapshot.
+        // It intentionally does not modify any business table or local cache.
+        const baseline = existingBaseline || {
+          version: AUTHORITATIVE_PRODUCTION_BASELINE,
+          establishedAt: new Date().toISOString(),
+          revision: lastBackendRevision || ""
+        };
+        if (!existingBaseline) await syncOutbox.setMeta("authoritativeProductionBaseline", baseline);
+        const pending = await syncOutbox.list(["pending", "sending", "failed"], 1);
+        if (pending.length) return false;
+        const conflicts = await syncOutbox.list(["conflict"], 100000);
+        const cutoff = Date.parse(baseline.establishedAt || 0);
+        const legacy = conflicts.filter((row) => {
+          const createdAt = Date.parse(row.createdAt || 0);
+          return !Number.isFinite(createdAt) || !Number.isFinite(cutoff) || createdAt <= cutoff;
+        });
+        if (!legacy.length) return false;
+        await syncOutbox.mark(legacy.map((row) => row.operationId), "retired", {
+          retiredAt: new Date().toISOString(),
+          retiredReason: "pre-authoritative-production-baseline",
+          productionRevision: baseline.revision,
+          retainedForAudit: true
+        });
+        await syncOutbox.setMeta("authoritativeProductionLegacyConflictAudit", legacy.map((row) => ({
+          operationId: row.operationId,
+          entityType: row.entityType || row.type || "unknown",
+          entityId: row.entityId || row.payload?.id || "",
+          createdAt: row.createdAt || "",
+          retiredAt: new Date().toISOString(),
+          reason: "pre-authoritative-production-baseline"
+        })));
+        return true;
       }
 
       async function refreshGoogleWorkspaceState() {
@@ -1977,6 +2019,7 @@
           setBackendSyncBanner("danger", "SYNC ERROR • koneksi server production belum tervalidasi");
           return false;
         }
+        lastBackendRevision = String(health.revision || lastBackendRevision || "");
         const status = await requestGoogleWorkspaceJsonpAt(endpoint, "status");
         if (status?.ok && String(status.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID) {
           verifiedBackendEndpoint = endpoint;

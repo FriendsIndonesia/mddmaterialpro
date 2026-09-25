@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-const APP_VERSION = 143;
+const APP_VERSION = 144;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -1274,6 +1274,14 @@ const APP_VERSION = 143;
         banner.className = `alert alert-${kind} py-2 small mb-3`;
         banner.textContent = message;
       }
+      function isDashboardViewActive() {
+        return document.querySelector(".view-section.active")?.id === "dashboardView";
+      }
+      function reportDashboardLoadError() {
+        // A dashboard-only request must never turn a healthy Products/POS
+        // screen into a global error state.
+        if (isDashboardViewActive()) setBackendSyncBanner("danger", "DASHBOARD_LOAD_ERROR • ringkasan production belum dapat dimuat");
+      }
       async function updateSyncIndicator(forcedStatus) {
         if (!document.getElementById("backendSyncBanner")) return;
         if (!navigator.onLine) return setBackendSyncBanner("secondary", "OFFLINE");
@@ -1286,7 +1294,8 @@ const APP_VERSION = 143;
           return setBackendSyncBanner("danger", "SYNC ERROR • IndexedDB tidak dapat dibaca");
         }
         if (SYNC_ENVIRONMENT === "production" && !authoritativeSnapshotReady) {
-          return setBackendSyncBanner("warning", "Data belum dapat dimuat dari server");
+          if (isDashboardViewActive()) return setBackendSyncBanner("warning", "Data Dashboard belum dapat dimuat dari server");
+          return setBackendSyncBanner("success", "ONLINE - MODULES READY");
         }
         if (conflicts.length) return setBackendSyncBanner("danger", `CONFLICT • ${conflicts.length} data perlu diperiksa`);
         if (forcedStatus === "syncing" || pending.some((row) => row.status === "sending")) return setBackendSyncBanner("warning", `SYNCING • ${pending.length} DATA PENDING`);
@@ -1572,40 +1581,45 @@ const APP_VERSION = 143;
         if (productionBootstrapInFlight) return false;
         productionBootstrapInFlight = true;
         try {
-          // v142 desktop readiness is defined by the bootstrap response itself.
-          // Health remains diagnostic, but a delayed/failed health request must
-          // not block an otherwise valid production DashboardSummary.
-          const bootstrap = await requestProductionTransport("bootstrap", { clientVersion: APP_VERSION });
-          const data = bootstrap?.data || {};
-          const valid = bootstrap?.ok && String(bootstrap.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID &&
-            String(bootstrap.environment || "") === PRODUCTION_CONFIG.environment &&
-            Number(bootstrap.syncProtocol || 0) >= PRODUCTION_CONFIG.protocolVersion && data.summary;
+          // Dashboard readiness has a dedicated small production route. It
+          // cannot depend on legacy bootstrap/profile/module metadata.
+          const dashboardResponse = await requestProductionTransport("dashboardSummary", { clientVersion: APP_VERSION });
+          const data = dashboardResponse?.data || {};
+          const valid = dashboardResponse?.ok && String(dashboardResponse.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID &&
+            String(dashboardResponse.environment || "") === PRODUCTION_CONFIG.environment &&
+            Number(dashboardResponse.syncProtocol || 0) >= PRODUCTION_CONFIG.protocolVersion && data.summary;
           if (!valid) {
             authoritativeSnapshotReady = false;
-            setBackendSyncBanner("danger", "DASHBOARD_LOAD_ERROR • ringkasan production belum dapat dimuat");
+            reportDashboardLoadError();
             if (session) renderAll();
             return false;
           }
-          productionBootstrap = data;
-          productionModuleRevisions = data.entityRevisions || {};
-          lastBackendRevision = String(bootstrap.revision || lastBackendRevision || "");
+          productionBootstrap = Object.assign({}, productionBootstrap || {}, data);
+          if (data.entityRevisions) productionModuleRevisions = data.entityRevisions;
+          lastBackendRevision = String(dashboardResponse.revision || lastBackendRevision || "");
           verifiedBackendEndpoint = activeBackendEndpoint();
           authoritativeSnapshotReady = true;
           localStorage.setItem(PRODUCTION_BOOTSTRAP_CACHE_KEY, JSON.stringify({ revision: lastBackendRevision, data, savedAt: new Date().toISOString() }));
-          const latestCursor = await requestProductionTransport("changes", { cursor: "latest" });
-          if (latestCursor?.ok && latestCursor.cursor) {
-            lastChangeCursor = String(latestCursor.cursor);
-            localStorage.setItem(PRODUCTION_CHANGE_CURSOR_KEY, lastChangeCursor);
-            if (outboxReady) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
-          }
           if (session) renderAll();
           await updateSyncIndicator();
+          // Cursor tracking is diagnostic/background work. It must not delay a
+          // successful DashboardSummary render.
+          setTimeout(async () => {
+            try {
+              const latestCursor = await requestProductionTransport("changes", { cursor: "latest" });
+              if (latestCursor?.ok && latestCursor.cursor) {
+                lastChangeCursor = String(latestCursor.cursor);
+                localStorage.setItem(PRODUCTION_CHANGE_CURSOR_KEY, lastChangeCursor);
+                if (outboxReady) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
+              }
+            } catch {}
+          }, 0);
           setTimeout(ensureProductsFirstPage, 0);
           setTimeout(syncModulesInBackground, 0);
           return true;
         } catch (error) {
           authoritativeSnapshotReady = false;
-          setBackendSyncBanner("danger", "DASHBOARD_LOAD_ERROR • ringkasan production belum dapat dimuat");
+          reportDashboardLoadError();
           if (session) renderAll();
           return false;
         } finally {

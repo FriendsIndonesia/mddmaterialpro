@@ -36,6 +36,9 @@ function doGet(e) {
   // route it through bootstrap: bootstrap also loads profile and module
   // metadata, which is unnecessary for a dashboard render.
   else if (action === "dashboardsummary") payload = dashboardSummaryPayload_(ss);
+  // A bounded 14-day, read-only aggregate. Never serialize Sales rows to the
+  // client just to paint the Owner revenue chart.
+  else if (action === "revenuechart") payload = revenueChartPayload_(ss);
   else if (action === "bootstrap") payload = bootstrapPayload_(ss);
   else if (action === "module") payload = modulePage_(ss, String((e && e.parameter && e.parameter.module) || ""), e && e.parameter || {});
   else if (action === "acknowledgement") payload = operationAcknowledgement_(ss, String((e && e.parameter && e.parameter.operationIds) || ""));
@@ -1324,6 +1327,40 @@ function dashboardSummaryPayload_(ss) {
     syncProtocol: 4, minimumClientVersion: MINIMUM_CLIENT_VERSION,
     revision: getRevision_(), spreadsheetId: ss.getId(), serverTime: new Date().toISOString(),
     data: { summary: summary, lastUpdated: new Date().toISOString() }
+  };
+}
+
+function revenueChartPayload_(ss) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = "MDD_REVENUE_CHART_V146";
+  let rows = null;
+  try { rows = JSON.parse(cache.get(cacheKey) || "null"); } catch (error) { rows = null; }
+  if (!Array.isArray(rows)) {
+    const today = todayWib_(ss);
+    const anchor = new Date(today + "T00:00:00Z");
+    const dates = Array.from({ length: 14 }, function(_, index) {
+      const day = new Date(anchor.getTime());
+      day.setUTCDate(day.getUTCDate() - (13 - index));
+      return Utilities.formatDate(day, "UTC", "yyyy-MM-dd");
+    });
+    const revenues = dates.reduce(function(result, date) { result[date] = { date: date, transactionCount: 0, revenue: 0 }; return result; }, {});
+    // Only Date and Total are read. This is a server-side aggregation, not a
+    // Sales-module download and it has no write side effects.
+    readSummaryRows_(ss, "Sales", ["date", "total"]).forEach(function(sale) {
+      const date = dateKeyWib_(sale.date, ss);
+      if (!revenues[date]) return;
+      revenues[date].transactionCount += 1;
+      revenues[date].revenue += numeric_(sale.total);
+    });
+    rows = dates.map(function(date) { return revenues[date]; });
+    cache.put(cacheKey, JSON.stringify(rows), 30);
+  }
+  return {
+    ok: true, app: APP_NAME,
+    environment: PropertiesService.getScriptProperties().getProperty("SYNC_ENVIRONMENT") || "production",
+    syncProtocol: 4, minimumClientVersion: MINIMUM_CLIENT_VERSION,
+    revision: getRevision_(), spreadsheetId: ss.getId(), serverTime: new Date().toISOString(),
+    data: { rows: rows, lastUpdated: new Date().toISOString() }
   };
 }
 

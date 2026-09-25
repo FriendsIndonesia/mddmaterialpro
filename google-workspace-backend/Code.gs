@@ -1,7 +1,7 @@
 const APP_NAME = "MDD Material Pro";
 const OWNER_EMAIL = "friendsindonesia28@gmail.com";
 const GITHUB_REPO = "https://github.com/FriendsIndonesia/mddmaterialpro";
-const MINIMUM_CLIENT_VERSION = 133;
+const MINIMUM_CLIENT_VERSION = 134;
 
 const TABLES = [
   { key: "products", sheet: "Products", fields: ["id", "code", "name", "category", "unit", "primaryUnit", "secondaryUnit", "conversionValue", "secondaryBarcode", "buy", "secondaryBuy", "price", "price2", "secondaryPrice", "secondaryPrice2", "stockIn", "stockOut", "stock", "stockAkhir", "min", "active"] },
@@ -30,6 +30,10 @@ function doGet(e) {
   let payload;
   if (action === "revision") payload = { ok: true, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION };
   else if (action === "health") payload = { ok: true, app: APP_NAME, revision: getRevision_(), syncProtocol: 4, environment: PropertiesService.getScriptProperties().getProperty("SYNC_ENVIRONMENT") || "production", minimumClientVersion: MINIMUM_CLIENT_VERSION, serverTime: new Date().toISOString() };
+  // Bootstrap is intentionally small.  It is the only read required before
+  // the application is usable; large business tables are loaded per-module.
+  else if (action === "bootstrap" || action === "dashboardsummary") payload = bootstrapPayload_(ss);
+  else if (action === "module") payload = modulePage_(ss, String((e && e.parameter && e.parameter.module) || ""), e && e.parameter || {});
   else if (action === "acknowledgement") payload = operationAcknowledgement_(ss, String((e && e.parameter && e.parameter.operationIds) || ""));
   else if (action === "reconcile") payload = reconcileOperations_(ss, String((e && e.parameter && e.parameter.operations) || "[]"));
   else if (action === "changes") payload = incrementalChanges_(ss, String((e && e.parameter && e.parameter.cursor) || ""));
@@ -1148,6 +1152,135 @@ function readTableDefinition_(ss, table) {
   const result = Object.keys(rowsById).map((key) => rowsById[key]);
   const newestFirstTables = ["sales", "purchases", "cashTx", "payments", "stockMoves", "returns", "pendingSales", "pendingPurchases", "history"];
   return newestFirstTables.indexOf(table.key) >= 0 ? result.reverse() : result;
+}
+
+// v141: the login path never serializes the full workbook.  These helpers
+// calculate a small authoritative dashboard projection inside Apps Script and
+// return only aggregates, revisions, and safe module metadata.
+function dateKeyWib_(value, ss) {
+  if (value instanceof Date && !isNaN(value.getTime())) return Utilities.formatDate(value, ss.getSpreadsheetTimeZone(), "yyyy-MM-dd");
+  const text = String(value || "").trim();
+  const iso = text.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (iso) return iso[1];
+  const local = text.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  return local ? local[3] + "-" + local[2] + "-" + local[1] : "";
+}
+
+function todayWib_(ss) {
+  return Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), "yyyy-MM-dd");
+}
+
+function tableRows_(ss, key) {
+  const table = TABLES.filter(function(item) { return item.key === key; })[0];
+  return table ? readTableDefinition_(ss, table) : [];
+}
+
+function numeric_(value) {
+  const number = Number(value || 0);
+  return isFinite(number) ? number : 0;
+}
+
+function dashboardSummary_(ss) {
+  const today = todayWib_(ss);
+  const products = tableRows_(ss, "products");
+  const sales = tableRows_(ss, "sales");
+  const purchases = tableRows_(ss, "purchases");
+  const payments = tableRows_(ss, "payments");
+  const cashAccounts = tableRows_(ss, "cashAccounts");
+  const cashTx = tableRows_(ss, "cashTx");
+  const stockMoves = tableRows_(ss, "stockMoves");
+  const pendingSales = tableRows_(ss, "pendingSales");
+  const active = products.filter(function(row) { return row.active !== false; });
+  const todaySales = sales.filter(function(row) { return dateKeyWib_(row.date, ss) === today; });
+  const todayPurchases = purchases.filter(function(row) { return dateKeyWib_(row.date, ss) === today; });
+  const paymentToday = payments.filter(function(row) { return dateKeyWib_(row.date, ss) === today; });
+  const isPayment = function(row, kind) { return String(row.type || row.category || "").toLowerCase().indexOf(kind) >= 0; };
+  const sum = function(rows, field) { return rows.reduce(function(total, row) { return total + numeric_(row[field]); }, 0); };
+  const stockOf = function(row) { return numeric_(row.stockAkhir || row.stock); };
+  const low = active.filter(function(row) { return stockOf(row) <= numeric_(row.min); });
+  const stockValue = active.reduce(function(total, row) { return total + numeric_(row.buy) * stockOf(row); }, 0);
+  const receivable = sales.reduce(function(total, row) { return total + Math.max(0, numeric_(row.due)); }, 0);
+  const payable = purchases.reduce(function(total, row) { return total + Math.max(0, numeric_(row.due)); }, 0);
+  const cashBalance = sum(cashAccounts, "balance");
+  const pettyCash = cashTx.filter(function(row) { return dateKeyWib_(row.date, ss) === today && String(row.category || "") === "Petty Cash"; }).reduce(function(total, row) { return total + (String(row.type || "") === "Masuk" ? numeric_(row.amount) : -numeric_(row.amount)); }, 0);
+  const soldQuantity = todaySales.reduce(function(total, sale) {
+    let items = sale.items;
+    if (typeof items === "string") { try { items = JSON.parse(items); } catch (error) { items = []; } }
+    return total + (Array.isArray(items) ? items.reduce(function(qty, item) { return qty + numeric_(item.qty); }, 0) : 0);
+  }, 0);
+  return {
+    date: today,
+    totalProducts: active.length,
+    productsSoldToday: soldQuantity,
+    salesInvoiceToday: todaySales.length,
+    salesToday: sum(todaySales, "total"),
+    purchasesToday: sum(todayPurchases, "total"),
+    receivablePaymentsToday: sum(paymentToday.filter(function(row) { return isPayment(row, "piutang"); }), "amount"),
+    debtPaymentsToday: sum(paymentToday.filter(function(row) { return isPayment(row, "hutang"); }), "amount"),
+    cashBalance: cashBalance,
+    stockValue: stockValue,
+    lowStockCount: low.length,
+    receivable: receivable,
+    payable: payable,
+    receivablePaymentsTotal: sum(payments.filter(function(row) { return isPayment(row, "piutang"); }), "amount"),
+    debtPaymentsTotal: sum(payments.filter(function(row) { return isPayment(row, "hutang"); }), "amount"),
+    pettyCashToday: pettyCash,
+    stockDifference: stockMoves.filter(function(row) { return ["Opname", "Penyesuaian"].indexOf(row.type) >= 0; }).reduce(function(total, row) { return total + numeric_(row.difference || row.qty); }, 0),
+    netAssetValue: cashBalance + stockValue + receivable - payable,
+    pendingSalesCount: pendingSales.length,
+    lowStockPreview: low.slice(0, 20).map(function(row) { return { id: row.id, code: row.code, name: row.name, unit: row.unit, stock: stockOf(row), min: numeric_(row.min) }; })
+  };
+}
+
+function entityMetadata_(ss) {
+  const revision = getRevision_();
+  return TABLES.reduce(function(result, table) {
+    const sheet = ss.getSheetByName(table.sheet);
+    result[table.key] = { revision: revision, count: sheet ? Math.max(0, sheet.getLastRow() - 1) : 0 };
+    return result;
+  }, {});
+}
+
+function bootstrapPayload_(ss) {
+  const revision = getRevision_();
+  return {
+    ok: true,
+    app: APP_NAME,
+    environment: PropertiesService.getScriptProperties().getProperty("SYNC_ENVIRONMENT") || "production",
+    syncProtocol: 4,
+    minimumClientVersion: MINIMUM_CLIENT_VERSION,
+    revision: revision,
+    spreadsheetId: ss.getId(),
+    serverTime: new Date().toISOString(),
+    data: {
+      profile: readProfile_(ss),
+      summary: dashboardSummary_(ss),
+      entityRevisions: entityMetadata_(ss),
+      lastUpdated: new Date().toISOString()
+    }
+  };
+}
+
+function modulePage_(ss, moduleName, parameters) {
+  const module = String(moduleName || "").trim();
+  const table = TABLES.filter(function(item) { return item.key === module; })[0];
+  if (!table) return { ok: false, error: "Module tidak dikenal" };
+  const requestedLimit = Number(parameters.limit || 250);
+  const limit = Math.max(1, Math.min(500, isFinite(requestedLimit) ? requestedLimit : 250));
+  const cursor = Math.max(0, Number(parameters.cursor || 0) || 0);
+  const rows = readTableDefinition_(ss, table);
+  const page = rows.slice(cursor, cursor + limit);
+  const next = cursor + page.length;
+  return {
+    ok: true,
+    module: module,
+    revision: getRevision_(),
+    spreadsheetId: ss.getId(),
+    cursor: String(next),
+    hasMore: next < rows.length,
+    updatedSince: String(parameters.updatedSince || ""),
+    data: { rows: page, count: rows.length }
+  };
 }
 
 function syncReceiptSheet_(ss) {

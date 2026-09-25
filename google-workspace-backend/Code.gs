@@ -32,7 +32,11 @@ function doGet(e) {
   else if (action === "health") payload = { ok: true, app: APP_NAME, revision: getRevision_(), syncProtocol: 4, environment: PropertiesService.getScriptProperties().getProperty("SYNC_ENVIRONMENT") || "production", minimumClientVersion: MINIMUM_CLIENT_VERSION, serverTime: new Date().toISOString() };
   // Bootstrap is intentionally small.  It is the only read required before
   // the application is usable; large business tables are loaded per-module.
-  else if (action === "bootstrap" || action === "dashboardsummary") payload = bootstrapPayload_(ss);
+  // DashboardSummary is deliberately a small, read-only endpoint.  Do not
+  // route it through bootstrap: bootstrap also loads profile and module
+  // metadata, which is unnecessary for a dashboard render.
+  else if (action === "dashboardsummary") payload = dashboardSummaryPayload_(ss);
+  else if (action === "bootstrap") payload = bootstrapPayload_(ss);
   else if (action === "module") payload = modulePage_(ss, String((e && e.parameter && e.parameter.module) || ""), e && e.parameter || {});
   else if (action === "acknowledgement") payload = operationAcknowledgement_(ss, String((e && e.parameter && e.parameter.operationIds) || ""));
   else if (action === "reconcile") payload = reconcileOperations_(ss, String((e && e.parameter && e.parameter.operations) || "[]"));
@@ -1089,6 +1093,10 @@ function getRevision_() {
 function touchRevision_() {
   const revision = String(Date.now()) + "-" + Utilities.getUuid().slice(0, 8);
   PropertiesService.getScriptProperties().setProperty("DATA_REVISION", revision);
+  // Dashboard aggregates are revision-bound.  A successful business write
+  // invalidates only this short-lived server cache; no client or business
+  // storage is changed here.
+  CacheService.getScriptCache().remove("MDD_DASHBOARD_SUMMARY_V144");
   return revision;
 }
 
@@ -1229,6 +1237,93 @@ function dashboardSummary_(ss) {
     netAssetValue: cashBalance + stockValue + receivable - payable,
     pendingSalesCount: pendingSales.length,
     lowStockPreview: low.slice(0, 20).map(function(row) { return { id: row.id, code: row.code, name: row.name, unit: row.unit, stock: stockOf(row), min: numeric_(row.min) }; })
+  };
+}
+
+// Read a projection without using readTable_().  The generic table reader can
+// normalize missing row IDs, which is correct for data maintenance but not for
+// a GET endpoint.  Dashboard reads must never mutate Spreadsheet rows.
+function readSummaryRows_(ss, sheetName, fields) {
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) return [];
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const indexes = fields.reduce(function(result, field) {
+    result[field] = headers.indexOf(field);
+    return result;
+  }, {});
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+  return values.map(function(row) {
+    return fields.reduce(function(item, field) {
+      const index = indexes[field];
+      item[field] = index >= 0 ? row[index] : "";
+      return item;
+    }, {});
+  });
+}
+
+function dashboardSummaryFast_(ss) {
+  const today = todayWib_(ss);
+  const products = readSummaryRows_(ss, "Products", ["id", "code", "name", "unit", "buy", "stock", "stockAkhir", "min", "active"]);
+  const sales = readSummaryRows_(ss, "Sales", ["date", "items", "total", "due"]);
+  const purchases = readSummaryRows_(ss, "Purchases", ["date", "total", "due"]);
+  const payments = readSummaryRows_(ss, "Payments", ["date", "type", "category", "amount"]);
+  const cashAccounts = readSummaryRows_(ss, "CashAccounts", ["balance"]);
+  const cashTx = readSummaryRows_(ss, "CashTransactions", ["date", "type", "category", "amount"]);
+  const stockMoves = readSummaryRows_(ss, "StockMoves", ["type", "difference", "qty"]);
+  const pendingSales = readSummaryRows_(ss, "PendingSales", ["id"]);
+  const active = products.filter(function(row) { return row.active !== false && String(row.active || "").toLowerCase() !== "false"; });
+  const todaySales = sales.filter(function(row) { return dateKeyWib_(row.date, ss) === today; });
+  const todayPurchases = purchases.filter(function(row) { return dateKeyWib_(row.date, ss) === today; });
+  const paymentToday = payments.filter(function(row) { return dateKeyWib_(row.date, ss) === today; });
+  const isPayment = function(row, kind) { return String(row.type || row.category || "").toLowerCase().indexOf(kind) >= 0; };
+  const sum = function(rows, field) { return rows.reduce(function(total, row) { return total + numeric_(row[field]); }, 0); };
+  const stockOf = function(row) { return numeric_(row.stockAkhir || row.stock); };
+  const low = active.filter(function(row) { return stockOf(row) <= numeric_(row.min); });
+  const stockValue = active.reduce(function(total, row) { return total + numeric_(row.buy) * stockOf(row); }, 0);
+  const receivable = sales.reduce(function(total, row) { return total + Math.max(0, numeric_(row.due)); }, 0);
+  const payable = purchases.reduce(function(total, row) { return total + Math.max(0, numeric_(row.due)); }, 0);
+  const cashBalance = sum(cashAccounts, "balance");
+  const pettyCash = cashTx.filter(function(row) { return dateKeyWib_(row.date, ss) === today && String(row.category || "") === "Petty Cash"; }).reduce(function(total, row) { return total + (String(row.type || "") === "Masuk" ? numeric_(row.amount) : -numeric_(row.amount)); }, 0);
+  const soldQuantity = todaySales.reduce(function(total, sale) {
+    let items = sale.items;
+    if (typeof items === "string") { try { items = JSON.parse(items); } catch (error) { items = []; } }
+    return total + (Array.isArray(items) ? items.reduce(function(qty, item) { return qty + numeric_(item.qty); }, 0) : 0);
+  }, 0);
+  return {
+    date: today, totalProducts: active.length, productsSoldToday: soldQuantity,
+    salesInvoiceToday: todaySales.length, salesToday: sum(todaySales, "total"), purchasesToday: sum(todayPurchases, "total"),
+    receivablePaymentsToday: sum(paymentToday.filter(function(row) { return isPayment(row, "piutang"); }), "amount"),
+    debtPaymentsToday: sum(paymentToday.filter(function(row) { return isPayment(row, "hutang"); }), "amount"),
+    cashBalance: cashBalance, stockValue: stockValue, lowStockCount: low.length,
+    receivable: receivable, payable: payable,
+    receivablePaymentsTotal: sum(payments.filter(function(row) { return isPayment(row, "piutang"); }), "amount"),
+    debtPaymentsTotal: sum(payments.filter(function(row) { return isPayment(row, "hutang"); }), "amount"),
+    pettyCashToday: pettyCash,
+    stockDifference: stockMoves.filter(function(row) { return ["Opname", "Penyesuaian"].indexOf(row.type) >= 0; }).reduce(function(total, row) { return total + numeric_(row.difference || row.qty); }, 0),
+    netAssetValue: cashBalance + stockValue + receivable - payable,
+    pendingSalesCount: pendingSales.length,
+    lowStockPreview: low.slice(0, 20).map(function(row) { return { id: row.id, code: row.code, name: row.name, unit: row.unit, stock: stockOf(row), min: numeric_(row.min) }; })
+  };
+}
+
+function dashboardSummaryPayload_(ss) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = "MDD_DASHBOARD_SUMMARY_V144";
+  let summary = null;
+  try { summary = JSON.parse(cache.get(cacheKey) || "null"); } catch (error) { summary = null; }
+  if (!summary) {
+    summary = dashboardSummaryFast_(ss);
+    // This cache is intentionally brief. touchRevision_ clears it after any
+    // committed application or spreadsheet edit, so dashboard values cannot
+    // outlive a production revision.
+    cache.put(cacheKey, JSON.stringify(summary), 30);
+  }
+  return {
+    ok: true, app: APP_NAME,
+    environment: PropertiesService.getScriptProperties().getProperty("SYNC_ENVIRONMENT") || "production",
+    syncProtocol: 4, minimumClientVersion: MINIMUM_CLIENT_VERSION,
+    revision: getRevision_(), spreadsheetId: ss.getId(), serverTime: new Date().toISOString(),
+    data: { summary: summary, lastUpdated: new Date().toISOString() }
   };
 }
 

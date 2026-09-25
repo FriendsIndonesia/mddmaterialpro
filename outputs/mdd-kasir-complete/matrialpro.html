@@ -800,11 +800,19 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 132;
+      const APP_VERSION = 133;
       // Every client older than the enforced backend version is upgraded before
       // it can use its legacy per-device endpoint or stale production identity.
-      const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V132";
-      const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbymrIJog6vOOi21lhCdci5Dj5D_vrJBZHbsiHjfC1kH2owOH4FGCd01UK-Io2VXwMoO/exec";
+      const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V133";
+      // This is the original, permanent production deployment. Do not replace
+      // it when publishing a new Apps Script version: edit that deployment in
+      // place so every installed client keeps one production identity.
+      const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec";
+      // Temporary non-persistent fallback for a short Google propagation outage.
+      const PRODUCTION_ENDPOINT_FALLBACKS = [
+        PRODUCTION_ENDPOINT,
+        "https://script.google.com/macros/s/AKfycbymrIJog6vOOi21lhCdci5Dj5D_vrJBZHbsiHjfC1kH2owOH4FGCd01UK-Io2VXwMoO/exec"
+      ];
       const EXPECTED_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ";
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
@@ -895,6 +903,7 @@
       let isSyncing = false;
       let isPulling = false;
       let verifiedBackendEndpoint = "";
+      let resolvedProductionEndpoint = PRODUCTION_ENDPOINT;
       const REPORT_DISPLAY_STORAGE_KEY = "mdd_report_display_hidden_v1";
       let hiddenReportRows = loadHiddenReportRows();
       let durablePendingSync = loadDurablePendingSync();
@@ -928,7 +937,7 @@
         // Production must never inherit a stale per-device endpoint from the
         // legacy state/profile cache. The profile field remains preserved for
         // backward compatibility, but runtime sync uses the audited deployment.
-        return PRODUCTION_ENDPOINT;
+        return resolvedProductionEndpoint;
       }
 
       function defaultState() {
@@ -1363,9 +1372,8 @@
         return SYNC_SETTING_KEYS.some((key) => JSON.stringify(state[key]) !== JSON.stringify(lastSyncedSnapshot[key]));
       }
 
-      function requestGoogleWorkspaceJsonp(action = "state", params = {}) {
+      function requestGoogleWorkspaceJsonpAt(endpoint, action = "state", params = {}) {
         return new Promise((resolve) => {
-          const endpoint = activeBackendEndpoint();
           if (!state.profile?.onlineMode || !endpoint) return resolve(false);
           const callbackName = `mddBackendState${Date.now()}${Math.random().toString(36).slice(2)}`;
           const script = document.createElement("script");
@@ -1393,6 +1401,9 @@
           script.src = `${endpoint}${separator}${query.toString()}`;
           document.head.appendChild(script);
         });
+      }
+      function requestGoogleWorkspaceJsonp(action = "state", params = {}) {
+        return requestGoogleWorkspaceJsonpAt(activeBackendEndpoint(), action, params);
       }
       async function loadGoogleWorkspaceJsonp(action = "state") {
         const response = await requestGoogleWorkspaceJsonp(action);
@@ -1831,20 +1842,21 @@
         const endpoint = activeBackendEndpoint();
         if (!endpoint) return false;
         if (verifiedBackendEndpoint === endpoint) return true;
-        const health = await requestGoogleWorkspaceJsonp("health", { clientVersion: APP_VERSION });
-        if (!health?.ok || Number(health.syncProtocol || 0) < 4 || String(health.environment || "production") !== SYNC_ENVIRONMENT) {
-          setBackendSyncBanner("danger", `SYNC ERROR • endpoint ${SYNC_ENVIRONMENT} tidak valid`);
-          return false;
+        const candidates = SYNC_ENVIRONMENT === "production"
+          ? [...new Set([PRODUCTION_ENDPOINT, ...PRODUCTION_ENDPOINT_FALLBACKS])]
+          : [endpoint];
+        for (const candidate of candidates) {
+          const health = await requestGoogleWorkspaceJsonpAt(candidate, "health", { clientVersion: APP_VERSION });
+          if (!health?.ok || Number(health.syncProtocol || 0) < 4 || String(health.environment || "") !== SYNC_ENVIRONMENT) continue;
+          const status = await requestGoogleWorkspaceJsonpAt(candidate, "status");
+          if (!status?.ok || String(status.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) continue;
+          resolvedProductionEndpoint = candidate;
+          verifiedBackendEndpoint = candidate;
+          return true;
         }
-        if (SYNC_ENVIRONMENT === "production") {
-          const status = await requestGoogleWorkspaceJsonp("status");
-          if (!status?.ok || status.spreadsheetId !== EXPECTED_SPREADSHEET_ID) {
-            setBackendSyncBanner("danger", "SYNC ERROR • database production tidak sesuai");
-            return false;
-          }
-        }
-        verifiedBackendEndpoint = endpoint;
-        return true;
+        verifiedBackendEndpoint = "";
+        setBackendSyncBanner("danger", `SYNC ERROR • endpoint ${SYNC_ENVIRONMENT} tidak valid`);
+        return false;
       }
       async function ensureWorkspaceBootstrap() {
         if (!outboxReady) return setTimeout(ensureWorkspaceBootstrap, 250);

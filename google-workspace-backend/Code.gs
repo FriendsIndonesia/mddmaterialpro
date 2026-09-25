@@ -1,7 +1,7 @@
 const APP_NAME = "MDD Material Pro";
 const OWNER_EMAIL = "friendsindonesia28@gmail.com";
 const GITHUB_REPO = "https://github.com/FriendsIndonesia/mddmaterialpro";
-const MINIMUM_CLIENT_VERSION = 107;
+const MINIMUM_CLIENT_VERSION = 133;
 
 const TABLES = [
   { key: "products", sheet: "Products", fields: ["id", "code", "name", "category", "unit", "primaryUnit", "secondaryUnit", "conversionValue", "secondaryBarcode", "buy", "secondaryBuy", "price", "price2", "secondaryPrice", "secondaryPrice2", "stockIn", "stockOut", "stock", "stockAkhir", "min", "active"] },
@@ -277,12 +277,14 @@ function syncLedgerForOperation_(ss, operation) {
   let entityId = "";
   if (type === "upsert" && (entity === "purchases" || entity === "sales")) {
     kind = entity === "purchases" ? "debt" : "receivable";
-    entityId = String(operation.entityId || (operation.payload && operation.payload.row && operation.payload.row.id) || "");
+    entityId = String(operation.entityId || operation.payload && operation.payload.row && operation.payload.row.id || "");
   } else if (type === "payment_delta") {
-    const payment = (operation.payload && operation.payload.payment) || {};
+    const payment = operation.payload && operation.payload.payment || {};
     kind = String(payment.type || "").toLowerCase() === "hutang" ? "debt" : "receivable";
     entityId = String(payment.refId || "");
-  } else { return; }
+  } else {
+    return;
+  }
   if (!entityId) return;
   const table = TABLES.find((item) => item.key === (kind === "debt" ? "purchases" : "sales"));
   const row = readTableDefinition_(ss, table).find((item) => String(item.id || "") === entityId);
@@ -303,19 +305,79 @@ function syncSingleLedgerRow_(ss, kind, row) {
   const creditMethod = kind === "debt" ? /hutang|dp/.test(method) : /piutang|dp/.test(method);
   const isCreditRecord = Number(row.due || 0) > 0 || creditMethod;
   const matches = sheet.getLastRow() < 2 ? [] : sheet.getRange(2, 3, sheet.getLastRow() - 1, 1).getDisplayValues()
-    .map((cells, index) => String(cells[0] || "").trim().toLowerCase() === invoice.toLowerCase() ? index + 2 : 0).filter(Boolean);
+    .map((cells, index) => String(cells[0] || "").trim().toLowerCase() === invoice.toLowerCase() ? index + 2 : 0)
+    .filter(Boolean);
   // Faktur duplikat lama tidak aman untuk dipilih otomatis. Tidak ada baris
   // yang dihapus atau ditimpa pada kondisi itu; canonical tetap dipakai aplikasi.
   if (matches.length > 1) return;
   if (!matches.length && !isCreditRecord) return;
-  const values = [[ledgerDateValue_(row.date), ledgerDateValue_(row.dueDate), invoice,
+  const values = [[
+    ledgerDateValue_(row.date), ledgerDateValue_(row.dueDate), invoice,
     kind === "debt" ? (row.salesName || row.company || "-") : (row.customerName || "-"),
-    Number(row.total || 0), Number(row.paid || 0), Number(row.returnAmount || 0), Number(row.due || 0), row.method || "Tempo", row.note || ""]];
+    Number(row.total || 0), Number(row.paid || 0), Number(row.returnAmount || 0), Number(row.due || 0),
+    row.method || "Tempo", row.note || ""
+  ]];
   const rowNumber = matches[0] || sheet.getLastRow() + 1;
   sheet.getRange(rowNumber, 1, 1, headers.length).setValues(values);
   sheet.getRange(rowNumber, 1, 1, 2).setNumberFormat("dd/MM/yyyy");
   sheet.getRange(rowNumber, 5, 1, 4).setNumberFormat("#,##0");
   sheet.setFrozenRows(1);
+}
+
+// One-time repair for the verified September ledger gap. It only APPENDS a
+// missing ledger projection after verifying a canonical credit transaction;
+// Sales, Purchases, Payments, Products, and StockMoves are never changed.
+function backfillVerifiedCreditLedgersSep14To23_() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) throw new Error("Backend sedang digunakan; ulangi backfill nanti.");
+  try {
+    const ss = getSpreadsheet_();
+    const marker = "LEDGER_BACKFILL_20260914_20260923_V1";
+    if (PropertiesService.getScriptProperties().getProperty(marker)) {
+      return { ok: true, alreadyApplied: true, marker: marker };
+    }
+    const start = "2026-09-14", end = "2026-09-23";
+    const debtRows = readTableDefinition_(ss, TABLES.find((table) => table.key === "purchases"));
+    const receivableRows = readTableDefinition_(ss, TABLES.find((table) => table.key === "sales"));
+    const isInPeriod = (row) => {
+      const date = ledgerDate_(row.date);
+      return date >= start && date <= end;
+    };
+    const isCredit = (row, kind) => {
+      const method = String(row.method || "").toLowerCase();
+      return Number(row.due || 0) > 0 || (kind === "debt" ? /hutang|dp/.test(method) : /piutang|dp/.test(method));
+    };
+    const missingFor = (sheetName, rows, kind) => {
+      const sheet = ss.getSheetByName(sheetName);
+      const existing = {};
+      if (sheet && sheet.getLastRow() > 1) sheet.getRange(2, 3, sheet.getLastRow() - 1, 1).getDisplayValues().forEach((cells) => {
+        const key = String(cells[0] || "").trim().toLowerCase();
+        if (key) existing[key] = (existing[key] || 0) + 1;
+      });
+      return rows.filter((row) => isInPeriod(row) && isCredit(row, kind) && existing[String(row.invoiceNo || row.id || "").trim().toLowerCase()] === undefined);
+    };
+    const missingDebt = missingFor("Hutang", debtRows, "debt");
+    const missingReceivable = missingFor("Piutang", receivableRows, "receivable");
+    // Exact counts are an integrity gate based on the production audit. If
+    // someone changes the relevant period, stop rather than guessing.
+    if (missingDebt.length !== 21 || missingReceivable.length !== 15) {
+      throw new Error("Audit ledger berubah: Hutang=" + missingDebt.length + ", Piutang=" + missingReceivable.length + ". Backfill dihentikan tanpa perubahan.");
+    }
+    missingDebt.forEach((row) => syncSingleLedgerRow_(ss, "debt", row));
+    missingReceivable.forEach((row) => syncSingleLedgerRow_(ss, "receivable", row));
+    PropertiesService.getScriptProperties().setProperty(marker, JSON.stringify({ completedAt: new Date().toISOString(), debt: missingDebt.length, receivable: missingReceivable.length }));
+    const revision = touchRevision_();
+    return { ok: true, debtInserted: missingDebt.length, receivableInserted: missingReceivable.length, revision: revision, marker: marker };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Public runner retained only so the one-time guarded repair can be invoked
+// from the Apps Script editor. The implementation and safety checks remain
+// private above.
+function runVerifiedCreditLedgerBackfill() {
+  return backfillVerifiedCreditLedgersSep14To23_();
 }
 
 function applyOperation_(ss, operation) {
@@ -532,6 +594,13 @@ function readLedgerRows_(ss, sheetName, kind) {
     const remainingRaw = pick(row, kind === "debt" ? ["sisahutang", "sisa"] : ["sisapiutang", "sisa"]);
     const hasExplicitRemaining = remainingRaw !== "" && remainingRaw !== null && remainingRaw !== undefined;
     const remaining = ledgerNumber_(remainingRaw);
+    const calculatedRemaining = Math.max(0, total - paid - returned);
+    // Angka 0 lama tanpa pembayaran atau retur bukan bukti tagihan telah lunas.
+    // Pulihkan dari bukti angka transaksi, tanpa mengandalkan method/status
+    // karena beberapa baris legacy tidak membawa metadata Piutang/Hutang.
+    const effectiveRemaining = hasExplicitRemaining && !(remaining === 0 && calculatedRemaining > 0)
+      ? Math.max(0, remaining)
+      : calculatedRemaining;
     const relation = String(pick(row, kind === "debt" ? ["supplier", "namasupplier", "relasi"] : ["pelanggan", "customer", "namapelanggan", "relasi"]) || "").trim();
     const base = {
       // Nomor faktur warisan boleh sama. Suffix baris hanya menjadi ID internal
@@ -545,10 +614,10 @@ function readLedgerRows_(ss, sheetName, kind) {
       paid,
       returnAmount: returned,
       // Nilai 0 adalah saldo sah (sudah lunas), bukan tanda kolom kosong.
-      due: hasExplicitRemaining ? Math.max(0, remaining) : Math.max(0, total - paid - returned),
+      due: effectiveRemaining,
       method: String(pick(row, ["metode", "method"]) || "Tempo"),
       note: String(pick(row, ["catatan", "note"]) || ""),
-      status: (hasExplicitRemaining ? remaining : Math.max(0, total - paid - returned)) > 0 ? (kind === "debt" ? "Hutang" : "Piutang") : "Lunas"
+      status: effectiveRemaining > 0 ? (kind === "debt" ? "Hutang" : "Piutang") : "Lunas"
     };
     if (kind === "debt") base.salesName = relation;
     else base.customerName = relation;

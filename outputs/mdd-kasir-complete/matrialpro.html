@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 141;
+const APP_VERSION = 142;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -1572,13 +1572,9 @@
         if (productionBootstrapInFlight) return false;
         productionBootstrapInFlight = true;
         try {
-          if (!await verifyActiveBackend()) {
-            authoritativeSnapshotReady = false;
-            if (session) renderAll();
-            return false;
-          }
-          // v141 readiness is a small, authoritative bootstrap response. Full
-          // state is deliberately excluded from this critical path.
+          // v142 desktop readiness is defined by the bootstrap response itself.
+          // Health remains diagnostic, but a delayed/failed health request must
+          // not block an otherwise valid production DashboardSummary.
           const bootstrap = await requestProductionTransport("bootstrap", { clientVersion: APP_VERSION });
           const data = bootstrap?.data || {};
           const valid = bootstrap?.ok && String(bootstrap.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID &&
@@ -1586,13 +1582,14 @@
             Number(bootstrap.syncProtocol || 0) >= PRODUCTION_CONFIG.protocolVersion && data.summary;
           if (!valid) {
             authoritativeSnapshotReady = false;
-            setBackendSyncBanner("danger", "SNAPSHOT_FAILED • data production belum dapat dimuat dari server");
+            setBackendSyncBanner("danger", "DASHBOARD_LOAD_ERROR • ringkasan production belum dapat dimuat");
             if (session) renderAll();
             return false;
           }
           productionBootstrap = data;
           productionModuleRevisions = data.entityRevisions || {};
           lastBackendRevision = String(bootstrap.revision || lastBackendRevision || "");
+          verifiedBackendEndpoint = activeBackendEndpoint();
           authoritativeSnapshotReady = true;
           localStorage.setItem(PRODUCTION_BOOTSTRAP_CACHE_KEY, JSON.stringify({ revision: lastBackendRevision, data, savedAt: new Date().toISOString() }));
           const latestCursor = await requestProductionTransport("changes", { cursor: "latest" });
@@ -1603,11 +1600,12 @@
           }
           if (session) renderAll();
           await updateSyncIndicator();
+          setTimeout(ensureProductsFirstPage, 0);
           setTimeout(syncModulesInBackground, 0);
           return true;
         } catch (error) {
           authoritativeSnapshotReady = false;
-          setBackendSyncBanner("danger", "BOOTSTRAP_FAILED • bootstrap production tidak selesai");
+          setBackendSyncBanner("danger", "DASHBOARD_LOAD_ERROR • ringkasan production belum dapat dimuat");
           if (session) renderAll();
           return false;
         } finally {
@@ -1624,6 +1622,20 @@
         state[module] = [...existing.values()];
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         return { next: Number(response.cursor || 0), hasMore: Boolean(response.hasMore), revision: String(response.revision || ""), count: Number(response.data.count || state[module].length) };
+      }
+
+      async function ensureProductsFirstPage() {
+        if (!authoritativeSnapshotReady || !navigator.onLine) return false;
+        const expected = Number(productionModuleRevisions?.products?.count || 0);
+        if ((state.products || []).length >= Math.min(300, expected || 300)) return true;
+        const page = await loadModulePage("products", 0, 300);
+        if (!page) {
+          setBackendSyncBanner("warning", "PRODUCTS_LOAD_ERROR • daftar Produk belum dapat dimuat");
+          return false;
+        }
+        const activeView = document.querySelector(".view-section.active")?.id;
+        if (activeView === "productsView" || activeView === "cashierView") renderAll();
+        return true;
       }
 
       async function syncModulesInBackground() {
@@ -1643,6 +1655,10 @@
             finalPage = page;
             cursor = page.next;
             pages += 1;
+            if (module === "products" && pages === 1) {
+              const activeView = document.querySelector(".view-section.active")?.id;
+              if (activeView === "productsView" || activeView === "cashierView") renderAll();
+            }
             if (!page.hasMore) break;
           } while (pages < 20);
           if (finalPage && !finalPage.hasMore) {
@@ -1744,7 +1760,10 @@
         const key = change.entity;
         const payload = change.payload || {};
         if (change.type === "refresh") {
-          return loadGoogleWorkspaceState(payload.scope || "state");
+          // A legacy refresh marker must not pull the whole database. The
+          // current production bootstrap plus independently loaded modules is
+          // the desktop source of truth.
+          return refreshAuthoritativeProductionSnapshot();
         }
         if (change.type === "settings") {
           Object.assign(state, payload.settings || {});
@@ -2381,7 +2400,7 @@
           </div>
           <section class="panel"><div class="panel-header"><div><h3>Daftar Produk Material</h3></div><span class="chip">${number.format(activeProducts.length)} data tersedia</span></div>
             <div class="row g-2 mb-3"><div class="col-md-10"><label class="form-label">Pencarian Produk</label><input id="productDatabaseSearch" class="form-control" autocomplete="off" value="${esc(productDatabaseQuery)}" placeholder="Cari berdasarkan kode, nama, kategori, atau satuan"></div><div class="col-md-2 d-flex align-items-end"><button id="clearProductDatabaseSearch" class="btn btn-outline-secondary w-100" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button></div></div>
-            <div id="productDatabaseSearchResult">${productsTable([], { actions: canAccessMaster("Master Barang") })}</div>
+            <div id="productDatabaseSearchResult">${productsTable(activeProducts.slice(0, 300), { actions: canAccessMaster("Master Barang") })}</div>
           </section>`;
         document.getElementById("exportProductsBtn").onclick = () => exportReportPdf("Database Produk Material", productRows(activeProducts));
         document.getElementById("productDatabaseSearch").oninput = (event) => { productDatabaseQuery = event.target.value; renderProductDatabaseSearch(); };
@@ -2396,7 +2415,7 @@
         const target = document.getElementById("productDatabaseSearchResult");
         if (!input || !target) return;
         const query = String(productDatabaseQuery || input.value || "").trim().toLowerCase();
-        const matches = query ? state.products.filter((product) => product.active !== false && [product.code, product.secondaryBarcode, product.name, product.category, product.unit, product.secondaryUnit].some((value) => String(value || "").toLowerCase().includes(query))).slice(0, 100) : [];
+        const matches = query ? state.products.filter((product) => product.active !== false && [product.code, product.secondaryBarcode, product.name, product.category, product.unit, product.secondaryUnit].some((value) => String(value || "").toLowerCase().includes(query))).slice(0, 100) : state.products.filter((product) => product.active !== false).slice(0, 300);
         target.innerHTML = (matches.some(productHasConversion) ? '<p class="small text-secondary">Satuan utama dan kedua adalah stok barang yang sama, bukan stok tambahan. Stok satuan kedua = stok utama × rasio konversi.</p>' : "") + productsTable(matches, { actions: canAccessMaster("Master Barang"), conversions: true });
         bindProductActions();
       }
@@ -2663,7 +2682,7 @@
         if (SYNC_ENVIRONMENT === "production" && !authoritativeSnapshotReady) {
           document.getElementById("metricGrid").innerHTML = `<div class="audit-box"><strong>Data belum dapat dimuat dari server.</strong><br><span>Dashboard tidak menampilkan angka Rp0/0 dari cache saat koneksi production belum tervalidasi.</span></div>`;
           const reportBox = document.getElementById("ownerReportRows");
-          if (reportBox) reportBox.innerHTML = `<div class="audit-box"><strong>Menunggu snapshot production.</strong> Data bisnis akan tampil setelah server production tervalidasi.</div>`;
+          if (reportBox) reportBox.innerHTML = `<div class="audit-box"><strong>Data Dashboard belum dapat dimuat dari server.</strong> Modul lain tetap dapat digunakan secara terpisah.</div>`;
           const lowStockCount = document.getElementById("lowStockCount");
           if (lowStockCount) lowStockCount.textContent = "Data belum dimuat";
           const stockRows = document.getElementById("dashboardStockRows");

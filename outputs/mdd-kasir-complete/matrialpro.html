@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 138;
+      const APP_VERSION = 139;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -1400,7 +1400,7 @@
             cleanup();
             resolve(false);
           // Android dapat melewati batas 10 detik saat Apps Script cold-start atau redirect.
-          }, ["state", "finance", "masterlite", "master", "products", "baselinepart", "receipt", "health", "changes", "reconcile", "acknowledgement"].includes(action) ? 45000 : 10000);
+          }, ["state", "finance", "masterlite", "master", "products", "baselinepart", "receipt", "health", "status", "changes", "reconcile", "acknowledgement"].includes(action) ? 45000 : 10000);
           window[callbackName] = (response) => {
             clearTimeout(timer);
             cleanup();
@@ -1526,8 +1526,10 @@
         if (!backendRuntimeEnabled() || !endpoint) return false;
         const separator = endpoint.includes("?") ? "&" : "?";
         const stateUrl = `${endpoint}${separator}action=${action}&_=${Date.now()}`;
+        const controller = typeof AbortController === "function" ? new AbortController() : null;
+        const timeout = setTimeout(() => controller?.abort(), 12000);
         try {
-          const response = await fetch(stateUrl, { cache: "no-store", redirect: "follow" });
+          const response = await fetch(stateUrl, { cache: "no-store", redirect: "follow", signal: controller?.signal });
           if (response.ok) {
             const payload = await response.json();
             if (payload?.ok && payload?.data && String(payload.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID) {
@@ -1538,6 +1540,8 @@
           }
         } catch (error) {
           console.warn("Google Workspace fetch fallback to JSONP", error);
+        } finally {
+          clearTimeout(timeout);
         }
         return loadGoogleWorkspaceJsonp(action);
       }
@@ -2014,20 +2018,19 @@
         if (!endpoint) return false;
         if (verifiedBackendEndpoint === endpoint) return true;
         const health = await requestGoogleWorkspaceJsonpAt(endpoint, "health", { clientVersion: APP_VERSION });
-        if (!health?.ok || Number(health.syncProtocol || 0) < PRODUCTION_CONFIG.protocolVersion || String(health.environment || "") !== SYNC_ENVIRONMENT) {
+        // Apps Script health is the actual deployment contract: environment and
+        // syncProtocol live at the response top-level. Spreadsheet identity is
+        // verified from the authoritative state snapshot below, not from an
+        // optional status response that can cold-start more slowly on Android.
+        const healthData = health?.data || health || {};
+        if (!health?.ok || Number(healthData.syncProtocol || 0) < PRODUCTION_CONFIG.protocolVersion || String(healthData.environment || "") !== PRODUCTION_CONFIG.environment) {
           verifiedBackendEndpoint = "";
           setBackendSyncBanner("danger", "SYNC ERROR • koneksi server production belum tervalidasi");
           return false;
         }
-        lastBackendRevision = String(health.revision || lastBackendRevision || "");
-        const status = await requestGoogleWorkspaceJsonpAt(endpoint, "status");
-        if (status?.ok && String(status.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID) {
-          verifiedBackendEndpoint = endpoint;
-          return true;
-        }
-        verifiedBackendEndpoint = "";
-        setBackendSyncBanner("danger", "SYNC ERROR • database production belum tervalidasi");
-        return false;
+        lastBackendRevision = String(healthData.revision || lastBackendRevision || "");
+        verifiedBackendEndpoint = endpoint;
+        return true;
       }
       async function ensureWorkspaceBootstrap() {
         if (!outboxReady) return setTimeout(ensureWorkspaceBootstrap, 250);

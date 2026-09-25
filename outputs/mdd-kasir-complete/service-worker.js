@@ -1,6 +1,6 @@
 // Shell cache only.  Business data, the durable outbox, localStorage and
 // IndexedDB are deliberately outside Cache Storage and are never deleted here.
-const CACHE_NAME = "mdd-material-pro-v136-device-legacy-baseline";
+const CACHE_NAME = "mdd-material-pro-v137-authoritative-production-shell";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
@@ -26,7 +26,7 @@ self.addEventListener("activate", (event) => {
       Promise.all(keys.filter((key) => key !== CACHE_NAME && key.startsWith("mdd-material-pro-")).map((key) => caches.delete(key)))
     ).then(() => self.clients.claim()).then(() =>
       self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) =>
-        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 136 }))
+        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 137 }))
       )
     )
   );
@@ -39,11 +39,13 @@ self.addEventListener("message", (event) => {
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   if (new URL(event.request.url).origin !== self.location.origin) return;
-  if (event.request.mode === "navigate") {
+  const path = new URL(event.request.url).pathname;
+  const isApplicationShell = event.request.mode === "navigate" || /\/(matrialpro\.html|sync-v2\.js|conversion-utils\.js|manifest\.webmanifest)$/.test(path);
+  if (isApplicationShell) {
     event.respondWith(
       fetch(event.request).then((response) => {
         const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put("./matrialpro.html", copy));
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request.mode === "navigate" ? "./matrialpro.html" : event.request, copy));
         return response;
       }).catch(() => caches.match("./matrialpro.html"))
     );

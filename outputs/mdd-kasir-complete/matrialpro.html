@@ -800,10 +800,20 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 136;
-      // Every client older than the enforced backend version is upgraded before
-      // it can use its legacy per-device endpoint or stale production identity.
+      const APP_VERSION = 137;
+      // The v136 baseline marker is retained solely to avoid running another
+      // destructive recovery migration. Version 137 only repairs routing and
+      // snapshot loading.
       const FORCE_PRODUCTION_BASELINE = "FORCE_PRODUCTION_BASELINE_V136";
+      // Production routing is immutable application configuration. Legacy
+      // profile/localStorage values are business-display metadata only and can
+      // never select an API endpoint in production.
+      const PRODUCTION_CONFIG = Object.freeze({
+        environment: "production",
+        apiUrl: "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec",
+        spreadsheetId: "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ",
+        protocolVersion: 4
+      });
       // Explicitly approved, device-local legacy cleanup. It is versioned so
       // later, genuine conflicts never receive this treatment.
       const LEGACY_CONFLICT_DISPOSITION = "APPROVED_LEGACY_CONFLICT_DISPOSITION_V136";
@@ -811,13 +821,8 @@
       // This is the original, permanent production deployment. Do not replace
       // it when publishing a new Apps Script version: edit that deployment in
       // place so every installed client keeps one production identity.
-      const PRODUCTION_ENDPOINT = "https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec";
-      // Temporary non-persistent fallback for a short Google propagation outage.
-      const PRODUCTION_ENDPOINT_FALLBACKS = [
-        PRODUCTION_ENDPOINT,
-        "https://script.google.com/macros/s/AKfycbymrIJog6vOOi21lhCdci5Dj5D_vrJBZHbsiHjfC1kH2owOH4FGCd01UK-Io2VXwMoO/exec"
-      ];
-      const EXPECTED_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ";
+      const PRODUCTION_ENDPOINT = PRODUCTION_CONFIG.apiUrl;
+      const EXPECTED_SPREADSHEET_ID = PRODUCTION_CONFIG.spreadsheetId;
       const APP_CANONICAL_URL = "https://friendsindonesia.github.io/mddmaterialpro/outputs/mdd-kasir-complete/matrialpro.html";
       const LEGACY_STORAGE_KEYS = ["mdd_kasir_pro_v2", "mdd_material_pro_v1"];
       const STORE_PRINT_NAME = "MUTIARA JAYA";
@@ -907,7 +912,7 @@
       let isSyncing = false;
       let isPulling = false;
       let verifiedBackendEndpoint = "";
-      let resolvedProductionEndpoint = PRODUCTION_ENDPOINT;
+      let authoritativeSnapshotReady = false;
       const REPORT_DISPLAY_STORAGE_KEY = "mdd_report_display_hidden_v1";
       let hiddenReportRows = loadHiddenReportRows();
       let durablePendingSync = loadDurablePendingSync();
@@ -938,10 +943,12 @@
 
       function activeBackendEndpoint() {
         if (SYNC_ENVIRONMENT === "staging") return localStorage.getItem(STAGING_ENDPOINT_KEY) || "";
-        // Production must never inherit a stale per-device endpoint from the
-        // legacy state/profile cache. The profile field remains preserved for
-        // backward compatibility, but runtime sync uses the audited deployment.
-        return resolvedProductionEndpoint;
+        return PRODUCTION_CONFIG.apiUrl;
+      }
+      function backendRuntimeEnabled() {
+        // A legacy Profile row often has no onlineMode field. Production must
+        // not become offline merely because that per-device metadata is stale.
+        return SYNC_ENVIRONMENT === "production" || state.profile?.onlineMode === true;
       }
 
       function defaultState() {
@@ -1230,7 +1237,7 @@
       }
       function queueGoogleWorkspaceSync() {
         if (baselineInProgress) return;
-        if (!state.profile?.onlineMode || !activeBackendEndpoint()) return;
+        if (!backendRuntimeEnabled() || !activeBackendEndpoint()) return;
         clearTimeout(syncTimer);
         syncPending = true;
         syncTimer = setTimeout(() => {
@@ -1267,13 +1274,12 @@
         } catch {
           return setBackendSyncBanner("danger", "SYNC ERROR • IndexedDB tidak dapat dibaca");
         }
+        if (SYNC_ENVIRONMENT === "production" && !authoritativeSnapshotReady) {
+          return setBackendSyncBanner("warning", "Data belum dapat dimuat dari server");
+        }
         if (conflicts.length) return setBackendSyncBanner("danger", `CONFLICT • ${conflicts.length} data perlu diperiksa`);
         if (forcedStatus === "syncing" || pending.some((row) => row.status === "sending")) return setBackendSyncBanner("warning", `SYNCING • ${pending.length} DATA PENDING`);
         if (pending.length) return setBackendSyncBanner(pending.some((row) => row.status === "failed") ? "danger" : "warning", `${pending.length} DATA PENDING${pending.some((row) => row.status === "failed") ? " • SYNC ERROR" : ""}`);
-        const baselineVersion = await syncOutbox.getMeta("baselineVersion");
-        if (SYNC_ENVIRONMENT === "production" && baselineVersion !== FORCE_PRODUCTION_BASELINE) {
-          return setBackendSyncBanner("warning", "INITIALIZING • mengunduh database production");
-        }
         setBackendSyncBanner("success", "ONLINE - SYNCED");
       }
 
@@ -1378,7 +1384,7 @@
 
       function requestGoogleWorkspaceJsonpAt(endpoint, action = "state", params = {}) {
         return new Promise((resolve) => {
-          if (!state.profile?.onlineMode || !endpoint) return resolve(false);
+          if (!backendRuntimeEnabled() || !endpoint) return resolve(false);
           const callbackName = `mddBackendState${Date.now()}${Math.random().toString(36).slice(2)}`;
           const script = document.createElement("script");
           const separator = endpoint.includes("?") ? "&" : "?";
@@ -1411,8 +1417,10 @@
       }
       async function loadGoogleWorkspaceJsonp(action = "state") {
         const response = await requestGoogleWorkspaceJsonp(action);
-        if (!response) return false;
-        return action === "state" ? mergeStateFromBackend(response?.data) : mergeSubsetFromBackend(response?.data);
+        if (!response?.ok || !response?.data || String(response.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) return false;
+        action === "state" ? mergeStateFromBackend(response.data) : mergeSubsetFromBackend(response.data);
+        if (action === "state") authoritativeSnapshotReady = true;
+        return true;
       }
 
       function syncChangesConfirmed(remoteData, changes) {
@@ -1511,20 +1519,41 @@
 
       async function loadGoogleWorkspaceState(action = "state") {
         const endpoint = activeBackendEndpoint();
-        if (!state.profile?.onlineMode || !endpoint) return false;
+        if (!backendRuntimeEnabled() || !endpoint) return false;
         const separator = endpoint.includes("?") ? "&" : "?";
         const stateUrl = `${endpoint}${separator}action=${action}&_=${Date.now()}`;
         try {
           const response = await fetch(stateUrl, { cache: "no-store", redirect: "follow" });
           if (response.ok) {
             const payload = await response.json();
-            const changed = action === "state" ? mergeStateFromBackend(payload?.data) : mergeSubsetFromBackend(payload?.data);
-            if (changed) return true;
+            if (payload?.ok && payload?.data && String(payload.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID) {
+              action === "state" ? mergeStateFromBackend(payload.data) : mergeSubsetFromBackend(payload.data);
+              if (action === "state") authoritativeSnapshotReady = true;
+              return true;
+            }
           }
         } catch (error) {
           console.warn("Google Workspace fetch fallback to JSONP", error);
         }
         return loadGoogleWorkspaceJsonp(action);
+      }
+      async function refreshAuthoritativeProductionSnapshot() {
+        if (!await verifyActiveBackend()) {
+          authoritativeSnapshotReady = false;
+          if (session) renderAll();
+          return false;
+        }
+        const loaded = await loadGoogleWorkspaceState("state");
+        authoritativeSnapshotReady = loaded;
+        if (loaded) {
+          operationSnapshot = JSON.parse(JSON.stringify(state));
+          if (session) renderAll();
+          await updateSyncIndicator();
+        } else if (session) {
+          setBackendSyncBanner("danger", "Data belum dapat dimuat dari server");
+          renderAll();
+        }
+        return loaded;
       }
 
       async function refreshGoogleWorkspaceState() {
@@ -1622,7 +1651,7 @@
 
       async function checkApplicationHealth() {
         // Runtime production memakai endpoint audited yang hard-coded, bukan endpoint legacy dalam localStorage.
-        if (!state.profile?.onlineMode || !activeBackendEndpoint() || !navigator.onLine) return false;
+        if (!backendRuntimeEnabled() || !activeBackendEndpoint() || !navigator.onLine) return false;
         try {
           const health = await requestGoogleWorkspaceJsonp("health", { clientVersion: APP_VERSION });
           if (!health?.ok) return false;
@@ -1704,19 +1733,8 @@
           });
           lastChangeCursor = String((await syncOutbox.getMeta("changeCursor")) || "");
           outboxReady = true;
-          try {
-            await applyForceProductionBaselineV121();
-          } catch (error) {
-            setBackendSyncBanner("danger", `SYNC ERROR • baseline production belum lengkap (${error.message || error})`);
-            scheduleProductionBaselineRetry();
-            return;
-          }
-          const baselineComplete = (await syncOutbox.getMeta("baselineVersion")) === FORCE_PRODUCTION_BASELINE;
-          if (SYNC_ENVIRONMENT === "production" && !baselineComplete) {
-            await updateSyncIndicator();
-            scheduleProductionBaselineRetry();
-            return;
-          }
+          // Phase 1 deliberately does not invoke a new baseline or conflict
+          // recovery. Existing business cache and durable outbox remain intact.
           operationSnapshot = JSON.parse(JSON.stringify(state));
           const pending = await syncOutbox.list(["pending", "failed", "sending"], 1);
           if (!lastChangeCursor && !pending.length && session) await bootstrapWorkspaceStateOnce();
@@ -1761,8 +1779,8 @@
         // available.  Missing operations are returned to the durable outbox
         // for their normal idempotent retry, while true conflicts remain for
         // review with their original payload intact.
-        const disposition = await disposeApprovedLegacyConflictsOnce();
-        if (disposition.unresolved) return false;
+        // Phase 1 does not alter legacy conflict records. Production recovery
+        // is a routing/cache repair only; the durable outbox remains intact.
         await reconcileExistingConflictsBeforeBaseline();
         const pendingAfterReconcile = await syncOutbox.list(["pending", "sending", "failed"], 1);
         const unresolvedConflicts = await syncOutbox.list(["conflict"], 1);
@@ -1831,6 +1849,7 @@
           await syncOutbox.setMeta("baselineVersion", FORCE_PRODUCTION_BASELINE);
           await syncOutbox.setMeta("baselineCompletedAt", new Date().toISOString());
           await syncOutbox.setMeta("baselineRevision", String(health.revision || ""));
+          authoritativeSnapshotReady = true;
           if (session) renderSyncedState();
           return true;
         } catch (error) {
@@ -1938,7 +1957,10 @@
       async function bootstrapWorkspaceStateOnce() {
         if (!await verifyActiveBackend()) return false;
         const responses = await Promise.all(["finance", "masterlite", "products"].map((action) => requestGoogleWorkspaceJsonp(action)));
-        if (responses.every((response) => response?.ok && response.data)) responses.forEach((response) => mergeSubsetFromBackend(response.data));
+        if (responses.every((response) => response?.ok && response.data && String(response.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID)) {
+          responses.forEach((response) => mergeSubsetFromBackend(response.data));
+          authoritativeSnapshotReady = true;
+        }
         const cursorResponse = await requestGoogleWorkspaceJsonp("changes", { cursor: "latest" });
         lastChangeCursor = String(cursorResponse?.cursor || "");
         if (lastChangeCursor) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
@@ -1949,20 +1971,19 @@
         const endpoint = activeBackendEndpoint();
         if (!endpoint) return false;
         if (verifiedBackendEndpoint === endpoint) return true;
-        const candidates = SYNC_ENVIRONMENT === "production"
-          ? [...new Set([PRODUCTION_ENDPOINT, ...PRODUCTION_ENDPOINT_FALLBACKS])]
-          : [endpoint];
-        for (const candidate of candidates) {
-          const health = await requestGoogleWorkspaceJsonpAt(candidate, "health", { clientVersion: APP_VERSION });
-          if (!health?.ok || Number(health.syncProtocol || 0) < 4 || String(health.environment || "") !== SYNC_ENVIRONMENT) continue;
-          const status = await requestGoogleWorkspaceJsonpAt(candidate, "status");
-          if (!status?.ok || String(status.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) continue;
-          resolvedProductionEndpoint = candidate;
-          verifiedBackendEndpoint = candidate;
+        const health = await requestGoogleWorkspaceJsonpAt(endpoint, "health", { clientVersion: APP_VERSION });
+        if (!health?.ok || Number(health.syncProtocol || 0) < PRODUCTION_CONFIG.protocolVersion || String(health.environment || "") !== SYNC_ENVIRONMENT) {
+          verifiedBackendEndpoint = "";
+          setBackendSyncBanner("danger", "SYNC ERROR • koneksi server production belum tervalidasi");
+          return false;
+        }
+        const status = await requestGoogleWorkspaceJsonpAt(endpoint, "status");
+        if (status?.ok && String(status.spreadsheetId || "") === EXPECTED_SPREADSHEET_ID) {
+          verifiedBackendEndpoint = endpoint;
           return true;
         }
         verifiedBackendEndpoint = "";
-        setBackendSyncBanner("danger", `SYNC ERROR • endpoint ${SYNC_ENVIRONMENT} tidak valid`);
+        setBackendSyncBanner("danger", "SYNC ERROR • database production belum tervalidasi");
         return false;
       }
       async function ensureWorkspaceBootstrap() {
@@ -2042,8 +2063,9 @@
         // Satu siklus pembacaan yang utuh: transaksi, master, dan produk harus
         // semuanya berhasil sebelum revisi ditandai selesai pada perangkat.
         lastBackendRevision = "";
-        setBackendSyncBanner("warning", "Memeriksa data pusat. Angka yang tampil sementara berasal dari perangkat ini.");
-        setTimeout(refreshGoogleWorkspaceState, 0);
+        authoritativeSnapshotReady = false;
+        setBackendSyncBanner("warning", "INITIALIZING • memuat data production dari server");
+        setTimeout(refreshAuthoritativeProductionSnapshot, 0);
         setTimeout(ensureWorkspaceBootstrap, 50);
         // Kirim kembali perubahan yang sempat tersimpan ketika perangkat
         // ditutup/offline. Outbox ini bertahan melewati refresh dan restart.
@@ -2053,8 +2075,8 @@
         // Lima detik cukup responsif untuk tiga perangkat, tetapi jauh lebih aman
         // terhadap kuota Apps Script dibanding polling setiap 1,5 detik.
         autoPullTimer = setInterval(refreshGoogleWorkspaceState, 30000);
-        window.onfocus = refreshGoogleWorkspaceState;
-        window.ononline = () => { queueGoogleWorkspaceSync(); refreshGoogleWorkspaceState(); };
+        window.onfocus = () => { refreshAuthoritativeProductionSnapshot(); refreshGoogleWorkspaceState(); };
+        window.ononline = () => { queueGoogleWorkspaceSync(); refreshAuthoritativeProductionSnapshot(); };
         // Pemeriksaan kesehatan tidak menghalangi login atau pekerjaan user.
         checkApplicationHealth();
         setInterval(checkApplicationHealth, 60000);
@@ -2072,7 +2094,7 @@
         document.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
         bootstrap.Offcanvas.getInstance(document.getElementById("sidebar"))?.hide();
         renderAll();
-        if (view === "financeView" && state.profile?.onlineMode) {
+        if (view === "financeView" && backendRuntimeEnabled()) {
           loadGoogleWorkspaceState("finance").then((loaded) => {
             if (loaded && document.querySelector(".view-section.active")?.id === "financeView") renderFinance();
           }).catch(() => {});
@@ -2474,6 +2496,17 @@
         const storeContactEl = document.getElementById("dashboardStoreContact");
         if (storeNameEl) storeNameEl.textContent = state.profile.name || "Nama Toko Material";
         if (storeContactEl) storeContactEl.textContent = `${state.profile.address || "Alamat toko belum diisi"} | Telp & WhatsApp : ${state.profile.phone || "Nomor belum diisi"}`;
+        if (SYNC_ENVIRONMENT === "production" && !authoritativeSnapshotReady) {
+          document.getElementById("metricGrid").innerHTML = `<div class="audit-box"><strong>Data belum dapat dimuat dari server.</strong><br><span>Dashboard tidak menampilkan angka Rp0/0 dari cache saat koneksi production belum tervalidasi.</span></div>`;
+          const reportBox = document.getElementById("ownerReportRows");
+          if (reportBox) reportBox.innerHTML = `<div class="audit-box"><strong>Menunggu snapshot production.</strong> Data bisnis akan tampil setelah server production tervalidasi.</div>`;
+          const lowStockCount = document.getElementById("lowStockCount");
+          if (lowStockCount) lowStockCount.textContent = "Data belum dimuat";
+          const stockRows = document.getElementById("dashboardStockRows");
+          if (stockRows) stockRows.innerHTML = `<tr><td colspan="3" class="text-center text-secondary">Data belum dapat dimuat dari server.</td></tr>`;
+          if (salesChart) { salesChart.destroy(); salesChart = null; }
+          return;
+        }
         const salesTotal = state.sales.reduce((s, x) => s + toNumber(x.total), 0);
         const todaySales = state.sales.filter((x) => isCashierSale(x) && isToday(x.date));
         const todayPurchases = state.purchases.filter((x) => isPurchaseTransaction(x) && isToday(x.date));
@@ -4815,6 +4848,10 @@
         toast("Backup database dibuat.");
       }
       function openGoogleEndpointModal(runAfterSave = false) {
+        if (SYNC_ENVIRONMENT === "production") {
+          toast("Endpoint production dikelola otomatis oleh aplikasi dan tidak dapat diubah dari perangkat.");
+          return;
+        }
         openModal("Endpoint Google Workspace", `
           <div class="row g-3">
             <div class="col-md-6"><label class="form-label">Akun Google Workspace</label><input value="${state.profile.googleAccount || "friendsindonesia28@gmail.com"}" class="form-control" readonly></div>

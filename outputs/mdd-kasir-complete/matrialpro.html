@@ -1598,6 +1598,11 @@
           renderAll();
         }
         return loaded;
+        } catch (error) {
+          authoritativeSnapshotReady = false;
+          setBackendSyncBanner("danger", "BOOTSTRAP_FAILED • bootstrap production tidak selesai");
+          if (session) renderAll();
+          return false;
         } finally {
           productionBootstrapInFlight = false;
         }
@@ -2073,7 +2078,14 @@
       }
       async function verifyActiveBackend() {
         const endpoint = activeBackendEndpoint();
-        if (!endpoint) return false;
+        if (!navigator.onLine) {
+          setBackendSyncBanner("warning", "OFFLINE • perangkat tidak terhubung ke internet");
+          return false;
+        }
+        if (!endpoint) {
+          setBackendSyncBanner("danger", "BOOTSTRAP_FAILED • endpoint production tidak tersedia");
+          return false;
+        }
         if (verifiedBackendEndpoint === endpoint) return true;
         const health = await requestProductionTransport("health", { clientVersion: APP_VERSION });
         // Apps Script health is the actual deployment contract: environment and
@@ -2081,7 +2093,7 @@
         // verified from the authoritative state snapshot below, not from an
         // optional status response that can cold-start more slowly on Android.
         const healthData = health?.data || health || {};
-        if (!health?.ok || Number(healthData.syncProtocol || 0) < PRODUCTION_CONFIG.protocolVersion || String(healthData.environment || "") !== PRODUCTION_CONFIG.environment) {
+        if (!health?.ok || Number(healthData.syncProtocol || 0) < PRODUCTION_CONFIG.protocolVersion || Number(healthData.minimumClientVersion || 0) > APP_VERSION || String(healthData.environment || "") !== PRODUCTION_CONFIG.environment) {
           verifiedBackendEndpoint = "";
           setBackendSyncBanner("danger", health?.ok ? "PROTOCOL_MISMATCH • protocol production tidak kompatibel" : "SERVER_UNREACHABLE • server production tidak dapat dihubungi");
           return false;

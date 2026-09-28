@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 147;
+      const APP_VERSION = 149;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -819,6 +819,7 @@
       const LEGACY_CONFLICT_DISPOSITION = "APPROVED_LEGACY_CONFLICT_DISPOSITION_V136";
       const PREVIOUS_OWNER_CONFLICT_DISPOSITION = "OWNER_APPROVED_LEGACY_CONFLICT_DISPOSITION_V135";
       const WRITE_CORE_V148_RESET_MARKER = "WRITE_CORE_V148_BASELINE_RESET";
+      const WRITE_CORE_V149_EMERGENCY_QUEUE_RESET = "WRITE_CORE_V149_EMERGENCY_QUEUE_RESET";
       // Fixed production rollout cutoff: GitHub Pages v147 completed 28 Sep 2026 ~11:01 WIB.
       // Only operations created on/before this instant are legacy and may be retired.
       const WRITE_CORE_V148_RESET_CUTOFF = Date.parse("2026-09-28T04:01:00.000Z");
@@ -1836,6 +1837,10 @@
         rows.forEach((row) => existing.set(operationRowId(module, row), row));
         state[module] = [...existing.values()];
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        // v149: a server READ is never a local mutation. Advance the mutation
+        // baseline after hydrating server data so the next user Save cannot
+        // echo thousands of freshly-read rows back into the durable outbox.
+        operationSnapshot = JSON.parse(JSON.stringify(state));
         return { next: Number(response.cursor || 0), hasMore: Boolean(response.hasMore), revision: String(response.revision || ""), count: Number(response.data.count || state[module].length) };
       }
 
@@ -2124,6 +2129,7 @@
           // One-time production cleanup explicitly approved by Owner: retire only
           // pre-v147 unresolved operations. New v147+ operations are never discarded.
           await applyWriteCoreV148BaselineResetOnce();
+          await applyWriteCoreV149EmergencyQueueResetOnce();
           // Phase 1 deliberately does not invoke a new baseline or conflict
           // recovery. Existing business cache and durable outbox remain intact.
           operationSnapshot = JSON.parse(JSON.stringify(state));
@@ -2285,6 +2291,32 @@
         const unresolved = (await syncOutbox.list(["conflict"], 100000)).length;
         return { acknowledged, requeued, unresolved };
       }
+      async function applyWriteCoreV149EmergencyQueueResetOnce() {
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return { retired: 0, skipped: true };
+        if ((await syncOutbox.getMeta("writeCoreV149EmergencyQueueReset")) === WRITE_CORE_V149_EMERGENCY_QUEUE_RESET) {
+          return { retired: 0, alreadyApplied: true };
+        }
+        // Emergency rollout rule approved by Owner on 28 Sep 2026: while both
+        // devices are paused, retire the current runaway queue produced by the
+        // server-read echo bug. No future v149 operation is eligible.
+        const rows = await syncOutbox.list(["pending", "sending", "failed", "conflict"], 1000000);
+        if (rows.length) {
+          await syncOutbox.mark(rows.map((row) => row.operationId), "retired", {
+            retiredAt: new Date().toISOString(),
+            retiredReason: "v149-server-read-echo-emergency-reset",
+            retainedForAudit: false,
+            lastError: ""
+          });
+        }
+        await syncOutbox.setMeta("writeCoreV149EmergencyQueueReset", WRITE_CORE_V149_EMERGENCY_QUEUE_RESET);
+        await syncOutbox.setMeta("writeCoreV149EmergencyQueueResetAt", new Date().toISOString());
+        await syncOutbox.setMeta("writeCoreV149EmergencyQueueResetCount", rows.length);
+        // Baseline the current cache immediately. The two genuine actions made
+        // during the incident must be re-entered once after v149 is ONLINE-SYNCED.
+        operationSnapshot = JSON.parse(JSON.stringify(state));
+        return { retired: rows.length, alreadyApplied: false };
+      }
+
       async function applyWriteCoreV148BaselineResetOnce() {
         if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return { retired: 0, skipped: true };
         if ((await syncOutbox.getMeta("writeCoreBaselineResetVersion")) === WRITE_CORE_V148_RESET_MARKER) {

@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 146;
+      const APP_VERSION = 147;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -1192,6 +1192,11 @@
       }
       function buildOperationsFromState(previous, current, action) {
         const operations = [];
+        // One user action = one immutable business command. Every child effect
+        // (invoice, stock delta, StockMove, payment, ledger projection) carries
+        // the same commandId so retry cannot fragment the transaction.
+        const commandId = MDDSyncV2.operationId();
+        const commandType = String(action || "MUTATION").slice(0, 120);
         const newPaymentsByReference = new Set((current.payments || []).filter((row) => !(previous.payments || []).some((old) => String(old.id) === String(row.id))).map((row) => String(row.refId || "")).filter(Boolean));
         SYNC_TABLE_KEYS.forEach((key) => {
           const before = new Map((previous[key] || []).map((row) => [operationRowId(key, row), row]).filter(([id]) => id));
@@ -1199,10 +1204,10 @@
           after.forEach((row, id) => {
             const old = before.get(id);
             if (old && JSON.stringify(old) === JSON.stringify(row)) return;
-            const common = { baseRevision: lastBackendRevision, deviceId: syncDeviceId };
+            const common = { baseRevision: lastBackendRevision, deviceId: syncDeviceId, commandId, commandType };
             if (key === "products" && old) {
               const stockDelta = Number(row.stock ?? row.stockAkhir ?? 0) - Number(old.stock ?? old.stockAkhir ?? 0);
-              if (Math.abs(stockDelta) > 0.000001) operations.push(MDDSyncV2.makeOperation("stock_delta", "products", id, { productId: id, delta: stockDelta, reason: action || "Perubahan stok" }, common));
+              if (Math.abs(stockDelta) > 0.000001) operations.push(MDDSyncV2.makeOperation("stock_delta", "products", id, { productId: id, delta: stockDelta, localBaseStock: Number(old.stock ?? old.stockAkhir ?? 0), localTargetStock: Number(row.stock ?? row.stockAkhir ?? 0), reason: action || "Perubahan stok" }, common));
               const oldNonStock = operationWithoutStock(old);
               const newNonStock = operationWithoutStock(row);
               if (JSON.stringify(oldNonStock) !== JSON.stringify(newNonStock)) operations.push(MDDSyncV2.makeOperation("upsert", key, id, { row: newNonStock, base: oldNonStock }, common));
@@ -1214,14 +1219,22 @@
               const newBusiness = operationWithoutPaymentBalance(row);
               if (JSON.stringify(oldBusiness) !== JSON.stringify(newBusiness)) operations.push(MDDSyncV2.makeOperation("upsert", key, id, { row: newBusiness, base: oldBusiness }, common));
             } else if (key === "payments" && !old) {
-              operations.push(MDDSyncV2.makeOperation("payment_delta", key, id, { payment: row }, common));
+              const refId = String(row.refId || "");
+              const invoiceKey = String(row.type || "").toLowerCase() === "hutang" ? "purchases" : "sales";
+              const invoiceBefore = (previous[invoiceKey] || []).find((invoice) => String(invoice.id) === refId) || null;
+              const invoiceAfter = (current[invoiceKey] || []).find((invoice) => String(invoice.id) === refId) || null;
+              operations.push(MDDSyncV2.makeOperation("payment_delta", key, id, {
+                payment: row,
+                invoiceBefore: invoiceBefore ? { id: refId, paid: Number(invoiceBefore.paid || 0), due: Number(invoiceBefore.due || 0) } : null,
+                invoiceAfter: invoiceAfter ? { id: refId, paid: Number(invoiceAfter.paid || 0), due: Number(invoiceAfter.due || 0) } : null
+              }, common));
             } else {
               operations.push(MDDSyncV2.makeOperation("upsert", key, id, { row, base: old || null }, common));
             }
           });
           before.forEach((_row, id) => {
             if (!after.has(id) && (current.deletionTombstones?.[key] || []).map(String).includes(id)) {
-              operations.push(MDDSyncV2.makeOperation("delete", key, id, { id }, { baseRevision: lastBackendRevision, deviceId: syncDeviceId }));
+              operations.push(MDDSyncV2.makeOperation("delete", key, id, { id }, { baseRevision: lastBackendRevision, deviceId: syncDeviceId, commandId, commandType }));
             }
           });
         });
@@ -1229,29 +1242,51 @@
         SYNC_SETTING_KEYS.forEach((key) => {
           if (JSON.stringify(previous[key]) !== JSON.stringify(current[key])) settings[key] = current[key];
         });
-        if (Object.keys(settings).length) operations.push(MDDSyncV2.makeOperation("settings", "settings", "settings", { settings }, { baseRevision: lastBackendRevision, deviceId: syncDeviceId }));
+        if (Object.keys(settings).length) operations.push(MDDSyncV2.makeOperation("settings", "settings", "settings", { settings }, { baseRevision: lastBackendRevision, deviceId: syncDeviceId, commandId, commandType }));
         return operations;
       }
       function captureOperations(action) {
         if (baselineInProgress) return Promise.resolve([]);
-        const operations = buildOperationsFromState(operationSnapshot || state, state, action);
-        operationSnapshot = JSON.parse(JSON.stringify(state));
-        if (!operations.length) return Promise.resolve([]);
+        const candidateSnapshot = JSON.parse(JSON.stringify(state));
+        const operations = buildOperationsFromState(operationSnapshot || state, candidateSnapshot, action);
+        if (!operations.length) {
+          operationSnapshot = candidateSnapshot;
+          return Promise.resolve([]);
+        }
         return syncOutbox.putMany(operations).then(() => {
+          // v147: snapshot hanya boleh maju setelah seluruh operasi benar-benar
+          // committed ke transaksi IndexedDB. Jika putMany gagal, diff berikutnya
+          // tetap dapat membentuk ulang operasi yang belum durable.
+          operationSnapshot = candidateSnapshot;
           updateSyncIndicator();
           queueGoogleWorkspaceSync();
           return operations;
         }).catch((error) => {
-          setBackendSyncBanner("danger", `SYNC ERROR • transaksi tetap berada di penyimpanan lokal (${error.message || error})`);
+          setBackendSyncBanner("danger", `SIMPAN LOKAL GAGAL • data belum masuk antrean aman (${error.message || error})`);
           throw error;
         });
+      }
+      function restoreStateSnapshot(snapshot) {
+        if (!snapshot || typeof snapshot !== "object") return;
+        Object.keys(state).forEach((key) => delete state[key]);
+        Object.assign(state, JSON.parse(JSON.stringify(snapshot)));
+      }
+      async function saveStateDurable(action) {
+        // Write Core v147: IndexedDB outbox adalah gerbang durability. UI kritis
+        // tidak boleh menganggap transaksi tersimpan sebelum langkah ini sukses.
+        const operations = await captureOperations(action);
+        if (action) addHistory(action);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        return operations;
       }
       function saveState(action, options = {}) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         if (action) addHistory(action);
-        // localStorage tetap disimpan untuk kompatibilitas/backup. Outbox v2
-        // adalah sumber antrean pengiriman dan tidak dihapus sebelum ACK server.
-        if (!options.skipSync) captureOperations(action).catch(() => {});
+        // Jalur legacy dipertahankan sementara untuk form non-kritis. Jalur
+        // transaksi uang/stok utama menggunakan saveStateDurable().
+        if (!options.skipSync) captureOperations(action).catch((error) => {
+          console.error("WRITE_CORE_V147_LEGACY_ENQUEUE_FAILED", error);
+        });
       }
       function addHistory(action) {
         state.history.unshift({ id: uid("HIS"), date: new Date().toLocaleString("id-ID"), user: session?.name || "Sistem", action });
@@ -3345,7 +3380,7 @@
         toast("Pesanan penjualan disimpan sebagai pending.");
       }
       let saleCheckoutBusy = false;
-      function checkoutSale() {
+      async function checkoutSale() {
         if (saleCheckoutBusy) return toast("Transaksi penjualan sedang diproses.");
         if (!activeCart.length) return toast("Keranjang masih kosong.");
         updateSaleDraftTotals();
@@ -3362,6 +3397,8 @@
         if (isDownPaymentMethod(method) && dp <= 0) return toast("Masukkan nominal DP (Uang Muka) pada kolom Uang Diterima.");
         if (isCashMethod(method) && toNumber(saleDraft.cashReceived) < total) return toast("Uang diterima kurang dari Total Transaksi.");
         saleCheckoutBusy = true;
+        const writeCoreStateBefore = JSON.parse(JSON.stringify(state));
+        const writeCoreCartBefore = structuredClone(activeCart);
         const previousSale = editingSaleId ? state.sales.find((item) => item.id === editingSaleId) : null;
         if (previousSale) {
           (previousSale.items || []).forEach((item) => {
@@ -3396,12 +3433,22 @@
         state.sales.unshift(sale);
         if (dp > 0) state.payments.unshift({ id: uid("PAY"), date: sale.date, refId: sale.id, invoiceNo: sale.invoiceNo, relation: sale.customerName || "-", type: due > 0 ? "Piutang" : "DP Penjualan", amount: dp, remaining: due, method: "DP Penjualan", note: "Uang muka transaksi penjualan" });
         state.syncQueue.push({ type: "sale", id: sale.id });
+        try {
+          await saveStateDurable(`Penjualan ${sale.id} disimpan`);
+        } catch (error) {
+          restoreStateSnapshot(writeCoreStateBefore);
+          activeCart = writeCoreCartBefore;
+          saleCheckoutBusy = false;
+          renderAll();
+          toast("TRANSAKSI BELUM TERSIMPAN. Data dikembalikan; silakan coba Simpan lagi.");
+          return;
+        }
         activeCart = [];
         editingSaleId = "";
         resetSaleDraft();
-        saveState(`Penjualan ${sale.id} disimpan`);
         renderAll();
         saleCheckoutBusy = false;
+        toast("TERSIMPAN DI PERANGKAT • menunggu sinkronisasi server.");
         printDoc("Faktur Penjualan", sale, "sales");
       }
 
@@ -3577,7 +3624,7 @@
         renderAll();
       }
       let purchaseCheckoutBusy = false;
-      function checkoutPurchase(printAfterSave = false) {
+      async function checkoutPurchase(printAfterSave = false) {
         if (purchaseCheckoutBusy) return toast("Transaksi pembelian sedang diproses.");
         if (!purchaseCart.length) return toast("Keranjang pembelian kosong.");
         updatePurchaseDraftTotals();
@@ -3596,6 +3643,8 @@
         if (isPaidPurchase && isCashMethod(method) && toNumber(purchaseDraft.cashReceived) < total) return toast("Uang diterima kurang dari Total Transaksi.");
         if (isDpPurchase && (purchaseDraft.dp <= 0 || purchaseDraft.dp >= total)) return toast("DP harus lebih dari Rp 0 dan lebih kecil dari Total Transaksi.");
         purchaseCheckoutBusy = true;
+        const writeCoreStateBefore = JSON.parse(JSON.stringify(state));
+        const writeCoreCartBefore = structuredClone(purchaseCart);
         const previousPurchase = editingPurchaseId ? state.purchases.find((item) => item.id === editingPurchaseId) : null;
         if (previousPurchase) {
           (previousPurchase.items || []).forEach((item) => {
@@ -3635,14 +3684,23 @@
         });
         state.purchases.unshift(purchase);
         state.syncQueue.push({ type: "purchase", id: purchase.id });
+        try {
+          await saveStateDurable(`Pembelian ${purchase.id} disimpan`);
+        } catch (error) {
+          restoreStateSnapshot(writeCoreStateBefore);
+          purchaseCart = writeCoreCartBefore;
+          purchaseCheckoutBusy = false;
+          renderAll();
+          toast("PEMBELIAN BELUM TERSIMPAN. Data dikembalikan; silakan coba Simpan lagi.");
+          return;
+        }
         editingPurchaseId = "";
         purchaseCart = [];
         resetPurchaseDraft();
-        saveState(`Pembelian ${purchase.id} disimpan`);
         renderAll();
         purchaseCheckoutBusy = false;
         if (printAfterSave) printDoc("Faktur Pembelian", purchase, "purchases");
-        else toast(`Pembelian ${purchase.invoiceNo || purchase.id} tersimpan tanpa mencetak invoice.`);
+        else toast(`Pembelian ${purchase.invoiceNo || purchase.id} TERSIMPAN DI PERANGKAT • menunggu sinkronisasi server.`);
       }
 
       function renderFinance() {
@@ -4093,7 +4151,8 @@
             <div class="col-md-6"><label class="form-label">Metode</label><select name="method" class="form-select">${payMethods.map((m) => `<option>${m}</option>`).join("")}</select></div>
             <div class="col-md-6"><label class="form-label">Kas</label><select name="accountId" class="form-select">${accountOptions()}</select></div>
             <div class="col-12"><label class="form-label">Catatan</label><input name="note" class="form-control" placeholder="Contoh: cicilan pembayaran faktur"></div>
-          </div>`, (fd) => {
+          </div>`, async (fd) => {
+          const beforeWrite = JSON.parse(JSON.stringify(state));
           const amount = Math.min(row.due, Number(fd.get("amount")));
           row.due -= amount;
           row.paid = toNumber(row.paid) + amount;
@@ -4102,11 +4161,19 @@
           if (account) account.balance += type === "debt" ? -amount : amount;
           const payment = { id: uid("PAY"), date: fd.get("date"), refId: id, invoiceNo: row.invoiceNo || row.id, relation: relationNameValue, type: type === "debt" ? "Hutang" : "Piutang", amount, remaining: row.due, method: fd.get("method"), note: fd.get("note") };
           state.payments.unshift(payment);
-          saveState(`Pembayaran ${type === "debt" ? "hutang" : "piutang"} ${row.invoiceNo || id}`);
+          try {
+            await saveStateDurable(`Pembayaran ${type === "debt" ? "hutang" : "piutang"} ${row.invoiceNo || id}`);
+          } catch (error) {
+            restoreStateSnapshot(beforeWrite);
+            renderAll();
+            return toast("Pembayaran BELUM tersimpan. Form tetap dibuka; periksa penyimpanan perangkat lalu coba lagi.");
+          }
           closeModal();
           renderAll();
-          if (isDebt) printDebtPaymentReceipt(row, payment, returns);
-          else printReceivablePaymentReceipt(row, payment, returns);
+          toast("Pembayaran tersimpan aman di perangkat dan menunggu sinkronisasi server.");
+          const committedRow = (type === "debt" ? state.purchases : state.sales).find((item) => item.id === id) || row;
+          if (isDebt) printDebtPaymentReceipt(committedRow, payment, returns);
+          else printReceivablePaymentReceipt(committedRow, payment, returns);
         }, "Simpan & Cetak");
       }
       function openCashTxModal() {
@@ -4118,14 +4185,22 @@
             <div class="col-md-6"><label class="form-label">Kas</label><select name="accountId" class="form-select">${accountOptions()}</select></div>
             <div class="col-md-6"><label class="form-label">Nominal</label><input name="amount" type="text" inputmode="numeric" class="form-control" placeholder="Contoh: 1.000.000" required></div>
             <div class="col-12"><label class="form-label">Catatan</label><input name="note" class="form-control"></div>
-          </div>`, (fd) => {
+          </div>`, async (fd) => {
+          const beforeWrite = JSON.parse(JSON.stringify(state));
           const amount = toNumber(fd.get("amount"));
           const account = state.cashAccounts.find((a) => a.id === fd.get("accountId"));
           if (account) account.balance += fd.get("type") === "Masuk" ? amount : -amount;
           state.cashTx.unshift({ id: uid("CAS"), date: fd.get("date"), type: fd.get("type"), category: fd.get("category"), accountId: fd.get("accountId"), amount, note: fd.get("note") });
-          saveState("Transaksi kas ditambahkan");
+          try {
+            await saveStateDurable("Transaksi kas ditambahkan");
+          } catch (error) {
+            restoreStateSnapshot(beforeWrite);
+            renderAll();
+            return toast("Transaksi kas BELUM tersimpan. Form tetap dibuka dan saldo kas dikembalikan.");
+          }
           closeModal();
           renderAll();
+          toast("Transaksi kas tersimpan aman di perangkat dan menunggu sinkronisasi server.");
         });
       }
 
@@ -4774,7 +4849,8 @@
             <div class="col-md-3"><label class="form-label">Stock Fisik</label><input id="opnamePhysical" name="physicalStock" type="number" class="form-control" value="" required disabled></div>
             <div class="col-md-3"><label class="form-label">Selisih</label><input id="opnameDiff" name="difference" type="number" class="form-control" value="0" readonly></div>
             <div class="col-md-9"><label class="form-label">Keterangan / Catatan</label><input name="note" class="form-control"></div>
-          </div>`, (fd) => {
+          </div>`, async (fd) => {
+            const beforeWrite = JSON.parse(JSON.stringify(state));
             const product = findProduct(fd.get("productId"));
             if (!product) return toast("Pilih barang dari hasil pencarian terlebih dahulu.");
             const old = stockAkhirProduk(product);
@@ -4785,9 +4861,16 @@
             product.stock = Math.max(0, physical);
             product.stockAkhir = product.stock;
             state.stockMoves.unshift({ id: uid("STK"), number: fd.get("number"), date: fd.get("date"), productId: product.id, sku: product.code, productName: product.name, unit: fd.get("unit") || product.unit, type, systemStock: old, physicalStock: physical, difference: diff, qty: diff, note: fd.get("note") });
-            saveState(`Opname stok ${product.name}`);
+            try {
+              await saveStateDurable(`Opname stok ${product.name}`);
+            } catch (error) {
+              restoreStateSnapshot(beforeWrite);
+              renderAll();
+              return toast("Stok opname BELUM tersimpan. Perubahan stok dibatalkan dan form tetap dibuka.");
+            }
             closeModal();
             renderAll();
+            toast("Stok opname tersimpan aman di perangkat dan menunggu sinkronisasi server.");
           });
           const updateOpname = () => {
             const product = findProduct(document.getElementById("opnameProduct").value);
@@ -4832,7 +4915,8 @@
           document.getElementById("opnameProductSearch").focus();
           return;
         }
-        openModal(`${type} Stok`, `<div class="row g-3"><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div><div class="col-md-5"><label class="form-label">Produk</label><select name="productId" class="form-select">${productOptions()}</select></div><div class="col-md-3"><label class="form-label">Stok Baru</label><input name="qty" type="number" class="form-control" required></div><div class="col-12"><label class="form-label">Catatan</label><input name="note" class="form-control"></div></div>`, (fd) => {
+        openModal(`${type} Stok`, `<div class="row g-3"><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div><div class="col-md-5"><label class="form-label">Produk</label><select name="productId" class="form-select">${productOptions()}</select></div><div class="col-md-3"><label class="form-label">Stok Baru</label><input name="qty" type="number" class="form-control" required></div><div class="col-12"><label class="form-label">Catatan</label><input name="note" class="form-control"></div></div>`, async (fd) => {
+          const beforeWrite = JSON.parse(JSON.stringify(state));
           const product = findProduct(fd.get("productId"));
           const old = stockAkhirProduk(product);
           product.stock = Math.max(0, Number(fd.get("qty")));
@@ -4841,9 +4925,16 @@
           if (difference >= 0) product.stockIn = toNumber(product.stockIn) + difference;
           else product.stockOut = toNumber(product.stockOut) + Math.abs(difference);
           state.stockMoves.unshift({ id: uid("STK"), date: fd.get("date"), productId: product.id, productName: product.name, unit: product.unit, type, systemStock: old, physicalStock: product.stock, difference, qty: difference, note: fd.get("note") });
-          saveState(`${type} stok ${product.name}`);
+          try {
+            await saveStateDurable(`${type} stok ${product.name}`);
+          } catch (error) {
+            restoreStateSnapshot(beforeWrite);
+            renderAll();
+            return toast(`${type} stok BELUM tersimpan. Perubahan stok dibatalkan dan form tetap dibuka.`);
+          }
           closeModal();
           renderAll();
+          toast(`${type} stok tersimpan aman di perangkat dan menunggu sinkronisasi server.`);
         });
       }
       function openStockOpnameEditModal(moveId) {
@@ -4919,7 +5010,8 @@
           <div class="col-md-5"><label class="form-label">Jumlah Uang yang Dikembalikan</label><input id="returnRefundAmount" class="form-control fw-bold" value="" readonly><div class="form-text">Dihitung otomatis: Qty retur × harga produk pada transaksi.</div></div>
           <div class="col-md-4"><label class="form-label">Metode Retur</label><select name="method" class="form-select">${payMethods.map((m) => `<option>${m}</option>`).join("")}</select></div>
           <div class="col-md-5"><label class="form-label">Catatan/Alasan</label><input name="note" class="form-control" required></div>
-        </div>`, (fd) => {
+        </div>`, async (fd) => {
+          const beforeWrite = JSON.parse(JSON.stringify(state));
           const doc = documents.find((row) => row.id === fd.get("refId"));
           const item = doc?.items?.[Number(fd.get("itemIndex"))];
           const p = findProduct(item?.productId);
@@ -4943,8 +5035,14 @@
           doc.due = Math.max(0, toNumber(doc.due) - amount);
           state.returns.unshift({ id: uid("RET"), module, date: fd.get("date"), refId: doc.id, invoiceNo: doc.invoiceNo || doc.id, productId: p.id, product: p.name, qty, unit, primaryQty, amount, total: amount, method: fd.get("method"), note: fd.get("note") });
           state.stockMoves.unshift({ id: uid("STK"), date: fd.get("date"), productId: p.id, productName: p.name, unit, type: `Retur ${module}`, qty: primaryQty, note: `${doc.invoiceNo || doc.id}: ${qty} ${unit}. ${fd.get("note")}` });
-          saveState(`Retur ${module} ${doc.invoiceNo || doc.id} — ${p.name}`);
-          closeModal(); renderAll(); toast("Retur tersimpan di aplikasi dan masuk antrean sinkronisasi backend.");
+          try {
+            await saveStateDurable(`Retur ${module} ${doc.invoiceNo || doc.id} — ${p.name}`);
+          } catch (error) {
+            restoreStateSnapshot(beforeWrite);
+            renderAll();
+            return toast("Retur BELUM tersimpan. Perubahan stok dan tagihan dibatalkan; form tetap dibuka.");
+          }
+          closeModal(); renderAll(); toast("Retur tersimpan aman di perangkat dan menunggu sinkronisasi server.");
         });
         const searchInput = document.getElementById("returnDocumentSearch");
         const resultBox = document.getElementById("returnDocumentResults");

@@ -46,6 +46,11 @@
       payload: clone(payload || {}),
       baseRevision: String(options?.baseRevision || ""),
       deviceId: String(options?.deviceId || ""),
+      // v147 Write Core: all effects produced by one user action share one
+      // immutable commandId. The backend validates the whole command before
+      // applying its first business mutation.
+      commandId: String(options?.commandId || ""),
+      commandType: String(options?.commandType || ""),
       status: "pending",
       attempts: 0,
       createdAt: now,
@@ -117,8 +122,14 @@
     async due(limit, now) {
       const rows = await this.list(["pending", "failed", "sending"], 10000);
       const timestamp = Number(now || Date.now());
-      return rows.filter((row) => row.status !== "sending" || timestamp - Date.parse(row.updatedAt || 0) > 120000)
-        .filter((row) => Number(row.nextAttemptAt || 0) <= timestamp).slice(0, limit || 25);
+      const dueRows = rows.filter((row) => row.status !== "sending" || timestamp - Date.parse(row.updatedAt || 0) > 120000)
+        .filter((row) => Number(row.nextAttemptAt || 0) <= timestamp);
+      if (!dueRows.length) return [];
+      // Never split a v147 business command across HTTP requests. A sale with
+      // many line items can legitimately contain more than 25 child effects.
+      const firstCommandId = String(dueRows[0].commandId || "");
+      if (firstCommandId) return dueRows.filter((row) => String(row.commandId || "") === firstCommandId).slice(0, 100);
+      return dueRows.slice(0, limit || 25);
     }
     async mark(operationIds, status, extra) {
       const updates = [];

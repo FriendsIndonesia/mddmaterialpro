@@ -818,6 +818,10 @@
       // later, genuine conflicts never receive this treatment.
       const LEGACY_CONFLICT_DISPOSITION = "APPROVED_LEGACY_CONFLICT_DISPOSITION_V136";
       const PREVIOUS_OWNER_CONFLICT_DISPOSITION = "OWNER_APPROVED_LEGACY_CONFLICT_DISPOSITION_V135";
+      const WRITE_CORE_V148_RESET_MARKER = "WRITE_CORE_V148_BASELINE_RESET";
+      // Fixed production rollout cutoff: GitHub Pages v147 completed 28 Sep 2026 ~11:01 WIB.
+      // Only operations created on/before this instant are legacy and may be retired.
+      const WRITE_CORE_V148_RESET_CUTOFF = Date.parse("2026-09-28T04:01:00.000Z");
       // Marks the instant this device first proved it can read the immutable
       // production snapshot.  Only conflicts already present before that
       // instant are legacy; conflicts created later remain visible normally.
@@ -2117,6 +2121,9 @@
           });
           lastChangeCursor = String((await syncOutbox.getMeta("changeCursor")) || "");
           outboxReady = true;
+          // One-time production cleanup explicitly approved by Owner: retire only
+          // pre-v147 unresolved operations. New v147+ operations are never discarded.
+          await applyWriteCoreV148BaselineResetOnce();
           // Phase 1 deliberately does not invoke a new baseline or conflict
           // recovery. Existing business cache and durable outbox remain intact.
           operationSnapshot = JSON.parse(JSON.stringify(state));
@@ -2278,6 +2285,33 @@
         const unresolved = (await syncOutbox.list(["conflict"], 100000)).length;
         return { acknowledged, requeued, unresolved };
       }
+      async function applyWriteCoreV148BaselineResetOnce() {
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return { retired: 0, skipped: true };
+        if ((await syncOutbox.getMeta("writeCoreBaselineResetVersion")) === WRITE_CORE_V148_RESET_MARKER) {
+          return { retired: 0, alreadyApplied: true };
+        }
+        const legacyStatuses = ["pending", "sending", "failed", "conflict"];
+        const rows = await syncOutbox.list(legacyStatuses, 1000000);
+        const legacy = rows.filter((row) => {
+          const createdAt = Date.parse(row.createdAt || 0);
+          return !Number.isFinite(createdAt) || createdAt <= WRITE_CORE_V148_RESET_CUTOFF;
+        });
+        if (legacy.length) {
+          const now = new Date().toISOString();
+          await syncOutbox.mark(legacy.map((row) => row.operationId), "retired", {
+            retiredAt: now,
+            retiredReason: "owner-approved-pre-v147-baseline-discard",
+            writeCoreBaseline: WRITE_CORE_V148_RESET_MARKER,
+            retainedForAudit: false,
+            lastError: ""
+          });
+        }
+        await syncOutbox.setMeta("writeCoreBaselineResetVersion", WRITE_CORE_V148_RESET_MARKER);
+        await syncOutbox.setMeta("writeCoreBaselineResetCompletedAt", new Date().toISOString());
+        await syncOutbox.setMeta("writeCoreBaselineResetRetiredCount", legacy.length);
+        return { retired: legacy.length, alreadyApplied: false };
+      }
+
       async function disposeApprovedLegacyConflictsOnce() {
         // This is not a general conflict resolver. It runs once per device for
         // the explicitly approved legacy backlog. Every affected operation is

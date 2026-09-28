@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 149;
+      const APP_VERSION = 151;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -2587,12 +2587,12 @@
         clearInterval(autoPullTimer);
         // Lima detik cukup responsif untuk tiga perangkat, tetapi jauh lebih aman
         // terhadap kuota Apps Script dibanding polling setiap 1,5 detik.
-        autoPullTimer = setInterval(refreshGoogleWorkspaceState, 30000);
-        window.onfocus = () => { refreshAuthoritativeProductionSnapshot(); refreshGoogleWorkspaceState(); };
+        autoPullTimer = setInterval(refreshGoogleWorkspaceState, 120000);
+        window.onfocus = () => { if (isDashboardViewActive()) refreshAuthoritativeProductionSnapshot(); };
         window.ononline = () => { queueGoogleWorkspaceSync(); refreshAuthoritativeProductionSnapshot(); };
         // Pemeriksaan kesehatan tidak menghalangi login atau pekerjaan user.
         checkApplicationHealth();
-        setInterval(checkApplicationHealth, 60000);
+        setInterval(checkApplicationHealth, 300000);
       }
       function renderNav() {
         document.getElementById("mainNav").innerHTML = navItems.filter(([view]) => canAccessView(view)).map(([view, icon, label]) => `<button class="nav-link ${document.querySelector(".view-section.active")?.id === view ? "active" : ""}" data-view="${view}" type="button"><i class="bi ${icon}"></i>${label}</button>`).join("");
@@ -5593,7 +5593,7 @@
         if (!response?.ok) return { acknowledged: [], conflicts: [], manualReview: [], pending: operations.map((row) => row.operationId) };
         return MDDSyncV2.classifyReconciliation(response, operations);
       }
-      async function waitForOperationAcknowledgements(operationIds, timeoutMs = 90000) {
+      async function waitForOperationAcknowledgements(operationIds, timeoutMs = 15000) {
         const startedAt = Date.now();
         let delayMs = 2000;
         while (Date.now() - startedAt < timeoutMs) {

@@ -820,6 +820,7 @@
       const PREVIOUS_OWNER_CONFLICT_DISPOSITION = "OWNER_APPROVED_LEGACY_CONFLICT_DISPOSITION_V135";
       const WRITE_CORE_V148_RESET_MARKER = "WRITE_CORE_V148_BASELINE_RESET";
       const WRITE_CORE_V149_EMERGENCY_QUEUE_RESET = "WRITE_CORE_V149_EMERGENCY_QUEUE_RESET";
+      const WRITE_CORE_V150_GLOBAL_DIFF_FUSE_RESET = "WRITE_CORE_V150_GLOBAL_DIFF_FUSE_RESET";
       // Fixed production rollout cutoff: GitHub Pages v147 completed 28 Sep 2026 ~11:01 WIB.
       // Only operations created on/before this instant are legacy and may be retired.
       const WRITE_CORE_V148_RESET_CUTOFF = Date.parse("2026-09-28T04:01:00.000Z");
@@ -1250,10 +1251,46 @@
         if (Object.keys(settings).length) operations.push(MDDSyncV2.makeOperation("settings", "settings", "settings", { settings }, { baseRevision: lastBackendRevision, deviceId: syncDeviceId, commandId, commandType }));
         return operations;
       }
+      function v150AllowedMutationTables(action) {
+        const a = String(action || "").toLowerCase();
+        // v150 invariant: a user action may only emit effects from its own bounded domain.
+        // Server hydration or unrelated cached modules can never leak into the command.
+        if (a.includes("penjualan") || a.includes("invoice pending")) return new Set(["sales", "products", "stockMoves", "payments", "pendingSales"]);
+        if (a.includes("pembelian")) return new Set(["purchases", "products", "stockMoves", "payments", "pendingPurchases"]);
+        if (a.includes("pembayaran hutang") || a.includes("pembayaran piutang") || a.includes("pembayaran hutang-piutang")) return new Set(["payments", "sales", "purchases", "cashTx"]);
+        if (a.includes("data hutang")) return new Set(["purchases"]);
+        if (a.includes("data piutang")) return new Set(["sales"]);
+        if (a.includes("transaksi kas")) return new Set(["cashTx"]);
+        if (a.includes("retur")) return new Set(["returns", "products", "stockMoves", "sales", "purchases"]);
+        if (a.includes("opname stok") || a.includes("stok ")) return new Set(["products", "stockMoves"]);
+        if (a.includes("konversi produk") || a.includes("produksi paket")) return new Set(["products", "stockMoves", "packages"]);
+        if (a.includes("barang baru") || a.includes("produk ")) return new Set(["products", "stockMoves"]);
+        if (a.includes("karyawan")) return new Set(["employees"]);
+        if (a.includes("master kas")) return new Set(["cashAccounts"]);
+        if (a.includes("pelanggan")) return new Set(["customers"]);
+        if (a.includes("supplier")) return new Set(["suppliers"]);
+        if (a.includes("kategori")) return new Set(["categories"]);
+        if (a.includes("diskon")) return new Set(["discounts"]);
+        return null;
+      }
+      function v150FilterOperationsForAction(operations, action) {
+        const allowed = v150AllowedMutationTables(action);
+        if (!allowed) return operations;
+        return operations.filter((op) => allowed.has(String(op.entity || op.table || op.entityType || "")) || String(op.type || "") === "settings");
+      }
       function captureOperations(action) {
         if (baselineInProgress) return Promise.resolve([]);
         const candidateSnapshot = JSON.parse(JSON.stringify(state));
-        const operations = buildOperationsFromState(operationSnapshot || state, candidateSnapshot, action);
+        const rawOperations = buildOperationsFromState(operationSnapshot || state, candidateSnapshot, action);
+        const operations = v150FilterOperationsForAction(rawOperations, action);
+        // Hard safety fuse: one UI action must never enqueue a database-sized echo.
+        // A legitimate sale/purchase can have multiple effects, but hundreds indicate
+        // contaminated global diff. Fail closed instead of flooding production.
+        if (operations.length > 120) {
+          const error = new Error(`V150_GLOBAL_DIFF_FUSE: ${operations.length} operasi ditolak untuk satu aksi`);
+          setBackendSyncBanner("danger", "WRITE BLOCKED • perubahan tidak dikirim karena terdeteksi antrean abnormal");
+          return Promise.reject(error);
+        }
         if (!operations.length) {
           operationSnapshot = candidateSnapshot;
           return Promise.resolve([]);
@@ -2130,6 +2167,7 @@
           // pre-v147 unresolved operations. New v147+ operations are never discarded.
           await applyWriteCoreV148BaselineResetOnce();
           await applyWriteCoreV149EmergencyQueueResetOnce();
+          await applyWriteCoreV150GlobalDiffFuseResetOnce();
           // Phase 1 deliberately does not invoke a new baseline or conflict
           // recovery. Existing business cache and durable outbox remain intact.
           operationSnapshot = JSON.parse(JSON.stringify(state));
@@ -2290,6 +2328,22 @@
         if (requeued) queueGoogleWorkspaceSync();
         const unresolved = (await syncOutbox.list(["conflict"], 100000)).length;
         return { acknowledged, requeued, unresolved };
+      }
+      async function applyWriteCoreV150GlobalDiffFuseResetOnce() {
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return { retired: 0, skipped: true };
+        if ((await syncOutbox.getMeta("writeCoreV150GlobalDiffFuseReset")) === WRITE_CORE_V150_GLOBAL_DIFF_FUSE_RESET) return { retired: 0, alreadyApplied: true };
+        const rows = await syncOutbox.list(["pending", "sending", "failed", "conflict"], 1000000);
+        if (rows.length) await syncOutbox.mark(rows.map((row) => row.operationId), "retired", {
+          retiredAt: new Date().toISOString(),
+          retiredReason: "v150-global-diff-fuse-cutover",
+          retainedForAudit: false,
+          lastError: ""
+        });
+        await syncOutbox.setMeta("writeCoreV150GlobalDiffFuseReset", WRITE_CORE_V150_GLOBAL_DIFF_FUSE_RESET);
+        await syncOutbox.setMeta("writeCoreV150GlobalDiffFuseResetAt", new Date().toISOString());
+        await syncOutbox.setMeta("writeCoreV150GlobalDiffFuseResetCount", rows.length);
+        operationSnapshot = JSON.parse(JSON.stringify(state));
+        return { retired: rows.length, alreadyApplied: false };
       }
       async function applyWriteCoreV149EmergencyQueueResetOnce() {
         if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return { retired: 0, skipped: true };
@@ -3464,6 +3518,7 @@
         if (isCashMethod(method) && toNumber(saleDraft.cashReceived) < total) return toast("Uang diterima kurang dari Total Transaksi.");
         saleCheckoutBusy = true;
         const writeCoreStateBefore = JSON.parse(JSON.stringify(state));
+        operationSnapshot = JSON.parse(JSON.stringify(writeCoreStateBefore));
         const writeCoreCartBefore = structuredClone(activeCart);
         const previousSale = editingSaleId ? state.sales.find((item) => item.id === editingSaleId) : null;
         if (previousSale) {
@@ -3710,6 +3765,7 @@
         if (isDpPurchase && (purchaseDraft.dp <= 0 || purchaseDraft.dp >= total)) return toast("DP harus lebih dari Rp 0 dan lebih kecil dari Total Transaksi.");
         purchaseCheckoutBusy = true;
         const writeCoreStateBefore = JSON.parse(JSON.stringify(state));
+        operationSnapshot = JSON.parse(JSON.stringify(writeCoreStateBefore));
         const writeCoreCartBefore = structuredClone(purchaseCart);
         const previousPurchase = editingPurchaseId ? state.purchases.find((item) => item.id === editingPurchaseId) : null;
         if (previousPurchase) {
@@ -4640,7 +4696,13 @@
         return genericTable(rows.map((x) => ({ tanggal: x.date, jenis: x.type, kategori: x.category, kas: personName(state.cashAccounts, x.accountId), nominal: x.amount, catatan: x.note })), ["tanggal", "jenis", "kategori", "kas", "nominal", "catatan"]);
       }
 
+      function beginUserMutationBaseline() {
+        // v150: snapshot the fully hydrated current state BEFORE the user mutates it.
+        // This severs writes from any prior server-read/cache drift.
+        operationSnapshot = JSON.parse(JSON.stringify(state));
+      }
       function openModal(title, body, submit, submitLabel = "Simpan") {
+        beginUserMutationBaseline();
         modalSubmitting = false;
         document.getElementById("modalSubmitBtn").disabled = false;
         document.getElementById("modalTitle").textContent = title;

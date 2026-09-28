@@ -1,6 +1,6 @@
 // Shell cache only.  Business data, the durable outbox, localStorage and
 // IndexedDB are deliberately outside Cache Storage and are never deleted here.
-const CACHE_NAME = "mdd-material-pro-v149-server-read-echo-fix";
+const CACHE_NAME = "mdd-material-pro-v150-global-diff-fuse";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

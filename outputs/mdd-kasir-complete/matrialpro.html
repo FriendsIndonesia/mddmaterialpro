@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 151;
+      const APP_VERSION = 154;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -1314,12 +1314,24 @@
         Object.assign(state, JSON.parse(JSON.stringify(snapshot)));
       }
       async function saveStateDurable(action) {
-        // Write Core v147: IndexedDB outbox adalah gerbang durability. UI kritis
-        // tidak boleh menganggap transaksi tersimpan sebelum langkah ini sukses.
-        const operations = await captureOperations(action);
-        if (action) addHistory(action);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        return operations;
+        // v154 final durability gate:
+        // UI/business state is provisional until the IndexedDB outbox commit succeeds.
+        // If durable enqueue fails, restore the exact pre-command snapshot so the
+        // screen cannot show a mutation that has no recoverable outbox record.
+        const beforeCommand = JSON.parse(JSON.stringify(operationSnapshot || state));
+        try {
+          const operations = await captureOperations(action);
+          if (action) addHistory(action);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          return operations;
+        } catch (error) {
+          restoreStateSnapshot(beforeCommand);
+          operationSnapshot = JSON.parse(JSON.stringify(beforeCommand));
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          renderAll();
+          setBackendSyncBanner("danger", "SIMPAN DIBATALKAN • penyimpanan aman perangkat gagal, perubahan dikembalikan");
+          throw error;
+        }
       }
       function saveState(action, options = {}) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -1400,9 +1412,9 @@
           if (isDashboardViewActive()) return setBackendSyncBanner("warning", "Data Dashboard belum dapat dimuat dari server");
           return setBackendSyncBanner("success", "ONLINE - MODULES READY");
         }
-        if (conflicts.length) return setBackendSyncBanner("danger", `CONFLICT • ${conflicts.length} data perlu diperiksa`);
-        if (forcedStatus === "syncing" || pending.some((row) => row.status === "sending")) return setBackendSyncBanner("warning", `SYNCING • ${pending.length} DATA PENDING`);
-        if (pending.length) return setBackendSyncBanner(pending.some((row) => row.status === "failed") ? "danger" : "warning", `${pending.length} DATA PENDING${pending.some((row) => row.status === "failed") ? " • SYNC ERROR" : ""}`);
+        if (conflicts.length) return setBackendSyncBanner("danger", `PERLU TINDAKAN • ${conflicts.length} perubahan perlu diperiksa`);
+        if (forcedStatus === "syncing" || pending.some((row) => row.status === "sending")) return setBackendSyncBanner("warning", `SYNCING • ${pending.length} MENUNGGU SINKRONISASI`);
+        if (pending.length) return setBackendSyncBanner(pending.some((row) => row.status === "failed") ? "danger" : "warning", `${pending.length} MENUNGGU SINKRONISASI${pending.some((row) => row.status === "failed") ? " • AKAN DICOBA LAGI" : ""}`);
         setBackendSyncBanner("success", "ONLINE - SYNCED");
       }
 
@@ -3296,24 +3308,24 @@
         document.querySelectorAll("[data-edit-pending-sale]").forEach((btn) => btn.onclick = () => loadPendingSale(btn.dataset.editPendingSale, false));
         document.querySelectorAll("[data-delete-pending-sale]").forEach((btn) => btn.onclick = () => deletePendingSale(btn.dataset.deletePendingSale));
       }
-      function loadPendingSale(id, payNow) {
+      async function loadPendingSale(id, payNow) {
         const pending = state.pendingSales.find((p) => p.id === id);
         if (!pending) return toast("Invoice pending tidak ditemukan.");
         activeCart = structuredClone(pending.items || []);
         saleDraft = { invoiceNo: pending.invoiceNo, date: transactionDateKey(pending.date) || today(), ongkir: pending.ongkir || 0, discount: pending.discount || 0, dp: pending.dp || 0, cashReceived: pending.dp || pending.cashReceived || 0, note: pending.note || "", method: toNumber(pending.dp) > 0 ? "DP (Uang Muka)" : (pending.method || "Cash"), customerId: pending.customerId || "", customerName: pending.customerName || "", customerType: pending.customerType || "", customerAddress: pending.customerAddress || "", customerWhatsapp: pending.customerWhatsapp || "" };
         markExplicitDeletion("pendingSales", id);
         state.pendingSales = state.pendingSales.filter((p) => p.id !== id);
-        saveState(`${payNow ? "Lanjut bayar" : "Edit"} invoice pending ${pending.invoiceNo || id}`);
+        await saveStateDurable(`${payNow ? "Lanjut bayar" : "Edit"} invoice pending ${pending.invoiceNo || id}`);
         renderAll();
         if (payNow) toast("Invoice pending dimuat. Klik Simpan & Bayar setelah pembayaran diterima.");
       }
-      function deletePendingSale(id) {
+      async function deletePendingSale(id) {
         const pending = state.pendingSales.find((p) => p.id === id);
         if (!pending) return toast("Invoice pending tidak ditemukan.");
         if (!confirm(`Hapus invoice pending ${pending.invoiceNo || id}?`)) return;
         markExplicitDeletion("pendingSales", id);
         state.pendingSales = state.pendingSales.filter((p) => p.id !== id);
-        saveState(`Invoice pending ${pending.invoiceNo || id} dihapus`);
+        await saveStateDurable(`Invoice pending ${pending.invoiceNo || id} dihapus`);
         renderAll();
       }
       function bindCompletedSalesActions() {
@@ -3351,7 +3363,7 @@
       function editReturnTransaction(id) {
         const row = state.returns.find((item) => item.id === id);
         if (!row) return toast("Data retur tidak ditemukan.");
-        openModal(`Edit ${row.module === "Penjualan" ? "Retur Penjualan" : "Retur Pembelian"}`, `<div class="row g-3"><div class="col-md-6"><label class="form-label">No. Transaksi/Faktur</label><input class="form-control" value="${esc(row.invoiceNo || row.refId || "-")}" readonly></div><div class="col-md-6"><label class="form-label">Produk</label><input class="form-control" value="${esc(row.product || findProduct(row.productId)?.name || "-")}" readonly></div><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${esc(String(row.date || today()).slice(0, 10))}" class="form-control" required></div><div class="col-md-4"><label class="form-label">Qty</label><input class="form-control" value="${esc(number.format(toNumber(row.qty)))} ${esc(row.unit || "")}" readonly></div><div class="col-md-4"><label class="form-label">Nilai Retur</label><input class="form-control" value="${esc(idr.format(toNumber(row.total || row.amount)))}" readonly></div><div class="col-md-6"><label class="form-label">Metode Retur</label><select name="method" class="form-select">${payMethods.map((method) => `<option ${method === row.method ? "selected" : ""}>${method}</option>`).join("")}</select></div><div class="col-md-6"><label class="form-label">Catatan/Alasan</label><input name="note" class="form-control" value="${esc(row.note || "")}" required></div></div>`, (fd) => { row.date = fd.get("date"); row.method = fd.get("method"); row.note = String(fd.get("note") || "").trim(); state.syncQueue.push({ type: "return", id: row.id }); saveState(`${row.module === "Penjualan" ? "Retur penjualan" : "Retur pembelian"} ${row.invoiceNo || row.id} diperbarui`); closeModal(); renderAll(); toast("Data retur diperbarui dan masuk antrean sinkronisasi backend."); }, "Simpan Perubahan");
+        openModal(`Edit ${row.module === "Penjualan" ? "Retur Penjualan" : "Retur Pembelian"}`, `<div class="row g-3"><div class="col-md-6"><label class="form-label">No. Transaksi/Faktur</label><input class="form-control" value="${esc(row.invoiceNo || row.refId || "-")}" readonly></div><div class="col-md-6"><label class="form-label">Produk</label><input class="form-control" value="${esc(row.product || findProduct(row.productId)?.name || "-")}" readonly></div><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${esc(String(row.date || today()).slice(0, 10))}" class="form-control" required></div><div class="col-md-4"><label class="form-label">Qty</label><input class="form-control" value="${esc(number.format(toNumber(row.qty)))} ${esc(row.unit || "")}" readonly></div><div class="col-md-4"><label class="form-label">Nilai Retur</label><input class="form-control" value="${esc(idr.format(toNumber(row.total || row.amount)))}" readonly></div><div class="col-md-6"><label class="form-label">Metode Retur</label><select name="method" class="form-select">${payMethods.map((method) => `<option ${method === row.method ? "selected" : ""}>${method}</option>`).join("")}</select></div><div class="col-md-6"><label class="form-label">Catatan/Alasan</label><input name="note" class="form-control" value="${esc(row.note || "")}" required></div></div>`, async (fd) => { row.date = fd.get("date"); row.method = fd.get("method"); row.note = String(fd.get("note") || "").trim(); state.syncQueue.push({ type: "return", id: row.id }); await saveStateDurable(`${row.module === "Penjualan" ? "Retur penjualan" : "Retur pembelian"} ${row.invoiceNo || row.id} diperbarui`); closeModal(); renderAll(); toast("Data retur diperbarui dan masuk antrean sinkronisasi backend."); }, "Simpan Perubahan");
       }
       function editReportTransaction(key) {
         const separator = String(key || "").indexOf(":");
@@ -3487,7 +3499,7 @@
           renderAll();
         });
       }
-      function pendingSale() {
+      async function pendingSale() {
         if (!activeCart.length) return toast("Keranjang masih kosong.");
         updateSaleDraftTotals();
         updateSaleCustomerDraft();
@@ -3495,7 +3507,7 @@
         state.pendingSales.unshift({ id: uid("PSO"), invoiceNo: saleDraft.invoiceNo, date: document.getElementById("saleDate").value || today(), customerId: customer.id, customerName: customer.name, customerType: customer.type, customerAddress: customer.address, customerWhatsapp: customer.whatsapp, method: saleDraft.method, items: structuredClone(activeCart), ongkir: saleDraft.ongkir, discount: saleDraft.discount, dp: saleDraft.dp, bankCharge: 0, cashReceived: saleDraft.cashReceived, change: saleCashChange(), note: saleDraft.note, total: saleGrandTotal() });
         activeCart = [];
         resetSaleDraft();
-        saveState("Pending penjualan dibuat");
+        await saveStateDurable("Pending penjualan dibuat");
         renderAll();
         toast("Pesanan penjualan disimpan sebagai pending.");
       }
@@ -3734,14 +3746,14 @@
         document.getElementById("purchaseRemainingPayment").textContent = idr.format(purchaseRemainingPayment());
         document.getElementById("purchasePaymentFormula").textContent = isCashMethod(purchaseDraft.method) ? `${idr.format(purchaseDraft.cashReceived)} − ${idr.format(purchaseGrandTotal())} = ${idr.format(purchaseCashChange())}` : isDownPaymentMethod(purchaseDraft.method) ? `${idr.format(purchaseGrandTotal())} − ${idr.format(purchaseDraft.cashReceived)} = ${idr.format(purchaseRemainingPayment())}` : "Perhitungan pembayaran mengikuti metode bayar.";
       }
-      function pendingPurchase() {
+      async function pendingPurchase() {
         if (!purchaseCart.length) return toast("Keranjang pembelian kosong.");
         updatePurchaseDraftTotals();
         const supplier = selectedSupplierData(purchaseDraft.supplierId);
         state.pendingPurchases.unshift({ id: uid("PPO"), invoiceNo: purchaseDraft.invoiceNo, supplierInvoiceNo: purchaseDraft.supplierInvoiceNo, date: document.getElementById("purchaseDate").value || today(), dueDate: purchaseDraft.dueDate, supplierId: purchaseDraft.supplierId, salesName: supplier.name || purchaseDraft.salesName, company: purchaseDraft.company || supplier.company || "", whatsapp: purchaseDraft.whatsapp || supplier.phone || "", method: purchaseDraft.method, items: structuredClone(purchaseCart), ongkir: purchaseDraft.ongkir, discount: purchaseDraft.discount, dp: purchaseDraft.dp, bankCharge: purchaseDraft.bankCharge, cashReceived: purchaseDraft.cashReceived, change: purchaseCashChange(), note: purchaseDraft.note, total: purchaseGrandTotal() });
         purchaseCart = [];
         resetPurchaseDraft();
-        saveState("Pending pembelian dibuat");
+        await saveStateDurable("Pending pembelian dibuat");
         renderAll();
       }
       let purchaseCheckoutBusy = false;
@@ -3999,7 +4011,7 @@
         const selected = selectedFinancePaymentRows();
         if (!selected.length) return toast("Pilih minimal satu hutang atau piutang.");
         const selectedTotal = selected.reduce((sum, item) => sum + toNumber(item.row.due), 0);
-        openModal("Pembayaran Hutang-Piutang Terpilih", `<div class="row g-3"><div class="col-12"><div class="audit-box"><strong>Jumlah Total Hutang/Piutang yang Harus Dibayarkan: ${idr.format(selectedTotal)}</strong></div></div><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control" required></div><div class="col-md-4"><label class="form-label">Metode</label><select name="method" class="form-select">${payMethods.map((method) => `<option>${method}</option>`).join("")}</select></div><div class="col-md-4"><label class="form-label">Kas</label><select name="accountId" class="form-select">${accountOptions()}</select></div><div class="col-12"><div class="table-responsive"><table class="table"><thead><tr><th>Jenis</th><th>Faktur</th><th>Nama</th><th>Rincian Produk/Barang</th><th class="text-end">Sisa</th><th>Nominal Bayar</th></tr></thead><tbody>${selected.map(({ type, row }) => `<tr><td>${type === "debt" ? "Hutang" : "Piutang"}</td><td>${esc(row.invoiceNo || row.id)}</td><td>${esc(type === "debt" ? (row.company || row.salesName || personName(state.suppliers, row.supplierId)) : (row.customerName || personName(state.customers, row.customerId)))}</td><td>${transactionItemDetails(row)}</td><td class="text-end">${idr.format(row.due)}</td><td><input name="amount:${type}:${row.id}" type="number" min="1" max="${row.due}" value="${row.due}" class="form-control" required></td></tr>`).join("")}</tbody></table></div></div><div class="col-12"><label class="form-label">Catatan</label><input name="note" class="form-control" placeholder="Pembayaran sekaligus"></div></div>`, (fd) => {
+        openModal("Pembayaran Hutang-Piutang Terpilih", `<div class="row g-3"><div class="col-12"><div class="audit-box"><strong>Jumlah Total Hutang/Piutang yang Harus Dibayarkan: ${idr.format(selectedTotal)}</strong></div></div><div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control" required></div><div class="col-md-4"><label class="form-label">Metode</label><select name="method" class="form-select">${payMethods.map((method) => `<option>${method}</option>`).join("")}</select></div><div class="col-md-4"><label class="form-label">Kas</label><select name="accountId" class="form-select">${accountOptions()}</select></div><div class="col-12"><div class="table-responsive"><table class="table"><thead><tr><th>Jenis</th><th>Faktur</th><th>Nama</th><th>Rincian Produk/Barang</th><th class="text-end">Sisa</th><th>Nominal Bayar</th></tr></thead><tbody>${selected.map(({ type, row }) => `<tr><td>${type === "debt" ? "Hutang" : "Piutang"}</td><td>${esc(row.invoiceNo || row.id)}</td><td>${esc(type === "debt" ? (row.company || row.salesName || personName(state.suppliers, row.supplierId)) : (row.customerName || personName(state.customers, row.customerId)))}</td><td>${transactionItemDetails(row)}</td><td class="text-end">${idr.format(row.due)}</td><td><input name="amount:${type}:${row.id}" type="number" min="1" max="${row.due}" value="${row.due}" class="form-control" required></td></tr>`).join("")}</tbody></table></div></div><div class="col-12"><label class="form-label">Catatan</label><input name="note" class="form-control" placeholder="Pembayaran sekaligus"></div></div>`, async (fd) => {
           let processed = 0;
           selected.forEach(({ type, row }) => {
             const amount = Math.min(toNumber(row.due), toNumber(fd.get(`amount:${type}:${row.id}`)));
@@ -4015,7 +4027,7 @@
           });
           if (!processed) return toast("Nominal pembayaran tidak valid.");
           financeBulkSelection.clear();
-          saveState(`${processed} pembayaran hutang-piutang diproses sekaligus`);
+          await saveStateDurable(`${processed} pembayaran hutang-piutang diproses sekaligus`);
           closeModal();
           renderAll();
           toast(`${processed} transaksi pembayaran berhasil disimpan.`);
@@ -4081,7 +4093,7 @@
             <div class="col-md-3"><label class="form-label">Retur</label><input id="manualDebtReturn" name="returnAmount" type="number" min="0" value="${Number(editing?.returnAmount || 0)}" class="form-control"></div>
             <div class="col-md-3"><label class="form-label">Bayar</label><input id="manualDebtPaid" name="paid" type="number" min="0" value="" placeholder="Pembayaran baru" class="form-control"></div>
             <div class="col-12"><p class="small text-secondary mb-0">Supplier bisa dipilih dari Master Supplier, atau diketik manual ketika data berasal dari backend/spreadsheet.</p></div>
-          </div>`, (fd) => {
+          </div>`, async (fd) => {
           const supplierId = fd.get("supplierId");
           const supplier = selectedSupplierData(supplierId);
           const total = Number(fd.get("total") || 0);
@@ -4093,7 +4105,7 @@
           Object.assign(row, { invoiceNo: fd.get("invoiceNo"), date: fd.get("date"), dueDate: fd.get("dueDate"), supplierId, salesName: fd.get("supplier") || supplier.name || "-", company: supplier.company || row.company || "", whatsapp: supplier.phone || row.whatsapp || "", method: "Hutang", status: due > 0 ? "Hutang" : "Lunas", total, due, paid, returnAmount });
           if (!selectedDebtRecord) state.purchases.unshift(row);
           if (newPayment > 0) state.payments.unshift({ id: uid("PAY"), date: fd.get("date"), refId: row.id, invoiceNo: row.invoiceNo, relation: row.salesName, type: "Hutang", amount: newPayment, remaining: due, method: "Input Data", note: "Pembayaran hutang baru" });
-          saveState(`Data hutang ${row.invoiceNo} ${editing ? "diperbarui" : "ditambahkan"}`);
+          await saveStateDurable(`Data hutang ${row.invoiceNo} ${editing ? "diperbarui" : "ditambahkan"}`);
           closeModal();
           renderAll();
         });
@@ -4145,7 +4157,7 @@
         ["manualDebtTotal", "manualDebtPaid", "manualDebtReturn"].forEach((id) => document.getElementById(id).addEventListener("input", syncDebtDue));
         if (!editing) syncDebtDue();
       }
-      function deleteDebtRecord(debtId) {
+      async function deleteDebtRecord(debtId) {
         const debt = state.purchases.find((p) => p.id === debtId);
         if (!debt) return toast("Data hutang tidak ditemukan.");
         if (!confirm(`Hapus data hutang ${debt.invoiceNo || debt.id}?`)) return;
@@ -4153,7 +4165,7 @@
         state.payments.filter((payment) => payment.refId === debtId).forEach((payment) => markExplicitDeletion("payments", payment.id));
         state.purchases = state.purchases.filter((p) => p.id !== debtId);
         state.payments = state.payments.filter((payment) => payment.refId !== debtId);
-        saveState(`Data hutang ${debt.invoiceNo || debt.id} dihapus`);
+        await saveStateDurable(`Data hutang ${debt.invoiceNo || debt.id} dihapus`);
         renderAll();
         toast("Data hutang sudah dihapus.");
       }
@@ -4174,7 +4186,7 @@
             <div class="col-md-3"><label class="form-label">Retur</label><input id="manualReceivableReturn" name="returnAmount" type="number" min="0" value="${Number(editing?.returnAmount || 0)}" class="form-control"></div>
             <div class="col-md-3"><label class="form-label">Bayar</label><input id="manualReceivablePaid" name="paid" type="number" min="0" value="" placeholder="Pembayaran baru" class="form-control"></div>
             <div class="col-12"><p class="small text-secondary mb-0">Pelanggan bisa dipilih dari Master Pelanggan, atau diketik manual ketika data berasal dari backend/spreadsheet.</p></div>
-          </div>`, (fd) => {
+          </div>`, async (fd) => {
           const customerId = fd.get("customerId");
           const customer = state.customers.find((c) => c.id === customerId) || {};
           const total = Number(fd.get("total") || 0);
@@ -4186,7 +4198,7 @@
           Object.assign(row, { invoiceNo: fd.get("invoiceNo"), date: fd.get("date"), dueDate: fd.get("dueDate"), customerId, customerName: fd.get("customer") || customer.name || "-", customerType: customer.type || row.customerType || "", customerAddress: customer.address || row.customerAddress || "", customerWhatsapp: customer.phone || customer.whatsapp || row.customerWhatsapp || "", method: "Piutang", status: due > 0 ? "Piutang" : "Lunas", total, due, paid, returnAmount });
           if (!selectedReceivableRecord) state.sales.unshift(row);
           if (newPayment > 0) state.payments.unshift({ id: uid("PAY"), date: fd.get("date"), refId: row.id, invoiceNo: row.invoiceNo, relation: row.customerName, type: "Piutang", amount: newPayment, remaining: due, method: "Input Data", note: "Pembayaran piutang baru" });
-          saveState(`Data piutang ${row.invoiceNo} ${editing ? "diperbarui" : "ditambahkan"}`);
+          await saveStateDurable(`Data piutang ${row.invoiceNo} ${editing ? "diperbarui" : "ditambahkan"}`);
           closeModal();
           renderAll();
         });
@@ -4238,7 +4250,7 @@
         ["manualReceivableTotal", "manualReceivablePaid", "manualReceivableReturn"].forEach((id) => document.getElementById(id).addEventListener("input", syncReceivableDue));
         if (!editing) syncReceivableDue();
       }
-      function deleteReceivableRecord(receivableId) {
+      async function deleteReceivableRecord(receivableId) {
         const receivable = state.sales.find((s) => s.id === receivableId);
         if (!receivable) return toast("Data piutang tidak ditemukan.");
         if (!confirm(`Hapus data piutang ${receivable.invoiceNo || receivable.id}?`)) return;
@@ -4246,7 +4258,7 @@
         state.payments.filter((payment) => payment.refId === receivableId).forEach((payment) => markExplicitDeletion("payments", payment.id));
         state.sales = state.sales.filter((s) => s.id !== receivableId);
         state.payments = state.payments.filter((payment) => payment.refId !== receivableId);
-        saveState(`Data piutang ${receivable.invoiceNo || receivable.id} dihapus`);
+        await saveStateDurable(`Data piutang ${receivable.invoiceNo || receivable.id} dihapus`);
         renderAll();
         toast("Data piutang sudah dihapus.");
       }
@@ -4584,14 +4596,14 @@
         if (type === "cashAccounts") return openCashAccountModal(id);
       }
 
-      function deleteMasterRecord(type, id) {
+      async function deleteMasterRecord(type, id) {
         if (type === "products") return deleteProduct(id);
         const labels = { customers: "pelanggan", suppliers: "supplier", employees: "karyawan", categories: "kategori", packages: "paket", stockMoves: "stok opname", cashAccounts: "kas" };
         if (!state[type]) return toast("Data tidak ditemukan.");
         if (!confirm(`Hapus data ${labels[type] || "master"} ini?`)) return;
         markExplicitDeletion(type, id);
         state[type] = state[type].filter((item) => item.id !== id);
-        saveState(`Data ${labels[type] || "master"} dihapus`);
+        await saveStateDurable(`Data ${labels[type] || "master"} dihapus`);
         renderAll();
         toast("Data master sudah dihapus.");
       }
@@ -4723,7 +4735,7 @@
         document.querySelectorAll("[data-edit-product]").forEach((btn) => btn.onclick = () => openProductModal(btn.dataset.editProduct));
         document.querySelectorAll("[data-delete-product]").forEach((btn) => btn.onclick = () => deleteProduct(btn.dataset.deleteProduct));
       }
-      function deleteProduct(productId) {
+      async function deleteProduct(productId) {
         const product = state.products.find((p) => p.id === productId);
         if (!product) return toast("Produk tidak ditemukan.");
         if (!confirm(`Hapus produk ${product.name} dari daftar produk material?`)) return;
@@ -4731,11 +4743,11 @@
         state.products = state.products.filter((p) => p.id !== productId);
         activeCart = activeCart.filter((item) => item.productId !== productId);
         purchaseCart = purchaseCart.filter((item) => item.productId !== productId);
-        saveState(`Produk ${product.name} dihapus`);
+        await saveStateDurable(`Produk ${product.name} dihapus`);
         renderAll();
         toast("Produk sudah dihapus dari daftar.");
       }
-      function deleteProductConversion(productId) {
+      async function deleteProductConversion(productId) {
         if (!canAccessMaster("Master Barang")) return toast("Anda tidak memiliki akses mengubah konversi.");
         const product = state.products.find((row) => row.id === productId);
         if (!product || !productHasConversion(product)) return toast("Konversi produk tidak ditemukan.");
@@ -4747,7 +4759,7 @@
         if (pendingItems.some((item) => item.productId === productId)) return toast("Selesaikan atau keluarkan produk ini dari keranjang dan transaksi pending sebelum menghapus konversinya.");
         if (!confirm(`Hapus konversi ${product.name} ke ${product.secondaryUnit}? Produk utama, jumlah stok, harga satuan utama, dan histori transaksi tetap tersimpan. Pengaturan satuan kedua dapat dibuat kembali melalui Konversi Produk.`)) return;
         Object.assign(product, { secondaryUnit: "", secondaryBarcode: "", conversionValue: 0, secondaryBuy: 0, secondaryPrice: 0, secondaryPrice2: 0 });
-        saveState(`Konversi produk ${product.name} dihapus; produk utama dan stok tetap tersimpan`);
+        await saveStateDurable(`Konversi produk ${product.name} dihapus; produk utama dan stok tetap tersimpan`);
         renderAll();
         toast("Konversi dihapus di perangkat dan masuk antrean sinkronisasi. Produk utama tetap tersedia.");
       }
@@ -4775,7 +4787,7 @@
               <div class="col-md-6"><label class="form-label">Harga Jual 2 — Satuan Utama</label><input id="conversionPrimaryPrice2" name="price2" type="number" min="0" step="0.01" class="form-control"></div>
               <div class="col-md-6"><label class="form-label">Harga Jual 2 — Satuan Kedua</label><input id="conversionSecondaryPrice2" name="secondaryPrice2" type="number" min="0" step="0.01" class="form-control"></div>
             </div>
-          </div>`, (fd) => {
+          </div>`, async (fd) => {
           const product = state.products.find((p) => p.id === fd.get("productId"));
           if (!product) return toast("Produk tidak ditemukan.");
           const twoUnits = fd.get("unitMode") === "two";
@@ -4799,7 +4811,7 @@
           }
           try { MDDConversion.validateConversion(primaryUnit, secondaryUnit, conversionValue); } catch (error) { return toast(error.message); }
           Object.assign(product, { code, secondaryBarcode: secondaryBarcode, primaryUnit, unit: primaryUnit, secondaryUnit, conversionValue, buy: Number(fd.get("buy")), secondaryBuy: twoUnits ? MDDConversion.calculateSecondaryCost(fd.get("buy"), conversionValue) : 0, price: Number(fd.get("price")), price2: Number(fd.get("price2")), secondaryPrice: twoUnits ? Number(fd.get("secondaryPrice")) : 0, secondaryPrice2: twoUnits ? Number(fd.get("secondaryPrice2")) : 0, min: Number(fd.get("min")) });
-          saveState(`Konversi produk ${product.name} diperbarui`);
+          await saveStateDurable(`Konversi produk ${product.name} diperbarui`);
           closeModal(); renderAll(); toast(`Konversi dicatat di perangkat dan masuk antrean sinkronisasi: ${conversionLabel(product)}.`);
         });
         const fillConversionForm = (fallbackToInitial = false) => {
@@ -4887,7 +4899,7 @@
             <div class="col-md-3"><label class="form-label">Stock Keluar (Histori)</label><input id="masterStockOut" name="stockOut" type="number" class="form-control" value="${stockOutValue}" readonly></div>
             <div class="col-md-3"><label class="form-label">Stock Akhir / Saat Ini</label><input id="masterStockFinal" name="stock" type="number" min="0" class="form-control" value="${stockAkhirValue}" required></div>
             <div class="col-md-3"><label class="form-label">Min. Stok</label><input name="min" type="number" class="form-control" value="${editing?.min ?? 5}"></div>
-          </div>`, (fd) => {
+          </div>`, async (fd) => {
           let stockIn = toNumber(editing?.stockIn);
           let stockOut = toNumber(editing?.stockOut);
           const previousStock = stockAkhirProduk(editing);
@@ -4904,10 +4916,10 @@
           const payload = { code: fd.get("code"), name: fd.get("name"), category: fd.get("category"), unit: fd.get("unit"), primaryUnit: fd.get("unit"), buy: Number(fd.get("buy")), price: Number(fd.get("price")), price2: Number(fd.get("price2")), stockIn, stockOut, stock: stockAkhir, stockAkhir, min: Number(fd.get("min")), active: true };
           if (editing) {
             Object.assign(editing, payload);
-            saveState(`Produk ${editing.name} diperbarui`);
+            await saveStateDurable(`Produk ${editing.name} diperbarui`);
           } else {
             state.products.unshift({ id: uid("PRD"), ...payload });
-            saveState("Barang baru ditambahkan");
+            await saveStateDurable("Barang baru ditambahkan");
           }
           closeModal();
           renderAll();
@@ -4917,14 +4929,14 @@
       function openSupplierModal() { openSimpleMaster("Master Supplier", "suppliers", ["company:Nama Perusahaan", "name:Nama Sales", "phone:Whatsapp", "address:Alamat"]); }
       function openEmployeeModal(employeeId = "") {
         const editing = state.employees.find((e) => e.id === employeeId);
-        openModal(editing ? "Edit Master Karyawan" : "Master Karyawan", `<div class="row g-3"><div class="col-md-4"><label class="form-label">Nama</label><input name="name" class="form-control" value="${esc(editing?.name || "")}" required></div><div class="col-md-4"><label class="form-label">Posisi Jabatan</label><input name="position" class="form-control" value="${esc(editing?.position || "")}" required></div><div class="col-md-4"><label class="form-label">Mulai Bekerja (Tanggal/Bulan/Tahun)</label><input name="startDate" type="date" class="form-control" value="${esc(editing?.startDate || "")}" required></div><div class="col-md-3"><label class="form-label">Gaji</label><input name="salary" type="number" class="form-control" value="${Number(editing?.salary || 0)}" required></div><div class="col-md-3"><label class="form-label">HP</label><input name="phone" class="form-control" value="${esc(editing?.phone || "")}"></div></div>`, (fd) => {
+        openModal(editing ? "Edit Master Karyawan" : "Master Karyawan", `<div class="row g-3"><div class="col-md-4"><label class="form-label">Nama</label><input name="name" class="form-control" value="${esc(editing?.name || "")}" required></div><div class="col-md-4"><label class="form-label">Posisi Jabatan</label><input name="position" class="form-control" value="${esc(editing?.position || "")}" required></div><div class="col-md-4"><label class="form-label">Mulai Bekerja (Tanggal/Bulan/Tahun)</label><input name="startDate" type="date" class="form-control" value="${esc(editing?.startDate || "")}" required></div><div class="col-md-3"><label class="form-label">Gaji</label><input name="salary" type="number" class="form-control" value="${Number(editing?.salary || 0)}" required></div><div class="col-md-3"><label class="form-label">HP</label><input name="phone" class="form-control" value="${esc(editing?.phone || "")}"></div></div>`, async (fd) => {
           const payload = { name: fd.get("name"), position: fd.get("position"), startDate: fd.get("startDate"), salary: Number(fd.get("salary")), phone: fd.get("phone") };
           if (editing) {
             Object.assign(editing, payload);
-            saveState("Karyawan diperbarui");
+            await saveStateDurable("Karyawan diperbarui");
           } else {
             state.employees.unshift({ id: uid("EMP"), ...payload });
-            saveState("Karyawan ditambahkan");
+            await saveStateDurable("Karyawan ditambahkan");
           }
           closeModal();
           renderAll();
@@ -4935,14 +4947,14 @@
       function openDiscountModal() { openSimpleMaster("Master Diskon", "discounts", ["name:Nama Diskon", "type:Tipe", "value:Nilai"]); }
       function openCashAccountModal(accountId = "") {
         const editing = state.cashAccounts.find((a) => a.id === accountId);
-        openModal(editing ? "Edit Master Kas" : "Master Kas", `<div class="row g-3"><div class="col-md-6"><label class="form-label">Nama Kas</label><select name="name" class="form-select">${["Kas Utama", "Petty Kas", "Rek. Bank"].map((name) => `<option ${name === editing?.name ? "selected" : ""}>${name}</option>`).join("")}</select></div><div class="col-md-6"><label class="form-label">Saldo</label><input name="balance" type="number" class="form-control" value="${Number(editing?.balance || 0)}" required></div></div>`, (fd) => {
+        openModal(editing ? "Edit Master Kas" : "Master Kas", `<div class="row g-3"><div class="col-md-6"><label class="form-label">Nama Kas</label><select name="name" class="form-select">${["Kas Utama", "Petty Kas", "Rek. Bank"].map((name) => `<option ${name === editing?.name ? "selected" : ""}>${name}</option>`).join("")}</select></div><div class="col-md-6"><label class="form-label">Saldo</label><input name="balance" type="number" class="form-control" value="${Number(editing?.balance || 0)}" required></div></div>`, async (fd) => {
           const payload = { name: fd.get("name"), balance: Number(fd.get("balance")) };
           if (editing) {
             Object.assign(editing, payload);
-            saveState("Master Kas diperbarui");
+            await saveStateDurable("Master Kas diperbarui");
           } else {
             state.cashAccounts.unshift({ id: uid("KAS"), ...payload });
-            saveState("Master Kas ditambahkan");
+            await saveStateDurable("Master Kas ditambahkan");
           }
           closeModal();
           renderAll();
@@ -4950,11 +4962,11 @@
       }
       function openSimpleMaster(title, key, fields, itemId = "") {
         const editing = state[key]?.find((item) => item.id === itemId);
-        openModal(editing ? `Edit ${title}` : title, `<div class="row g-3">${fields.map((f) => { const [name, label] = f.split(":"); const type = /saldo|nilai|harga|deposit/i.test(label) ? "number" : "text"; return `<div class="col-md-6"><label class="form-label">${label}</label><input name="${name}" type="${type}" class="form-control" value="${esc(editing?.[name] || "")}" required></div>`; }).join("")}</div>`, (fd) => {
+        openModal(editing ? `Edit ${title}` : title, `<div class="row g-3">${fields.map((f) => { const [name, label] = f.split(":"); const type = /saldo|nilai|harga|deposit/i.test(label) ? "number" : "text"; return `<div class="col-md-6"><label class="form-label">${label}</label><input name="${name}" type="${type}" class="form-control" value="${esc(editing?.[name] || "")}" required></div>`; }).join("")}</div>`, async (fd) => {
           const item = editing || { id: uid(key.slice(0, 3).toUpperCase()) };
           fields.forEach((f) => { const name = f.split(":")[0]; item[name] = fd.get(name); if (/balance|price|value|deposit/.test(name)) item[name] = Number(item[name]); });
           if (!editing) state[key].unshift(item);
-          saveState(`${title} ${editing ? "diperbarui" : "ditambahkan"}`);
+          await saveStateDurable(`${title} ${editing ? "diperbarui" : "ditambahkan"}`);
           closeModal();
           renderAll();
         });
@@ -5079,7 +5091,7 @@
           <div class="col-md-3"><label class="form-label">Stock Fisik</label><input id="editOpnamePhysical" name="physicalStock" type="number" class="form-control" value="${Number(editing.physicalStock || stockAkhirProduk(selectedProduct))}" required></div>
           <div class="col-md-3"><label class="form-label">Selisih</label><input id="editOpnameDiff" name="difference" type="number" class="form-control" value="${Number(editing.difference || 0)}" readonly></div>
           <div class="col-md-9"><label class="form-label">Keterangan / Catatan</label><input name="note" class="form-control" value="${esc(editing.note || "")}"></div>
-        </div>`, (fd) => {
+        </div>`, async (fd) => {
           const product = findProduct(fd.get("productId"));
           if (!product || product.id !== editing.productId) return toast("Produk pada histori opname tidak boleh diganti. Buat Stok Opname baru untuk produk lain.");
           const previousDifference = toNumber(editing.difference ?? editing.qty);
@@ -5094,7 +5106,7 @@
           Object.assign(editing, { number: fd.get("number"), date: fd.get("date"), productId: product.id, sku: product.code, productName: product.name, unit: fd.get("unit") || product.unit, type: "Opname", systemStock, physicalStock: physical, difference: newDifference, qty: newDifference, note: fd.get("note") });
           product.stock = Math.max(0, physical);
           product.stockAkhir = product.stock;
-          saveState(`Stok opname ${product.name} diperbarui`);
+          await saveStateDurable(`Stok opname ${product.name} diperbarui`);
           closeModal();
           renderAll();
         });
@@ -5452,7 +5464,7 @@
         window.print();
         document.getElementById("printArea").classList.add("d-none");
       }
-      function producePackage() {
+      async function producePackage() {
         if (!state.packages.length) {
           openPackageModal();
           toast("Buat Master Paket terlebih dahulu sebelum produksi paket.");
@@ -5464,11 +5476,11 @@
             <div class="col-md-3"><label class="form-label">Qty Produksi</label><input name="qty" type="number" min="1" value="1" class="form-control" required></div>
             <div class="col-md-3"><label class="form-label">Tanggal</label><input name="date" type="date" value="${today()}" class="form-control"></div>
             <div class="col-12"><label class="form-label">Catatan</label><input name="note" class="form-control" placeholder="Contoh: produksi paket promo mingguan"></div>
-          </div>`, (fd) => {
+          </div>`, async (fd) => {
           const pkg = state.packages.find((p) => p.id === fd.get("packageId")) || state.packages[0];
           const qty = Number(fd.get("qty"));
           state.stockMoves.unshift({ id: uid("STK"), date: fd.get("date"), productId: pkg.id, type: "Produksi Paket", qty, note: `${pkg.name}. ${fd.get("note") || ""}`.trim() });
-          saveState(`Produksi paket ${pkg.name} sebanyak ${qty}`);
+          await saveStateDurable(`Produksi paket ${pkg.name} sebanyak ${qty}`);
           closeModal();
           renderAll();
         });
@@ -5556,12 +5568,28 @@
           const receipt = await waitForOperationAcknowledgements(ids);
           const acknowledged = new Set([...(receipt.acknowledged || []), ...(receipt.alreadyPresent || [])]);
           const conflicts = new Set(receipt.conflicts || []);
+          const permanent = new Set([...(receipt.permanent || []), ...(receipt.failedPermanent || []), ...(receipt.rejected || [])]);
+          const retryable = new Set([...(receipt.retryable || []), ...(receipt.transient || [])]);
+
           if (acknowledged.size) await syncOutbox.mark([...acknowledged], "acknowledged", { acknowledgedAt: new Date().toISOString(), lastError: "" });
           if (conflicts.size) await syncOutbox.mark([...conflicts], "conflict", { lastError: "Konflik dengan perubahan backend yang lebih baru" });
-          const unresolved = batch.filter((row) => !acknowledged.has(row.operationId) && !conflicts.has(row.operationId));
+
+          // v154 terminal guard: deterministic/permanent server rejection must never
+          // re-enter the retry loop. Keep the record locally for diagnosis.
+          if (permanent.size) await syncOutbox.mark([...permanent], "conflict", {
+            lastError: "PERMANENT_REJECTION: backend menolak perubahan secara permanen",
+            terminal: true,
+            resolvedBy: "v154-terminal-ack"
+          });
+
+          const terminal = new Set([...acknowledged, ...conflicts, ...permanent]);
+          const unresolved = batch.filter((row) => !terminal.has(row.operationId));
+
+          // Explicit transient/retryable operations and unknown ACK timeouts remain
+          // durable and retry with the SAME immutable operationId.
           if (unresolved.length) {
-            await syncOutbox.markFailed(unresolved, new Error("ACK backend belum lengkap"));
-            throw Object.assign(new Error("ACK backend belum lengkap"), { unresolvedHandled: true });
+            await syncOutbox.markFailed(unresolved, new Error(retryable.size ? "Backend meminta retry" : "ACK backend belum lengkap"));
+            throw Object.assign(new Error(retryable.size ? "Backend meminta retry" : "ACK backend belum lengkap"), { unresolvedHandled: true });
           }
           syncRetryAttempt = 0;
           lastBackendRevision = "";
@@ -5601,10 +5629,13 @@
           const receipt = await requestGoogleWorkspaceJsonp("acknowledgement", { operationIds: operationIds.join(",") });
           const acknowledged = receipt?.acknowledged || [];
           const conflicts = receipt?.conflicts || [];
-          if (acknowledged.length + conflicts.length >= operationIds.length) return { acknowledged, conflicts };
+          const permanent = receipt?.permanent || receipt?.failedPermanent || receipt?.rejected || [];
+          const retryable = receipt?.retryable || receipt?.transient || [];
+          const resolved = new Set([...acknowledged, ...conflicts, ...permanent, ...retryable]);
+          if (resolved.size >= operationIds.length) return { acknowledged, conflicts, permanent, retryable };
           delayMs = Math.min(8000, delayMs * 2);
         }
-        return { acknowledged: [], conflicts: [] };
+        return { acknowledged: [], conflicts: [], permanent: [], retryable: [] };
       }
       async function exportElementPdf(elementId, filename) {
         if (!window.jspdf || !window.html2canvas) {

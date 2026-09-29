@@ -1,6 +1,5 @@
-// Shell cache only.  Business data, the durable outbox, localStorage and
-// IndexedDB are deliberately outside Cache Storage and are never deleted here.
-const CACHE_NAME = "mdd-material-pro-v151-request-storm-fix";
+// Shell cache only. Business data, durable outbox, localStorage and IndexedDB are never deleted here.
+const CACHE_NAME = "mdd-material-pro-v154-stabilization";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
@@ -12,7 +11,6 @@ const APP_SHELL = [
   "./icon-192.png",
   "./icon-512.png"
 ];
-
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
   self.skipWaiting();
@@ -20,22 +18,17 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      // Cache Storage is origin-wide: only remove MDD's own obsolete shell
-      // caches. IndexedDB, localStorage, and any other site's caches remain
-      // untouched.
       Promise.all(keys.filter((key) => key !== CACHE_NAME && key.startsWith("mdd-material-pro-")).map((key) => caches.delete(key)))
     ).then(() => self.clients.claim()).then(() =>
       self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) =>
-        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 151 }))
+        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 154 }))
       )
     )
   );
 });
-
 self.addEventListener("message", (event) => {
   if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
-
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   if (new URL(event.request.url).origin !== self.location.origin) return;
@@ -63,4 +56,3 @@ self.addEventListener("fetch", (event) => {
     )
   );
 });
-

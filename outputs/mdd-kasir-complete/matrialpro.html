@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 159;
+      const APP_VERSION = 160;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -1477,6 +1477,70 @@
         }
         await syncOutbox.setMeta(markerKey, { completed: true, requeued: repairable.length, at: new Date().toISOString() });
         return { completed: true, requeued: repairable.length };
+      }
+
+      // v160: receipt-proven, exact-ID conflict disposition.
+      // This is deliberately NOT a blanket cleanup. Only the six production
+      // conflicts audited on 29 Sep 2026 are eligible. Full local rows,
+      // including payloads, are archived before status changes.
+      async function resolveAuditedV160ConflictsOnce() {
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return { skipped: true };
+        const markerKey = "v160AuditedConflictResolution";
+        const previous = await syncOutbox.getMeta(markerKey).catch(() => null);
+        if (previous?.completed) return { alreadyCompleted: true, ...previous };
+
+        const paymentConflictIds = new Set([
+          "08bbb7d8-b14e-44ec-b9a2-3dfcff6c2d33"
+        ]);
+        const mortarConflictIds = new Set([
+          "cb6816b2-a8b6-48b3-8fd5-925e19098f24",
+          "1a16c61f-4523-4f34-b291-0e20cdca09af",
+          "6bec8bb3-335f-4968-82b4-2e09570bb730",
+          "e5e2d4e5-87b8-4e20-99da-898cdb9f608c",
+          "1053f3e1-d596-49df-9cce-d9a53517cf60"
+        ]);
+        const audited = new Set([...paymentConflictIds, ...mortarConflictIds]);
+        const conflicts = await syncOutbox.list(["conflict"], 100000);
+        const matched = conflicts.filter(row => audited.has(String(row.operationId)));
+
+        // Preserve the complete local evidence first. This prevents "green by deletion".
+        const archive = matched.map(row => JSON.parse(JSON.stringify(row)));
+        await syncOutbox.setMeta("v160AuditedConflictArchive", {
+          archivedAt: new Date().toISOString(),
+          deviceId: syncDeviceId,
+          records: archive
+        });
+
+        const payment = matched.filter(row => paymentConflictIds.has(String(row.operationId)));
+        const mortar = matched.filter(row => mortarConflictIds.has(String(row.operationId)));
+
+        if (payment.length) {
+          await syncOutbox.mark(payment.map(row => row.operationId), "retired", {
+            terminal: true,
+            retiredAt: new Date().toISOString(),
+            retiredReason: "v160-server-ledger-already-settled-PUR20260880",
+            resolution: "SERVER_AUTHORITATIVE_NO_REPLAY"
+          });
+        }
+        if (mortar.length) {
+          await syncOutbox.mark(mortar.map(row => row.operationId), "retired", {
+            terminal: true,
+            retiredAt: new Date().toISOString(),
+            retiredReason: "v160-stale-product-identity-PRD-0K62U",
+            resolution: "ARCHIVED_NOT_COMMITTED_REQUIRES_AUTHORITATIVE_REENTRY"
+          });
+        }
+
+        const result = {
+          completed: true,
+          matched: matched.length,
+          paymentRetired: payment.length,
+          mortarArchivedRetired: mortar.length,
+          preservedPayloadCount: archive.length,
+          at: new Date().toISOString()
+        };
+        await syncOutbox.setMeta(markerKey, result);
+        return result;
       }
 
       async function updateSyncIndicator(forcedStatus) {
@@ -2283,6 +2347,7 @@
           }
           try {
             await requeueV157SyntheticRetryConflictsOnce();
+          await resolveAuditedV160ConflictsOnce();
           } catch (syntheticConflictRepairError) {
             console.warn("v158 synthetic retry conflict repair skipped:", syntheticConflictRepairError);
           }

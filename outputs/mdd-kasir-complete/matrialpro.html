@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 160;
+      const APP_VERSION = 161;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -1541,6 +1541,113 @@
         };
         await syncOutbox.setMeta(markerKey, result);
         return result;
+      }
+
+      // v161: staged recovery for the audited MORTAR transaction.
+      // Stage 1 recreates the genuinely new product using a NEW operationId.
+      // Only after the backend ACKs that product do we enqueue the four original
+      // purchase effects. This prevents a purchase from referencing a product
+      // that has not yet committed.
+      async function recoverAuditedMortarTransactionV161() {
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return { skipped: true };
+        const key = "v161MortarRecovery";
+        const current = (await syncOutbox.getMeta(key).catch(() => null)) || {};
+        if (current.completed) return current;
+
+        const archive = await syncOutbox.getMeta("v160AuditedConflictArchive").catch(() => null);
+        const records = Array.isArray(archive?.records) ? archive.records : [];
+        const productOldId = "cb6816b2-a8b6-48b3-8fd5-925e19098f24";
+        const purchaseOldIds = new Set([
+          "1a16c61f-4523-4f34-b291-0e20cdca09af",
+          "6bec8bb3-335f-4968-82b4-2e09570bb730",
+          "e5e2d4e5-87b8-4e20-99da-898cdb9f608c",
+          "1053f3e1-d596-49df-9cce-d9a53517cf60"
+        ]);
+        const productSource = records.find(row => String(row.operationId) === productOldId);
+        const purchaseSources = records.filter(row => purchaseOldIds.has(String(row.operationId)));
+        if (!productSource || purchaseSources.length !== 4) {
+          const result = { blocked: true, reason: "AUDIT_ARCHIVE_INCOMPLETE", productFound: !!productSource, purchaseFound: purchaseSources.length };
+          await syncOutbox.setMeta(key, result);
+          return result;
+        }
+
+        function recoveryClone(source, commandId, phase) {
+          const clone = JSON.parse(JSON.stringify(source));
+          clone.operationId = MDDSyncV2.operationId();
+          clone.commandId = commandId;
+          clone.status = "pending";
+          clone.attempts = 0;
+          clone.createdAt = new Date().toISOString();
+          clone.updatedAt = clone.createdAt;
+          clone.nextAttemptAt = 0;
+          clone.lastError = "";
+          clone.terminal = false;
+          clone.recoveryOf = source.operationId;
+          clone.recoveryVersion = 161;
+          clone.recoveryPhase = phase;
+          // Preserve original business payload exactly; attribution identifies recovery actor/session.
+          Object.assign(clone, operationActorContext());
+          return clone;
+        }
+
+        let marker = current;
+        if (!marker.stage) {
+          const commandId = MDDSyncV2.operationId();
+          const productClone = recoveryClone(productSource, commandId, "NEW_PRODUCT");
+          await syncOutbox.putMany([productClone]);
+          marker = {
+            stage: "PRODUCT_ENQUEUED",
+            productOperationId: productClone.operationId,
+            productCommandId: commandId,
+            startedAt: new Date().toISOString()
+          };
+          await syncOutbox.setMeta(key, marker);
+          queueGoogleWorkspaceSync();
+          return marker;
+        }
+
+        if (marker.stage === "PRODUCT_ENQUEUED") {
+          const row = await syncOutbox.get(marker.productOperationId);
+          if (!row || row.status === "conflict") {
+            const blocked = { ...marker, blocked: true, reason: "PRODUCT_NOT_ACKNOWLEDGED", observedStatus: row?.status || "missing" };
+            await syncOutbox.setMeta(key, blocked);
+            return blocked;
+          }
+          if (row.status !== "acknowledged") {
+            queueGoogleWorkspaceSync();
+            return marker;
+          }
+          const purchaseCommandId = MDDSyncV2.operationId();
+          const purchaseClones = purchaseSources.map(source => recoveryClone(source, purchaseCommandId, "PURCHASE"));
+          await syncOutbox.putMany(purchaseClones);
+          marker = {
+            ...marker,
+            stage: "PURCHASE_ENQUEUED",
+            purchaseCommandId,
+            purchaseOperationIds: purchaseClones.map(row => row.operationId),
+            productAcknowledgedAt: new Date().toISOString()
+          };
+          await syncOutbox.setMeta(key, marker);
+          queueGoogleWorkspaceSync();
+          return marker;
+        }
+
+        if (marker.stage === "PURCHASE_ENQUEUED") {
+          const rows = [];
+          for (const id of marker.purchaseOperationIds || []) rows.push(await syncOutbox.get(id));
+          if (rows.some(row => !row || row.status === "conflict")) {
+            const blocked = { ...marker, blocked: true, reason: "PURCHASE_NOT_ACKNOWLEDGED", observedStatuses: rows.map(row => row?.status || "missing") };
+            await syncOutbox.setMeta(key, blocked);
+            return blocked;
+          }
+          if (rows.every(row => row.status === "acknowledged")) {
+            const done = { ...marker, stage: "COMPLETED", completed: true, completedAt: new Date().toISOString() };
+            await syncOutbox.setMeta(key, done);
+            return done;
+          }
+          queueGoogleWorkspaceSync();
+        }
+        return marker;
       }
 
       async function updateSyncIndicator(forcedStatus) {
@@ -2348,6 +2455,9 @@
           try {
             await requeueV157SyntheticRetryConflictsOnce();
           await resolveAuditedV160ConflictsOnce();
+          // v161 recovery is safe only after Backend v161 is deployed. If the
+          // backend still rejects genuine new-product IDs, stage 1 fails closed.
+          await recoverAuditedMortarTransactionV161();
           } catch (syntheticConflictRepairError) {
             console.warn("v158 synthetic retry conflict repair skipped:", syntheticConflictRepairError);
           }
@@ -5778,6 +5888,7 @@
           lastBackendRevision = "";
           await updateSyncIndicator();
           renderSyncedState();
+          try { await recoverAuditedMortarTransactionV161(); } catch (recoveryError) { console.warn("v161 recovery progression:", recoveryError); }
           if ((await syncOutbox.due(1)).length) queueGoogleWorkspaceSync();
         } catch (error) {
           // Jangan pernah menurunkan operasi yang sudah ACK menjadi failed.

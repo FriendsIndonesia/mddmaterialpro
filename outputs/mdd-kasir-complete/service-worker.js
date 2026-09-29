@@ -1,5 +1,5 @@
 // Shell cache only. Business data, durable outbox, localStorage and IndexedDB are never deleted here.
-const CACHE_NAME = "mdd-material-pro-v160-targeted-conflict-resolution";
+const CACHE_NAME = "mdd-material-pro-v161-new-product-recovery";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",
@@ -21,7 +21,7 @@ self.addEventListener("activate", (event) => {
       Promise.all(keys.filter((key) => key !== CACHE_NAME && key.startsWith("mdd-material-pro-")).map((key) => caches.delete(key)))
     ).then(() => self.clients.claim()).then(() =>
       self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) =>
-        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 160 }))
+        clients.forEach((client) => client.postMessage({ type: "MDD_FORCE_RELOAD", version: 161 }))
       )
     )
   );

@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 156;
+      const APP_VERSION = 157;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -1414,6 +1414,32 @@
           at: new Date().toISOString()
         });
         return { completed: true, retired: legacy.length, preservedNewConflicts: conflicts.length - legacy.length };
+      }
+
+      // v157: requeue only the non-terminal false conflicts created by the
+      // old "reconcile before first POST" behavior. True backend conflicts remain.
+      async function requeuePreSendFalseConflictsV157Once() {
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return { skipped: true };
+        const markerKey = "v157PreSendFalseConflictRepair";
+        if (await syncOutbox.getMeta(markerKey).catch(() => null)) return { alreadyApplied: true };
+        const conflicts = await syncOutbox.list(["conflict"], 100000);
+        const repairable = conflicts.filter((row) =>
+          !row.terminal &&
+          String(row.lastError || "") === "Payload lokal berbeda dari backend"
+        );
+        if (repairable.length) {
+          await syncOutbox.mark(repairable.map((row) => row.operationId), "pending", {
+            lastError: "",
+            nextAttemptAt: 0,
+            resolvedBy: "v157-requeue-pre-send-false-conflict"
+          });
+        }
+        await syncOutbox.setMeta(markerKey, {
+          completed: true,
+          requeued: repairable.length,
+          at: new Date().toISOString()
+        });
+        return { completed: true, requeued: repairable.length };
       }
 
       async function updateSyncIndicator(forcedStatus) {
@@ -2206,6 +2232,11 @@
             await retirePreV155LegacyConflictsOnce();
           } catch (legacyCleanupError) {
             console.warn("v156 legacy conflict cleanup skipped:", legacyCleanupError);
+          }
+          try {
+            await requeuePreSendFalseConflictsV157Once();
+          } catch (falseConflictRepairError) {
+            console.warn("v157 pre-send false conflict repair skipped:", falseConflictRepairError);
           }
           // One-time production cleanup explicitly approved by Owner: retire only
           // pre-v147 unresolved operations. New v147+ operations are never discarded.
@@ -5571,13 +5602,28 @@
           if (!await verifyActiveBackend()) throw new Error("Endpoint backend tidak terverifikasi");
           batch = await syncOutbox.due(25);
           if (!batch.length) return updateSyncIndicator();
+
+          // v157: a brand-new durable operation MUST be sent to the authoritative
+          // backend before entity-state reconciliation is allowed to classify it.
+          // Reconciliation is only for retries/uncertain ACK recovery.
+          const firstSendIds = new Set(batch.filter((row) => Number(row.attempts || 0) === 0).map((row) => row.operationId));
+          const retryRowsBeforeSending = batch.filter((row) => !firstSendIds.has(row.operationId));
+
           batch = await syncOutbox.markSending(batch);
           await updateSyncIndicator("syncing");
-          const reconciled = await reconcilePendingOperations(batch);
-          if (reconciled.acknowledged.length) await syncOutbox.mark(reconciled.acknowledged, "acknowledged", { acknowledgedAt: new Date().toISOString(), lastError: "", resolvedBy: "stable-entity-reconciliation" });
-          if (reconciled.conflicts.length) await syncOutbox.mark(reconciled.conflicts, "conflict", { lastError: "Payload lokal berbeda dari backend" });
-          if (reconciled.manualReview.length) await syncOutbox.mark(reconciled.manualReview, "conflict", { lastError: "MANUAL_REVIEW: status commit tidak dapat dibuktikan" });
-          batch = batch.filter((row) => reconciled.pending.includes(row.operationId));
+
+          let retryPendingIds = [];
+          if (retryRowsBeforeSending.length) {
+            const retryRows = batch.filter((row) => !firstSendIds.has(row.operationId));
+            const reconciled = await reconcilePendingOperations(retryRows);
+            if (reconciled.acknowledged.length) await syncOutbox.mark(reconciled.acknowledged, "acknowledged", { acknowledgedAt: new Date().toISOString(), lastError: "", resolvedBy: "retry-receipt-reconciliation" });
+            if (reconciled.conflicts.length) await syncOutbox.mark(reconciled.conflicts, "conflict", { lastError: "Payload lokal berbeda dari backend setelah retry", terminal: true });
+            if (reconciled.manualReview.length) await syncOutbox.mark(reconciled.manualReview, "conflict", { lastError: "MANUAL_REVIEW: status commit retry tidak dapat dibuktikan", terminal: true });
+            retryPendingIds = reconciled.pending || [];
+          }
+
+          const sendIds = new Set([...firstSendIds, ...retryPendingIds]);
+          batch = batch.filter((row) => sendIds.has(row.operationId));
           if (!batch.length) {
             syncRetryAttempt = 0;
             await updateSyncIndicator();

@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 154;
+      const APP_VERSION = 155;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -1389,6 +1389,33 @@
           setBackendSyncBanner("danger", "DASHBOARD_LOAD_ERROR • ringkasan production belum dapat dimuat");
         }
       }
+      // v155: one-time retirement of legacy conflicts that pre-date this build.
+      // New v155+ conflicts are never auto-cleared.
+      async function retirePreV155LegacyConflictsOnce() {
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return { skipped: true };
+        const markerKey = "v155LegacyConflictCleanup";
+        const marker = await syncOutbox.getMetadata(markerKey).catch(() => null);
+        if (marker && marker.completed) return { skipped: true, alreadyCompleted: true };
+
+        const conflicts = await syncOutbox.listByStatuses(["conflict"]).catch(() => []);
+        const legacy = conflicts.filter((row) => Number(row.clientVersion || row.appVersion || 0) < 155);
+
+        if (legacy.length) {
+          await syncOutbox.mark(legacy.map((row) => row.operationId), "retired", {
+            retiredAt: new Date().toISOString(),
+            retiredReason: "v155-pre-final-baseline-conflict-cleanup",
+            terminal: true
+          });
+        }
+        await syncOutbox.setMetadata(markerKey, {
+          completed: true,
+          retired: legacy.length,
+          preservedNewConflicts: conflicts.length - legacy.length,
+          at: new Date().toISOString()
+        });
+        return { completed: true, retired: legacy.length, preservedNewConflicts: conflicts.length - legacy.length };
+      }
+
       async function updateSyncIndicator(forcedStatus) {
         if (!document.getElementById("backendSyncBanner")) return;
         if (!navigator.onLine) return setBackendSyncBanner("secondary", "OFFLINE");
@@ -2175,6 +2202,11 @@
           });
           lastChangeCursor = String((await syncOutbox.getMeta("changeCursor")) || "");
           outboxReady = true;
+          try {
+            await retirePreV155LegacyConflictsOnce();
+          } catch (legacyCleanupError) {
+            console.warn("v155 legacy conflict cleanup skipped:", legacyCleanupError);
+          }
           // One-time production cleanup explicitly approved by Owner: retire only
           // pre-v147 unresolved operations. New v147+ operations are never discarded.
           await applyWriteCoreV148BaselineResetOnce();

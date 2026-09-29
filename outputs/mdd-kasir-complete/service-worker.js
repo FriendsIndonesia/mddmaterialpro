@@ -1,5 +1,5 @@
 // Shell cache only. Business data, durable outbox, localStorage and IndexedDB are never deleted here.
-const CACHE_NAME = "mdd-material-pro-v162-read-consistency";
+const CACHE_NAME = "mdd-material-pro-v163-module-authority";
 const APP_SHELL = [
   "./",
   "./matrialpro.html",

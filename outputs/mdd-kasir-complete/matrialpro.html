@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 162;
+      const APP_VERSION = 163;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -2176,7 +2176,7 @@
         };
       }
 
-      // v162 authoritative module hydration. When a module revision changes we
+      // v163 authoritative module hydration. When a module revision changes we
       // fetch a COMPLETE snapshot with updatedSince="" into a temporary array.
       // The live cache is replaced only after every page arrives at one stable
       // revision. This removes stale/deleted rows and prevents partial pages
@@ -2210,10 +2210,17 @@
           } while (pages < 100);
 
           if (expectedCount === null || authoritative.size !== Number(expectedCount)) return false;
-          // The dashboard metadata may have advanced while pages were loading.
-          // Never stamp a cache current against a different server revision.
-          const latestMeta = productionModuleRevisions?.[module] || {};
-          if (latestMeta.revision && snapshotRevision && String(latestMeta.revision) !== String(snapshotRevision)) return false;
+          // v163: the module snapshot itself is authoritative for this module.
+          // DashboardSummary entity metadata can lag behind the module endpoint,
+          // which previously caused a permanent yellow banner even after a
+          // complete, internally-consistent Products snapshot had been read.
+          // We only accept a snapshot when every page reports one revision and
+          // the unique row count exactly matches the module endpoint count.
+          productionModuleRevisions[module] = Object.assign({}, serverMeta, {
+            revision: snapshotRevision || String(serverMeta.revision || ""),
+            count: authoritative.size,
+            source: "authoritative-module-snapshot-v163"
+          });
 
           state[module] = [...authoritative.values()];
           normalizeState(state);
@@ -2223,7 +2230,7 @@
             revision: snapshotRevision || String(serverMeta.revision || ""),
             count: authoritative.size,
             syncedAt: new Date().toISOString(),
-            mode: "authoritative-full-v162"
+            mode: "authoritative-full-v163"
           };
           localStorage.setItem(PRODUCTION_MODULE_REVISION_KEY, JSON.stringify(cachedRevisions));
           return true;

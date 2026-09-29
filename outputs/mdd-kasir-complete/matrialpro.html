@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 158;
+      const APP_VERSION = 159;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -951,6 +951,23 @@
       let durablePendingSync = loadDurablePendingSync();
       const syncOutbox = new MDDSyncV2.Outbox();
       const syncDeviceId = loadSyncDeviceId();
+      let activeSessionId = "";
+      function newSessionId() {
+        return `SES-${Date.now().toString(36)}-${MDDSyncV2.operationId().slice(0, 8)}`;
+      }
+      function operationActorContext() {
+        return {
+          actorUsername: String(session?.username || "").trim().toLowerCase(),
+          actorRole: String(session?.role || "").trim(),
+          actorName: String(session?.name || "").trim(),
+          sessionId: String(activeSessionId || session?.sessionId || "")
+        };
+      }
+      function operationBelongsToVisibleSession(row) {
+        const actor = String(row?.actorUsername || row?.payload?.actorUsername || "").trim().toLowerCase();
+        if (!actor) return true; // legacy evidence stays visible
+        return actor === String(session?.username || "").trim().toLowerCase();
+      }
       let operationSnapshot = JSON.parse(JSON.stringify(state));
       let baselineInProgress = false;
       let baselineRetryTimer = null;
@@ -1210,7 +1227,7 @@
           after.forEach((row, id) => {
             const old = before.get(id);
             if (old && JSON.stringify(old) === JSON.stringify(row)) return;
-            const common = { baseRevision: lastBackendRevision, deviceId: syncDeviceId, commandId, commandType };
+            const common = { baseRevision: lastBackendRevision, deviceId: syncDeviceId, commandId, commandType, ...operationActorContext() };
             if (key === "products" && old) {
               const stockDelta = Number(row.stock ?? row.stockAkhir ?? 0) - Number(old.stock ?? old.stockAkhir ?? 0);
               if (Math.abs(stockDelta) > 0.000001) operations.push(MDDSyncV2.makeOperation("stock_delta", "products", id, { productId: id, delta: stockDelta, localBaseStock: Number(old.stock ?? old.stockAkhir ?? 0), localTargetStock: Number(row.stock ?? row.stockAkhir ?? 0), reason: action || "Perubahan stok" }, common));
@@ -1240,7 +1257,7 @@
           });
           before.forEach((_row, id) => {
             if (!after.has(id) && (current.deletionTombstones?.[key] || []).map(String).includes(id)) {
-              operations.push(MDDSyncV2.makeOperation("delete", key, id, { id }, { baseRevision: lastBackendRevision, deviceId: syncDeviceId, commandId, commandType }));
+              operations.push(MDDSyncV2.makeOperation("delete", key, id, { id }, { baseRevision: lastBackendRevision, deviceId: syncDeviceId, commandId, commandType, ...operationActorContext() }));
             }
           });
         });
@@ -1248,7 +1265,7 @@
         SYNC_SETTING_KEYS.forEach((key) => {
           if (JSON.stringify(previous[key]) !== JSON.stringify(current[key])) settings[key] = current[key];
         });
-        if (Object.keys(settings).length) operations.push(MDDSyncV2.makeOperation("settings", "settings", "settings", { settings }, { baseRevision: lastBackendRevision, deviceId: syncDeviceId, commandId, commandType }));
+        if (Object.keys(settings).length) operations.push(MDDSyncV2.makeOperation("settings", "settings", "settings", { settings }, { baseRevision: lastBackendRevision, deviceId: syncDeviceId, commandId, commandType, ...operationActorContext() }));
         return operations;
       }
       function v150AllowedMutationTables(action) {
@@ -1468,8 +1485,8 @@
         let pending = [];
         let conflicts = [];
         try {
-          pending = await syncOutbox.list(["pending", "sending", "failed"], 100000);
-          conflicts = await syncOutbox.list(["conflict"], 100000);
+          pending = (await syncOutbox.list(["pending", "sending", "failed"], 100000)).filter(operationBelongsToVisibleSession);
+          conflicts = (await syncOutbox.list(["conflict"], 100000)).filter(operationBelongsToVisibleSession);
         } catch {
           return setBackendSyncBanner("danger", "SYNC ERROR • IndexedDB tidak dapat dibaca");
         }
@@ -2228,7 +2245,13 @@
         bind();
         new MutationObserver(() => makeTablesMobileFriendly(document.getElementById("appShell"))).observe(document.getElementById("appShell"), { childList: true, subtree: true });
         const saved = sessionStorage.getItem("mdd_session");
-        if (saved) session = JSON.parse(saved);
+        if (saved) {
+          session = JSON.parse(saved);
+          activeSessionId = String(session?.sessionId || newSessionId());
+          session.sessionId = activeSessionId;
+          session.deviceId = syncDeviceId;
+          sessionStorage.setItem("mdd_session", JSON.stringify(session));
+        }
         if (session) showApp(); else {
           document.getElementById("loginScreen").classList.remove("d-none");
           // Perbarui kode akses di latar belakang saat user sedang mengisi form.
@@ -2602,7 +2625,19 @@
       function bind() {
         document.getElementById("loginForm").addEventListener("submit", login);
         document.getElementById("togglePasswordBtn").addEventListener("click", togglePasswordVisibility);
-        document.getElementById("logoutBtn").addEventListener("click", () => { sessionStorage.removeItem("mdd_session"); location.reload(); });
+        document.getElementById("logoutBtn").addEventListener("click", async () => {
+          try {
+            if (outboxReady) await syncOutbox.setMeta("lastSessionHandover", {
+              deviceId: syncDeviceId,
+              fromUsername: String(session?.username || ""),
+              fromRole: String(session?.role || ""),
+              sessionId: String(activeSessionId || session?.sessionId || ""),
+              at: new Date().toISOString()
+            });
+          } catch (error) { console.warn("v159 session handover audit skipped:", error); }
+          sessionStorage.removeItem("mdd_session");
+          location.reload();
+        });
         document.getElementById("dashboardPdfBtn").addEventListener("click", () => exportElementPdf("dashboardCapture", "dashboard-utama-mdd.pdf"));
         document.querySelectorAll("[data-jump]").forEach((btn) => btn.addEventListener("click", () => setView(btn.dataset.jump)));
         document.getElementById("modalForm").addEventListener("submit", async (event) => {
@@ -2639,7 +2674,8 @@
           submitButton.innerHTML = '<i class="bi bi-box-arrow-in-right"></i> Masuk';
           return;
         }
-        session = { name: user.name, role: user.role, username: user.username };
+        activeSessionId = newSessionId();
+        session = { name: user.name, role: user.role, username: user.username, sessionId: activeSessionId, deviceId: syncDeviceId };
         sessionStorage.setItem("mdd_session", JSON.stringify(session));
         addHistory("Login aplikasi");
         showApp();
@@ -5625,6 +5661,7 @@
         let batch = [];
         try {
           if (!await verifyActiveBackend()) throw new Error("Endpoint backend tidak terverifikasi");
+          // v159: device-wide worker intentionally finishes durable operations from prior users.
           batch = await syncOutbox.due(25);
           if (!batch.length) return updateSyncIndicator();
 

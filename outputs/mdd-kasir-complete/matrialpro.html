@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 163;
+      const APP_VERSION = 165;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -2089,7 +2089,16 @@
             if (generation !== dashboardRequestGeneration) return false;
             const data = dashboardResponse.data;
             productionBootstrap = Object.assign({}, productionBootstrap || {}, data);
-            if (data.entityRevisions) productionModuleRevisions = data.entityRevisions;
+            if (data.entityRevisions) {
+              // v164: DashboardSummary is a dashboard projection, not the
+              // authority for Products cache metadata. Preserve a Products
+              // revision/count that was proven directly by the Products module.
+              const provenProducts = productionModuleRevisions?.products?.source?.startsWith("authoritative-products-")
+                ? { ...productionModuleRevisions.products }
+                : null;
+              productionModuleRevisions = { ...data.entityRevisions };
+              if (provenProducts) productionModuleRevisions.products = provenProducts;
+            }
             lastBackendRevision = String(dashboardResponse.revision || lastBackendRevision || "");
             verifiedBackendEndpoint = activeBackendEndpoint();
             authoritativeSnapshotReady = true;
@@ -2154,12 +2163,13 @@
       }
 
       function productsReadModelIsCurrent() {
-        const serverMeta = productionModuleRevisions?.products || {};
-        if (!serverMeta.revision) return false;
+        // v165: Products uses one atomic full-snapshot endpoint. Do not compare
+        // against the paginated module/global revision because normal store
+        // writes can change that revision while a multi-page read is running.
         const cached = readCachedModuleRevisions().products || {};
-        return String(cached.revision || "") === String(serverMeta.revision || "")
-          && Number(cached.count || 0) === Number(serverMeta.count || 0)
-          && (state.products || []).length === Number(serverMeta.count || 0);
+        return cached.mode === "authoritative-full-single-response-v165"
+          && Number(cached.count || 0) === (state.products || []).length
+          && Number(cached.count || 0) > 0;
       }
 
       async function requestModulePage(module, cursor = 0, limit = 300, updatedSince = "") {
@@ -2219,7 +2229,7 @@
           productionModuleRevisions[module] = Object.assign({}, serverMeta, {
             revision: snapshotRevision || String(serverMeta.revision || ""),
             count: authoritative.size,
-            source: "authoritative-module-snapshot-v163"
+            source: module === "products" ? "authoritative-products-snapshot-v164" : "authoritative-module-snapshot-v164"
           });
 
           state[module] = [...authoritative.values()];
@@ -2230,7 +2240,7 @@
             revision: snapshotRevision || String(serverMeta.revision || ""),
             count: authoritative.size,
             syncedAt: new Date().toISOString(),
-            mode: "authoritative-full-v163"
+            mode: "authoritative-full-v164"
           };
           localStorage.setItem(PRODUCTION_MODULE_REVISION_KEY, JSON.stringify(cachedRevisions));
           return true;
@@ -2244,22 +2254,62 @@
 
       async function ensureProductsFirstPage() {
         if (!authoritativeSnapshotReady || !navigator.onLine) return false;
-        // v162 deliberately prefers correctness over showing a partial first
-        // page. Existing cache remains visible until the complete server
-        // snapshot is ready, then swaps atomically.
-        const ok = await hydrateAuthoritativeModule("products");
-        if (!ok) {
-          setBackendSyncBanner("warning", "PRODUCTS_REFRESH_PENDING • data Produk belum sama dengan server");
+        if (productsHydrationInFlight) return false;
+        productsHydrationInFlight = true;
+        await updateSyncIndicator();
+        try {
+          // v165 root fix: Products is fetched in ONE server response. The old
+          // paginated reader required every page to have the same global
+          // revision; active sales/purchases legitimately changed that revision
+          // mid-download and made convergence impossible in a live store.
+          const response = await requestProductionTransport("products", { clientVersion: APP_VERSION });
+          const rows = response?.data?.products;
+          if (!response?.ok || String(response.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID || !Array.isArray(rows)) {
+            setBackendSyncBanner("warning", "PRODUCTS_REFRESH_PENDING • snapshot Produk server belum tersedia");
+            return false;
+          }
+          const authoritative = new Map();
+          for (const row of rows) {
+            const id = operationRowId("products", row);
+            if (!id) continue;
+            authoritative.set(id, row);
+          }
+          if (!authoritative.size || authoritative.size !== rows.length) {
+            setBackendSyncBanner("danger", "PRODUCTS_REFRESH_BLOCKED • ID Produk server tidak valid/duplikat");
+            return false;
+          }
+          state.products = [...authoritative.values()];
+          normalizeState(state);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          operationSnapshot = JSON.parse(JSON.stringify(state));
+          const cachedRevisions = readCachedModuleRevisions();
+          cachedRevisions.products = {
+            revision: `full-${Date.now()}`,
+            count: authoritative.size,
+            syncedAt: new Date().toISOString(),
+            mode: "authoritative-full-single-response-v165"
+          };
+          localStorage.setItem(PRODUCTION_MODULE_REVISION_KEY, JSON.stringify(cachedRevisions));
+          productionModuleRevisions.products = {
+            revision: cachedRevisions.products.revision,
+            count: authoritative.size,
+            source: "authoritative-products-full-response-v165"
+          };
+          const activeView = document.querySelector(".view-section.active")?.id;
+          if (activeView === "productsView" || activeView === "cashierView") renderAll();
+          return true;
+        } catch (error) {
+          setBackendSyncBanner("warning", `PRODUCTS_REFRESH_PENDING • ${error?.message || error}`);
           return false;
+        } finally {
+          productsHydrationInFlight = false;
+          await updateSyncIndicator();
         }
-        const activeView = document.querySelector(".view-section.active")?.id;
-        if (activeView === "productsView" || activeView === "cashierView") renderAll();
-        return true;
       }
 
       async function syncModulesInBackground() {
         if (!authoritativeSnapshotReady || !navigator.onLine) return;
-        for (const module of ["products", "sales", "purchases", "payments", "cashTx", "stockMoves", "returns", "customers", "suppliers", "cashAccounts", "categories", "discounts", "packages", "employees"]) {
+        for (const module of ["sales", "purchases", "payments", "cashTx", "stockMoves", "returns", "customers", "suppliers", "cashAccounts", "categories", "discounts", "packages", "employees"]) {
           const ok = await hydrateAuthoritativeModule(module);
           if (ok) {
             const activeView = document.querySelector(".view-section.active")?.id;

@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 167;
+      const APP_VERSION = 168;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -1970,11 +1970,79 @@
         return false;
       }
 
+      // v168 Ledger Authority: the finance endpoint is the authoritative read
+      // for Hutang/Piutang because it overlays the dedicated ledger sheets onto
+      // Sales/Purchases. Module pagination remains useful for canonical documents,
+      // but it must never resurrect an older balance after the finance ledger has
+      // already declared an invoice paid/returned.
+      const FINANCE_LEDGER_AUTHORITY_KEY = "MDD_FINANCE_LEDGER_AUTHORITY_V168";
+      let financeLedgerAuthority = (() => {
+        try { return JSON.parse(localStorage.getItem(FINANCE_LEDGER_AUTHORITY_KEY) || '{"debt":{},"receivable":{}}'); }
+        catch { return { debt: {}, receivable: {} }; }
+      })();
+      const financeInvoiceKey = (value) => String(value || "").trim().toLowerCase();
+      function captureFinanceLedgerAuthority(remoteData) {
+        const next = { debt: {}, receivable: {}, savedAt: new Date().toISOString() };
+        (remoteData?.purchases || []).forEach((row) => {
+          const key = financeInvoiceKey(row.invoiceNo || row.id);
+          if (!key) return;
+          // HUT-* rows come directly from the Hutang projection. A canonical
+          // purchase may also carry the final financial fields; prefer a HUT row
+          // whenever both exist for the same invoice.
+          const priority = String(row.id || "").startsWith("HUT-") ? 2 : 1;
+          if (!next.debt[key] || priority >= next.debt[key].priority) next.debt[key] = {
+            priority, total: toNumber(row.total), paid: toNumber(row.paid),
+            returnAmount: toNumber(row.returnAmount), due: toNumber(row.due),
+            status: toNumber(row.due) <= 0 ? "Lunas" : "Hutang", sourceId: row.id || ""
+          };
+        });
+        (remoteData?.sales || []).forEach((row) => {
+          const key = financeInvoiceKey(row.invoiceNo || row.id);
+          if (!key) return;
+          const priority = String(row.id || "").startsWith("PIU-") ? 2 : 1;
+          if (!next.receivable[key] || priority >= next.receivable[key].priority) next.receivable[key] = {
+            priority, total: toNumber(row.total), paid: toNumber(row.paid),
+            returnAmount: toNumber(row.returnAmount), due: toNumber(row.due),
+            status: toNumber(row.due) <= 0 ? "Lunas" : "Piutang", sourceId: row.id || ""
+          };
+        });
+        financeLedgerAuthority = next;
+        localStorage.setItem(FINANCE_LEDGER_AUTHORITY_KEY, JSON.stringify(next));
+      }
+      function applyFinanceLedgerAuthority() {
+        const apply = (rows, ledger, kind) => {
+          (rows || []).forEach((row) => {
+            const authority = ledger[financeInvoiceKey(row.invoiceNo || row.id)];
+            if (!authority) return;
+            row.total = authority.total;
+            row.paid = authority.paid;
+            row.returnAmount = authority.returnAmount;
+            row.due = authority.due;
+            row.status = authority.status;
+            row.ledgerAuthority = "finance-v168";
+          });
+        };
+        apply(state.purchases, financeLedgerAuthority.debt || {}, "debt");
+        apply(state.sales, financeLedgerAuthority.receivable || {}, "receivable");
+      }
+      async function refreshAuthoritativeFinanceLedger() {
+        if (!backendRuntimeEnabled() || !activeBackendEndpoint() || !navigator.onLine) return false;
+        const payload = await requestProductionTransport("finance");
+        if (!payload?.ok || !payload?.data || String(payload.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) return false;
+        captureFinanceLedgerAuthority(payload.data);
+        mergeSubsetFromBackend(payload.data);
+        applyFinanceLedgerAuthority();
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        return true;
+      }
+
       async function loadGoogleWorkspaceState(action = "state") {
         if (!backendRuntimeEnabled() || !activeBackendEndpoint()) return false;
         const payload = await requestProductionTransport(action);
         if (!payload?.ok || !payload?.data || String(payload.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) return false;
+        if (action === "finance") captureFinanceLedgerAuthority(payload.data);
         action === "state" ? mergeStateFromBackend(payload.data) : mergeSubsetFromBackend(payload.data);
+        if (action === "finance") { applyFinanceLedgerAuthority(); localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
         if (action === "state") authoritativeSnapshotReady = true;
         return true;
       }
@@ -2248,6 +2316,7 @@
 
           state[module] = [...authoritative.values()];
           normalizeState(state);
+          if (module === "purchases" || module === "sales") applyFinanceLedgerAuthority();
           localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
           operationSnapshot = JSON.parse(JSON.stringify(state));
           cachedRevisions[module] = {
@@ -3125,7 +3194,7 @@
           setTimeout(refreshRevenueChart, 0);
         }
         if (view === "financeView" && backendRuntimeEnabled()) {
-          loadGoogleWorkspaceState("finance").then((loaded) => {
+          refreshAuthoritativeFinanceLedger().then((loaded) => {
             if (loaded && document.querySelector(".view-section.active")?.id === "financeView") renderFinance();
           }).catch(() => {});
         }
@@ -4555,13 +4624,13 @@
           return `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Tanggal</th><th>Jatuh Tempo</th><th>No. Faktur</th><th>Supplier</th><th>Rincian Produk/Barang</th><th class="text-end">Hutang Aktif</th><th class="text-end">Bayar</th><th class="text-end">Retur</th><th class="text-end">Sisa Hutang</th><th></th></tr></thead><tbody>${items.map((x) => {
             const paid = debtPaidAmount(x);
             const returns = debtReturnAmount(x);
-            return `<tr><td>${displayDate(x.date)}</td><td>${displayDate(x.dueDate)}</td><td>${x.invoiceNo || "-"}</td><td>${x.salesName || personName(state.suppliers, x.supplierId)}</td><td>${transactionItemDetails(x)}</td><td class="text-end">${idr.format(x.total || 0)}</td><td class="text-end">${idr.format(paid)}</td><td class="text-end">${idr.format(returns)}</td><td class="text-end fw-bold">${idr.format(x.due || 0)}</td><td class="text-end"><div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-primary" data-pay-debt="${x.id}"><i class="bi bi-cash-coin"></i> Bayar</button><button class="btn btn-sm btn-outline-secondary" data-edit-debt="${x.id}"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-danger" data-delete-debt="${x.id}"><i class="bi bi-trash"></i> Hapus</button></div></td></tr>`;
+            return `<tr><td>${displayDate(x.date)}</td><td>${displayDate(x.dueDate)}</td><td>${x.invoiceNo || "-"}</td><td>${x.salesName || personName(state.suppliers, x.supplierId)}</td><td>${transactionItemDetails(x)}</td><td class="text-end">${idr.format(x.total || 0)}</td><td class="text-end">${idr.format(paid)}</td><td class="text-end">${idr.format(returns)}</td><td class="text-end fw-bold">${idr.format(x.due || 0)}</td><td class="text-end"><div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-primary" data-pay-debt="${x.id}" ${toNumber(x.due) <= 0 ? "disabled" : ""}><i class="bi bi-cash-coin"></i> ${toNumber(x.due) <= 0 ? "Lunas" : "Bayar"}</button><button class="btn btn-sm btn-outline-secondary" data-edit-debt="${x.id}"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-danger" data-delete-debt="${x.id}"><i class="bi bi-trash"></i> Hapus</button></div></td></tr>`;
           }).join("") || `<tr><td colspan="10" class="text-center text-secondary">Gunakan Pencarian Data Base Hutang-Piutang untuk menampilkan hutang.</td></tr>`}</tbody></table></div>`;
         }
         return `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Tanggal</th><th>Jatuh Tempo</th><th>No. Faktur</th><th>Pelanggan</th><th>Rincian Produk/Barang</th><th class="text-end">Piutang Aktif</th><th class="text-end">Bayar</th><th class="text-end">Retur</th><th class="text-end">Sisa Piutang</th><th></th></tr></thead><tbody>${items.map((x) => {
           const paid = receivablePaidAmount(x);
           const returns = receivableReturnAmount(x);
-          return `<tr><td>${displayDate(x.date)}</td><td>${displayDate(x.dueDate)}</td><td>${x.invoiceNo || "-"}</td><td>${x.customerName || personName(state.customers, x.customerId)}</td><td>${transactionItemDetails(x)}</td><td class="text-end">${idr.format(x.total || 0)}</td><td class="text-end">${idr.format(paid)}</td><td class="text-end">${idr.format(returns)}</td><td class="text-end fw-bold">${idr.format(x.due || 0)}</td><td class="text-end"><div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-primary" data-pay-receivable="${x.id}"><i class="bi bi-cash-coin"></i> Bayar</button><button class="btn btn-sm btn-outline-secondary" data-edit-receivable="${x.id}"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-danger" data-delete-receivable="${x.id}"><i class="bi bi-trash"></i> Hapus</button></div></td></tr>`;
+          return `<tr><td>${displayDate(x.date)}</td><td>${displayDate(x.dueDate)}</td><td>${x.invoiceNo || "-"}</td><td>${x.customerName || personName(state.customers, x.customerId)}</td><td>${transactionItemDetails(x)}</td><td class="text-end">${idr.format(x.total || 0)}</td><td class="text-end">${idr.format(paid)}</td><td class="text-end">${idr.format(returns)}</td><td class="text-end fw-bold">${idr.format(x.due || 0)}</td><td class="text-end"><div class="d-flex gap-1 justify-content-end"><button class="btn btn-sm btn-primary" data-pay-receivable="${x.id}" ${toNumber(x.due) <= 0 ? "disabled" : ""}><i class="bi bi-cash-coin"></i> ${toNumber(x.due) <= 0 ? "Lunas" : "Bayar"}</button><button class="btn btn-sm btn-outline-secondary" data-edit-receivable="${x.id}"><i class="bi bi-pencil-square"></i> Edit</button><button class="btn btn-sm btn-outline-danger" data-delete-receivable="${x.id}"><i class="bi bi-trash"></i> Hapus</button></div></td></tr>`;
         }).join("") || `<tr><td colspan="10" class="text-center text-secondary">Gunakan Pencarian Data Base Hutang-Piutang untuk menampilkan piutang.</td></tr>`}</tbody></table></div>`;
       }
       function debtPaidAmount(purchase) {
@@ -4775,12 +4844,18 @@
         // plus Payments immediately before opening the payment form.
         if (navigator.onLine && authoritativeSnapshotReady && !hasLocalSyncChanges()) {
           try {
-            await hydrateAuthoritativeModule(type === "debt" ? "purchases" : "sales");
+            await refreshAuthoritativeFinanceLedger();
             await hydrateAuthoritativeModule("payments");
+            applyFinanceLedgerAuthority();
           } catch {}
         }
         const row = type === "debt" ? state.purchases.find((p) => p.id === id) : state.sales.find((s) => s.id === id);
         if (!row) return toast("Data tagihan tidak ditemukan.");
+        applyFinanceLedgerAuthority();
+        if (toNumber(row.due) <= 0) {
+          renderAll();
+          return toast("Faktur sudah LUNAS menurut ledger server. Pembayaran diblokir untuk mencegah pembayaran ganda.");
+        }
         const isDebt = type === "debt";
         const relationLabel = isDebt ? "Supplier" : "Pelanggan";
         const relationNameValue = isDebt ? (row.salesName || personName(state.suppliers, row.supplierId)) : (row.customerName || personName(state.customers, row.customerId));

@@ -800,7 +800,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 166;
+      const APP_VERSION = 167;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -2354,6 +2354,38 @@
         return false;
       }
 
+      async function v167RetireConfirmedRejectedPaymentConflictEarly() {
+        // Runs immediately after IndexedDB opens. It does not wait for module
+        // hydration, because a failed background module must never keep a
+        // server-confirmed rejected payment stuck as a permanent red banner.
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return false;
+        const markerKey = "v167ConfirmedRejectedPaymentConflictRepair";
+        if (await syncOutbox.getMeta(markerKey)) return false;
+        const targetOperationId = "6b390e53-06fa-4256-b24f-14e0a834555f";
+        const targetPaymentId = "PAY-SWY6B";
+        const targetInvoice = "PUR202607140";
+        const conflicts = await syncOutbox.list(["conflict"], 100000);
+        const matches = conflicts.filter((row) => {
+          const opId = String(row.operationId || "");
+          const entityId = String(row.entityId || row.payload?.payment?.id || "");
+          const err = String(row.lastError || row.error || row.payload?.error || "");
+          return opId === targetOperationId || entityId === targetPaymentId ||
+            (err.includes(targetInvoice) && /Saldo ledger berubah|pembayaran legacy perlu diperiksa/i.test(err));
+        });
+        if (!matches.length) return false;
+        const ids = matches.map((row) => row.operationId).filter(Boolean);
+        await syncOutbox.mark(ids, "retired", {
+          retiredAt: new Date().toISOString(),
+          resolvedBy: "v167-server-confirmed-rejected-payment",
+          resolution: "Backend rejected this stale legacy payment before commit; retired locally without creating/deleting any server payment."
+        });
+        state.payments = (state.payments || []).filter((row) => String(row.id) !== targetPaymentId);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        operationSnapshot = JSON.parse(JSON.stringify(state));
+        await syncOutbox.setMeta(markerKey, { completed: true, at: new Date().toISOString(), retiredOperationIds: ids });
+        return true;
+      }
+
       async function v166RepairKnownLegacyPaymentConflict() {
         if (SYNC_ENVIRONMENT !== "production" || !outboxReady || !authoritativeSnapshotReady) return false;
         const markerKey = "v166KnownLegacyPaymentConflictRepair";
@@ -2605,6 +2637,11 @@
           });
           lastChangeCursor = String((await syncOutbox.getMeta("changeCursor")) || "");
           outboxReady = true;
+          try {
+            await v167RetireConfirmedRejectedPaymentConflictEarly();
+          } catch (v167RepairError) {
+            console.warn("v167 confirmed rejected payment cleanup skipped:", v167RepairError);
+          }
           try {
             await retirePreV155LegacyConflictsOnce();
           } catch (legacyCleanupError) {

@@ -793,6 +793,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
+      // MDD Material Pro v170 - Payment Exactly-Once Guard
     (() => {
       "use strict";
 
@@ -2423,6 +2424,51 @@
         return false;
       }
 
+      async function v170RetireServerConfirmedSaifulDuplicateConflictEarly() {
+        // Production audit confirmed: the first PUR202606137 payment command was
+        // ACKed and the second command was rejected by the backend because the
+        // ledger had already changed. Retire only that rejected local conflict.
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return false;
+        const markerKey = "v170SaifulDuplicatePaymentConflictRepair";
+        if (await syncOutbox.getMeta(markerKey)) return false;
+        const invoice = "PUR202606137";
+        const conflicts = await syncOutbox.list(["conflict"], 100000);
+        const matches = conflicts.filter((row) => {
+          if (String(row.type || "") !== "payment_delta") return false;
+          const opInvoice = v169OperationInvoice(row);
+          const errorText = String(row.lastError || row.error || row.payload?.error || "");
+          const paymentRelation = String(row?.payload?.payment?.relation || "").toLowerCase();
+          return opInvoice === financeInvoiceKey(invoice) ||
+            (errorText.toLowerCase().includes(financeInvoiceKey(invoice))) ||
+            (paymentRelation.includes("saiful sika") && /ledger|saldo|payment|pembayaran|conflict/i.test(errorText));
+        });
+        if (!matches.length) return false;
+        const operationIds = matches.map((row) => row.operationId).filter(Boolean);
+        const rejectedPaymentIds = new Set(matches.map((row) => String(row.entityId || row?.payload?.payment?.id || "")).filter(Boolean));
+        await syncOutbox.mark(operationIds, "retired", {
+          retiredAt: new Date().toISOString(), resolvedBy: "v170-server-confirmed-duplicate-payment-conflict",
+          resolution: "Backend rejected the second payment after the authoritative ledger changed; no server payment is deleted or recreated."
+        });
+        state.payments = (state.payments || []).filter((row) => !rejectedPaymentIds.has(String(row.id)));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        operationSnapshot = JSON.parse(JSON.stringify(state));
+        const guards = v169ReadPaymentGuards();
+        Object.keys(guards).forEach((key) => { if (financeInvoiceKey(guards[key]?.invoiceNo) === financeInvoiceKey(invoice)) delete guards[key]; });
+        v169WritePaymentGuards(guards);
+        await syncOutbox.setMeta(markerKey, { completed: true, at: new Date().toISOString(), retiredOperationIds: operationIds });
+        // v170: immediately restore the visible finance state from server authority.
+        // This does not create, delete, or replay any payment on the server.
+        try {
+          if (session) {
+            await hydrateAuthoritativeModule("purchases");
+            await hydrateAuthoritativeModule("payments");
+          }
+        } catch (rehydrateError) {
+          console.warn("v170 finance rehydrate deferred:", rehydrateError);
+        }
+        return true;
+      }
+
       async function v167RetireConfirmedRejectedPaymentConflictEarly() {
         // Runs immediately after IndexedDB opens. It does not wait for module
         // hydration, because a failed background module must never keep a
@@ -2708,6 +2754,7 @@
           outboxReady = true;
           try {
             await v167RetireConfirmedRejectedPaymentConflictEarly();
+            await v170RetireServerConfirmedSaifulDuplicateConflictEarly();
           } catch (v167RepairError) {
             console.warn("v167 confirmed rejected payment cleanup skipped:", v167RepairError);
           }
@@ -4838,6 +4885,64 @@
         renderAll();
         toast("Data piutang sudah dihapus.");
       }
+      // v169 Payment Exactly-Once Guard
+      // Prevents a second payment command for the same invoice while the first
+      // payment intent is still pending/acknowledged but not yet reflected by
+      // the authoritative finance ledger. This guard is device-local and does
+      // not replace backend idempotency; it closes the UI double-submit/reopen gap.
+      const V169_PAYMENT_GUARD_KEY = "MDD_PAYMENT_INTENTS_V169";
+      function v169ReadPaymentGuards() {
+        try { return JSON.parse(localStorage.getItem(V169_PAYMENT_GUARD_KEY) || "{}"); }
+        catch { return {}; }
+      }
+      function v169WritePaymentGuards(guards) { localStorage.setItem(V169_PAYMENT_GUARD_KEY, JSON.stringify(guards || {})); }
+      function v169PaymentGuardKey(type, row) { return `${type}:${financeInvoiceKey(row?.invoiceNo || row?.id)}`; }
+      function v169SetPaymentGuard(type, row, paymentId, amount) {
+        const guards = v169ReadPaymentGuards();
+        const key = v169PaymentGuardKey(type, row);
+        guards[key] = {
+          intentId: (crypto?.randomUUID ? crypto.randomUUID() : MDDSyncV2.operationId()),
+          paymentId: String(paymentId || ""), invoiceNo: String(row?.invoiceNo || row?.id || ""),
+          type, baselineDue: toNumber(row?.due), amount: toNumber(amount), createdAt: new Date().toISOString()
+        };
+        v169WritePaymentGuards(guards);
+        return guards[key];
+      }
+      function v169ClearPaymentGuard(type, row) {
+        const guards = v169ReadPaymentGuards();
+        delete guards[v169PaymentGuardKey(type, row)];
+        v169WritePaymentGuards(guards);
+      }
+      function v169OperationInvoice(row) {
+        return financeInvoiceKey(row?.payload?.payment?.invoiceNo || row?.payload?.invoiceNo || row?.invoiceNo || "");
+      }
+      async function v169PaymentGuardStatus(type, row) {
+        const guards = v169ReadPaymentGuards();
+        const key = v169PaymentGuardKey(type, row);
+        const guard = guards[key];
+        if (!guard) return { blocked: false };
+        // A lower authoritative due proves the previous intent reached the ledger.
+        if (toNumber(row?.due) < toNumber(guard.baselineDue) - 0.000001) {
+          delete guards[key]; v169WritePaymentGuards(guards);
+          return { blocked: false, settled: true };
+        }
+        if (!outboxReady) return { blocked: true, reason: "Pembayaran sebelumnya masih dikunci sampai status server dapat diverifikasi." };
+        const rows = await syncOutbox.list(["pending", "sending", "failed", "conflict", "acknowledged"], 100000);
+        const invoiceKey = financeInvoiceKey(guard.invoiceNo);
+        const related = rows.filter((op) => String(op.type || "") === "payment_delta" &&
+          (String(op.entityId || op.payload?.payment?.id || "") === String(guard.paymentId || "") || v169OperationInvoice(op) === invoiceKey));
+        if (related.some((op) => String(op.status) === "conflict")) return { blocked: true, reason: "Pembayaran sebelumnya ditolak/konflik dan harus direkonsiliasi sebelum pembayaran baru." };
+        if (related.length) return { blocked: true, reason: "Pembayaran sebelumnya masih diproses atau menunggu ledger server. Jangan tekan Bayar lagi." };
+        // No durable operation remains and the ledger did not move. A stale guard
+        // may be released only after a conservative timeout.
+        const age = Date.now() - Date.parse(guard.createdAt || 0);
+        if (Number.isFinite(age) && age > 15 * 60 * 1000) {
+          delete guards[key]; v169WritePaymentGuards(guards);
+          return { blocked: false, expired: true };
+        }
+        return { blocked: true, reason: "Pembayaran sebelumnya sedang diverifikasi. Tunggu sinkronisasi server sebelum membuat pembayaran baru." };
+      }
+
       async function openPaymentModal(type, id) {
         // v166: never calculate a payment from a stale local ledger when the
         // device is online and has no unsent writes. Refresh the invoice side
@@ -4852,6 +4957,11 @@
         const row = type === "debt" ? state.purchases.find((p) => p.id === id) : state.sales.find((s) => s.id === id);
         if (!row) return toast("Data tagihan tidak ditemukan.");
         applyFinanceLedgerAuthority();
+        const v169Guard = await v169PaymentGuardStatus(type, row);
+        if (v169Guard.blocked) {
+          renderAll();
+          return toast(v169Guard.reason);
+        }
         if (toNumber(row.due) <= 0) {
           renderAll();
           return toast("Faktur sudah LUNAS menurut ledger server. Pembayaran diblokir untuk mencegah pembayaran ganda.");
@@ -4878,19 +4988,23 @@
             <div class="col-12"><label class="form-label">Catatan</label><input name="note" class="form-control" placeholder="Contoh: cicilan pembayaran faktur"></div>
           </div>`, async (fd) => {
           const beforeWrite = JSON.parse(JSON.stringify(state));
-          const amount = Math.min(row.due, Number(fd.get("amount")));
+          const amount = Math.min(toNumber(row.due), toNumber(fd.get("amount")));
+          if (!(amount > 0)) return toast("Nominal pembayaran tidak valid.");
+          const paymentId = uid("PAY");
+          v169SetPaymentGuard(type, row, paymentId, amount);
           row.due -= amount;
           row.paid = toNumber(row.paid) + amount;
           if (row.due === 0) row.status = "Lunas";
           const account = state.cashAccounts.find((a) => a.id === fd.get("accountId"));
           if (account) account.balance += type === "debt" ? -amount : amount;
-          const payment = { id: uid("PAY"), date: fd.get("date"), refId: id, invoiceNo: row.invoiceNo || row.id, relation: relationNameValue, type: type === "debt" ? "Hutang" : "Piutang", amount, remaining: row.due, method: fd.get("method"), note: fd.get("note") };
+          const payment = { id: paymentId, date: fd.get("date"), refId: id, invoiceNo: row.invoiceNo || row.id, relation: relationNameValue, type: type === "debt" ? "Hutang" : "Piutang", amount, remaining: row.due, method: fd.get("method"), note: fd.get("note") };
           state.payments.unshift(payment);
           v166SetPaymentCommandScope([payment.id]);
           try {
             await saveStateDurable(`Pembayaran ${type === "debt" ? "hutang" : "piutang"} ${row.invoiceNo || id}`);
           } catch (error) {
             restoreStateSnapshot(beforeWrite);
+            v169ClearPaymentGuard(type, row);
             v166ClearPaymentCommandScope();
             renderAll();
             return toast("Pembayaran BELUM tersimpan. Form tetap dibuka; periksa penyimpanan perangkat lalu coba lagi.");

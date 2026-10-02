@@ -793,7 +793,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
-      // MDD Material Pro v170 - Payment Exactly-Once Guard
+      // MDD Material Pro v171 - Finance Identity Guard
     (() => {
       "use strict";
 
@@ -2010,17 +2010,34 @@
         financeLedgerAuthority = next;
         localStorage.setItem(FINANCE_LEDGER_AUTHORITY_KEY, JSON.stringify(next));
       }
+      // v171 Finance Identity Guard: invoice numbers are not globally unique in
+      // legacy production data. Never let an invoice-only ledger projection from
+      // one transaction overwrite another transaction that happens to share the
+      // same invoice number. For collisions, keep each canonical server document
+      // on its own entity identity; only a sourceId-exact authority may override it.
       function applyFinanceLedgerAuthority() {
         const apply = (rows, ledger, kind) => {
+          const counts = new Map();
           (rows || []).forEach((row) => {
-            const authority = ledger[financeInvoiceKey(row.invoiceNo || row.id)];
+            const key = financeInvoiceKey(row.invoiceNo || row.id);
+            if (key) counts.set(key, (counts.get(key) || 0) + 1);
+          });
+          (rows || []).forEach((row) => {
+            const key = financeInvoiceKey(row.invoiceNo || row.id);
+            const authority = ledger[key];
             if (!authority) return;
+            const collision = (counts.get(key) || 0) > 1;
+            const exactSource = String(authority.sourceId || "") === String(row.id || "");
+            if (collision && !exactSource) {
+              row.ledgerAuthority = "finance-v171-collision-guard";
+              return;
+            }
             row.total = authority.total;
             row.paid = authority.paid;
             row.returnAmount = authority.returnAmount;
             row.due = authority.due;
             row.status = authority.status;
-            row.ledgerAuthority = "finance-v168";
+            row.ledgerAuthority = "finance-v171";
           });
         };
         apply(state.purchases, financeLedgerAuthority.debt || {}, "debt");

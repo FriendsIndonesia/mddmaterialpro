@@ -793,7 +793,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
-      // MDD Material Pro v171 - Finance Identity Guard
+      // MDD Material Pro v172 - Payment Production Lock
     (() => {
       "use strict";
 
@@ -4913,7 +4913,7 @@
         catch { return {}; }
       }
       function v169WritePaymentGuards(guards) { localStorage.setItem(V169_PAYMENT_GUARD_KEY, JSON.stringify(guards || {})); }
-      function v169PaymentGuardKey(type, row) { return `${type}:${financeInvoiceKey(row?.invoiceNo || row?.id)}`; }
+      function v169PaymentGuardKey(type, row) { return `${type}:${String(row?.id || "").trim() || financeInvoiceKey(row?.invoiceNo || "")}`; }
       function v169SetPaymentGuard(type, row, paymentId, amount) {
         const guards = v169ReadPaymentGuards();
         const key = v169PaymentGuardKey(type, row);
@@ -4950,14 +4950,10 @@
           (String(op.entityId || op.payload?.payment?.id || "") === String(guard.paymentId || "") || v169OperationInvoice(op) === invoiceKey));
         if (related.some((op) => String(op.status) === "conflict")) return { blocked: true, reason: "Pembayaran sebelumnya ditolak/konflik dan harus direkonsiliasi sebelum pembayaran baru." };
         if (related.length) return { blocked: true, reason: "Pembayaran sebelumnya masih diproses atau menunggu ledger server. Jangan tekan Bayar lagi." };
-        // No durable operation remains and the ledger did not move. A stale guard
-        // may be released only after a conservative timeout.
-        const age = Date.now() - Date.parse(guard.createdAt || 0);
-        if (Number.isFinite(age) && age > 15 * 60 * 1000) {
-          delete guards[key]; v169WritePaymentGuards(guards);
-          return { blocked: false, expired: true };
-        }
-        return { blocked: true, reason: "Pembayaran sebelumnya sedang diverifikasi. Tunggu sinkronisasi server sebelum membuat pembayaran baru." };
+        // v172: never unlock a money mutation merely because time elapsed.
+        // Only an authoritative lower due may release the intent. This prevents
+        // a slow/offline sync from turning a retry/reopen into a second payment.
+        return { blocked: true, reason: "Pembayaran sebelumnya belum terbukti masuk ledger server. Pembayaran baru dikunci sampai saldo server berubah." };
       }
 
       async function openPaymentModal(type, id) {
@@ -5005,8 +5001,14 @@
             <div class="col-12"><label class="form-label">Catatan</label><input name="note" class="form-control" placeholder="Contoh: cicilan pembayaran faktur"></div>
           </div>`, async (fd) => {
           const beforeWrite = JSON.parse(JSON.stringify(state));
-          const amount = Math.min(toNumber(row.due), toNumber(fd.get("amount")));
-          if (!(amount > 0)) return toast("Nominal pembayaran tidak valid.");
+          const requestedAmount = toNumber(fd.get("amount"));
+          const authoritativeDue = toNumber(row.due);
+          if (!(requestedAmount > 0) || requestedAmount > authoritativeDue + 0.000001) return toast("Nominal pembayaran tidak valid atau melebihi sisa tagihan server.");
+          // v172 second gate: re-check the durable payment lock at submit time,
+          // not only when the modal was opened. This closes reopen/race windows.
+          const submitGuard = await v169PaymentGuardStatus(type, row);
+          if (submitGuard.blocked) return toast(submitGuard.reason);
+          const amount = requestedAmount;
           const paymentId = uid("PAY");
           v169SetPaymentGuard(type, row, paymentId, amount);
           row.due -= amount;

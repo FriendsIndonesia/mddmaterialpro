@@ -793,7 +793,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
-      // MDD Material Pro v172 - Payment Production Lock
+      // MDD Material Pro v173 - Targeted Rejected Sale Cleanup
     (() => {
       "use strict";
 
@@ -801,7 +801,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 168;
+      const APP_VERSION = 173;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -2441,6 +2441,67 @@
         return false;
       }
 
+      async function v173RetireServerConfirmedRejectedSaleP8NLI() {
+        // Targeted production repair only for SAL-P8NLI. Production audit proved
+        // the backend rejected this sale for insufficient stock and committed
+        // neither the Sales row nor its StockMove. Retire only local conflict
+        // evidence belonging to that rejected command, then rehydrate authority.
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return false;
+        const markerKey = "v173RejectedSaleP8NLICleanup";
+        if (await syncOutbox.getMeta(markerKey)) return false;
+        const saleId = "SAL-P8NLI";
+        const conflicts = await syncOutbox.list(["conflict"], 100000);
+        const directlyRelated = (row) => {
+          const haystack = [
+            row?.entityId, row?.commandType, row?.lastError, row?.error,
+            row?.payload?.reason, row?.payload?.row?.id, row?.payload?.row?.refId,
+            row?.payload?.row?.note, row?.payload?.payment?.refId,
+            row?.payload?.payment?.invoiceNo
+          ].map((value) => String(value || "")).join(" | ");
+          return haystack.includes(saleId);
+        };
+        const seed = conflicts.filter(directlyRelated);
+        if (!seed.length) {
+          await syncOutbox.setMeta(markerKey, { completed: true, at: new Date().toISOString(), retiredOperationIds: [] });
+          return false;
+        }
+        const commandIds = new Set(seed.map((row) => String(row.commandId || "")).filter(Boolean));
+        const matches = conflicts.filter((row) => directlyRelated(row) || (row.commandId && commandIds.has(String(row.commandId))));
+        const operationIds = matches.map((row) => row.operationId).filter(Boolean);
+        if (!operationIds.length) return false;
+        await syncOutbox.mark(operationIds, "retired", {
+          retiredAt: new Date().toISOString(),
+          resolvedBy: "v173-server-confirmed-rejected-sale",
+          resolution: "SAL-P8NLI was rejected before commit for insufficient authoritative stock; local conflict evidence retired without creating, deleting, or replaying any server transaction."
+        });
+
+        // Remove only the rejected provisional sale footprint from this browser.
+        state.sales = (state.sales || []).filter((row) => String(row.id) !== saleId);
+        state.stockMoves = (state.stockMoves || []).filter((row) => !String(row.note || "").includes(`Penjualan ${saleId}`));
+        state.payments = (state.payments || []).filter((row) => String(row.refId || "") !== saleId);
+        state.pendingSales = (state.pendingSales || []).filter((row) => String(row.id || row.refId || "") !== saleId);
+        state.syncQueue = (state.syncQueue || []).filter((row) => String(row.id || row.refId || "") !== saleId);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        operationSnapshot = JSON.parse(JSON.stringify(state));
+
+        // Server remains source of truth. Rehydrate only modules touched by the
+        // rejected sale so valid unrelated local/server transactions stay intact.
+        try {
+          if (session) {
+            await hydrateAuthoritativeModule("products");
+            await hydrateAuthoritativeModule("sales");
+            await hydrateAuthoritativeModule("stockMoves");
+            await hydrateAuthoritativeModule("payments");
+          }
+        } catch (rehydrateError) {
+          console.warn("v173 rejected sale rehydrate deferred:", rehydrateError);
+        }
+        await syncOutbox.setMeta(markerKey, { completed: true, at: new Date().toISOString(), retiredOperationIds: operationIds, commandIds: [...commandIds] });
+        await updateSyncIndicator();
+        renderAll();
+        return true;
+      }
+
       async function v170RetireServerConfirmedSaifulDuplicateConflictEarly() {
         // Production audit confirmed: the first PUR202606137 payment command was
         // ACKed and the second command was rejected by the backend because the
@@ -2772,6 +2833,7 @@
           try {
             await v167RetireConfirmedRejectedPaymentConflictEarly();
             await v170RetireServerConfirmedSaifulDuplicateConflictEarly();
+            await v173RetireServerConfirmedRejectedSaleP8NLI();
           } catch (v167RepairError) {
             console.warn("v167 confirmed rejected payment cleanup skipped:", v167RepairError);
           }

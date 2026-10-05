@@ -5075,13 +5075,13 @@
           if (submitGuard.blocked) return toast(submitGuard.reason);
           const amount = requestedAmount;
           const paymentId = uid("PAY");
-          v169SetPaymentGuard(type, row, paymentId, amount);
+          const paymentIntent = v169SetPaymentGuard(type, row, paymentId, amount);
           row.due -= amount;
           row.paid = toNumber(row.paid) + amount;
           if (row.due === 0) row.status = "Lunas";
           const account = state.cashAccounts.find((a) => a.id === fd.get("accountId"));
           if (account) account.balance += type === "debt" ? -amount : amount;
-          const payment = { id: paymentId, date: fd.get("date"), refId: id, invoiceNo: row.invoiceNo || row.id, relation: relationNameValue, type: type === "debt" ? "Hutang" : "Piutang", amount, remaining: row.due, method: fd.get("method"), note: fd.get("note") };
+          const payment = { id: paymentId, intentId: paymentIntent.intentId, baselinePaid: paymentIntent.baselinePaid, baselineDue: paymentIntent.baselineDue, date: fd.get("date"), refId: id, invoiceNo: row.invoiceNo || row.id, relation: relationNameValue, type: type === "debt" ? "Hutang" : "Piutang", amount, remaining: row.due, method: fd.get("method"), note: fd.get("note") };
           state.payments.unshift(payment);
           v166SetPaymentCommandScope([payment.id]);
           try {

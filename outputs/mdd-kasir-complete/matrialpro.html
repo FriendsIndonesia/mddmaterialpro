@@ -1255,6 +1255,9 @@
               const invoiceAfter = (current[invoiceKey] || []).find((invoice) => String(invoice.id) === refId) || null;
               operations.push(MDDSyncV2.makeOperation("payment_delta", key, id, {
                 payment: row,
+                intentId: String(row.intentId || ""),
+                invoiceRef: { id: refId, invoiceNo: String(row.invoiceNo || refId) },
+                baseline: { paid: Number(row.baselinePaid ?? invoiceBefore?.paid ?? 0), due: Number(row.baselineDue ?? invoiceBefore?.due ?? 0) },
                 invoiceBefore: invoiceBefore ? { id: refId, paid: Number(invoiceBefore.paid || 0), due: Number(invoiceBefore.due || 0) } : null,
                 invoiceAfter: invoiceAfter ? { id: refId, paid: Number(invoiceAfter.paid || 0), due: Number(invoiceAfter.due || 0) } : null
               }, common));

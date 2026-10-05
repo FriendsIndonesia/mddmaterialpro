@@ -4985,7 +4985,7 @@
         guards[key] = {
           intentId: (crypto?.randomUUID ? crypto.randomUUID() : MDDSyncV2.operationId()),
           paymentId: String(paymentId || ""), invoiceNo: String(row?.invoiceNo || row?.id || ""),
-          type, baselineDue: toNumber(row?.due), amount: toNumber(amount), createdAt: new Date().toISOString()
+          type, baselinePaid: toNumber(row?.paid), baselineDue: toNumber(row?.due), amount: toNumber(amount), createdAt: new Date().toISOString()
         };
         v169WritePaymentGuards(guards);
         return guards[key];

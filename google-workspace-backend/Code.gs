@@ -1,7 +1,52 @@
 const APP_NAME = "MDD Material Pro";
 const OWNER_EMAIL = "friendsindonesia28@gmail.com";
 const GITHUB_REPO = "https://github.com/FriendsIndonesia/mddmaterialpro";
-const MINIMUM_CLIENT_VERSION = 134;
+const MINIMUM_CLIENT_VERSION = 147;
+const BACKEND_BUILD_VERSION = "v175-production-reconciled";
+// v152: safe legacy Hutang/Piutang payment bridge for ledger-only historical invoices.
+// v147 PRODUCTION SAFETY GUARD. This build accepts writes only for the verified production environment and spreadsheet.
+const V147_PRODUCTION_ONLY = true;
+const V147_PRODUCTION_SPREADSHEET_ID = "1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ";
+
+function assertV147ProductionSafe_() {
+  if (!V147_PRODUCTION_ONLY) return true;
+  const props = PropertiesService.getScriptProperties();
+  const environment = String(props.getProperty("SYNC_ENVIRONMENT") || "").trim().toLowerCase();
+  const spreadsheetId = String(props.getProperty("SPREADSHEET_ID") || "").trim();
+  if (environment !== "production") throw new Error("V147_PRODUCTION_GUARD: SYNC_ENVIRONMENT harus production.");
+  if (!spreadsheetId) throw new Error("V147_PRODUCTION_GUARD: SPREADSHEET_ID production belum dikonfigurasi.");
+  if (spreadsheetId !== V147_PRODUCTION_SPREADSHEET_ID) throw new Error("V147_PRODUCTION_GUARD: spreadsheet bukan production yang telah diverifikasi.");
+  return true;
+}
+
+function v147ProductionPreflight() {
+  const props = PropertiesService.getScriptProperties();
+  const environment = String(props.getProperty("SYNC_ENVIRONMENT") || "").trim().toLowerCase();
+  const spreadsheetId = String(props.getProperty("SPREADSHEET_ID") || "").trim();
+  let openOk = false;
+  let spreadsheetName = "";
+  let openError = "";
+  if (spreadsheetId === V147_PRODUCTION_SPREADSHEET_ID) {
+    try {
+      const ss = SpreadsheetApp.openById(spreadsheetId);
+      openOk = true;
+      spreadsheetName = ss.getName();
+    } catch (error) { openError = String(error && error.message || error); }
+  }
+  const result = {
+    ok: environment === "production" && spreadsheetId === V147_PRODUCTION_SPREADSHEET_ID && openOk,
+    build: BACKEND_BUILD_VERSION,
+    minimumClientVersion: MINIMUM_CLIENT_VERSION,
+    environment: environment,
+    spreadsheetId: spreadsheetId,
+    spreadsheetName: spreadsheetName,
+    spreadsheetOpenOk: openOk,
+    exactProductionSpreadsheet: spreadsheetId === V147_PRODUCTION_SPREADSHEET_ID,
+    error: openError
+  };
+  console.log(JSON.stringify(result, null, 2));
+  return result;
+}
 
 const TABLES = [
   { key: "products", sheet: "Products", fields: ["id", "code", "name", "category", "unit", "primaryUnit", "secondaryUnit", "conversionValue", "secondaryBarcode", "buy", "secondaryBuy", "price", "price2", "secondaryPrice", "secondaryPrice2", "stockIn", "stockOut", "stock", "stockAkhir", "min", "active"] },
@@ -24,12 +69,13 @@ const TABLES = [
 ];
 
 function doGet(e) {
+  assertV147ProductionSafe_();
   const ss = getSpreadsheet_();
   const action = String((e && e.parameter && e.parameter.action) || "status").toLowerCase();
   const callback = e && e.parameter && e.parameter.callback;
   let payload;
   if (action === "revision") payload = { ok: true, revision: getRevision_(), minimumClientVersion: MINIMUM_CLIENT_VERSION };
-  else if (action === "health") payload = { ok: true, app: APP_NAME, revision: getRevision_(), syncProtocol: 4, environment: PropertiesService.getScriptProperties().getProperty("SYNC_ENVIRONMENT") || "production", minimumClientVersion: MINIMUM_CLIENT_VERSION, serverTime: new Date().toISOString() };
+  else if (action === "health") payload = { ok: true, app: APP_NAME, build: BACKEND_BUILD_VERSION, revision: getRevision_(), syncProtocol: 4, environment: PropertiesService.getScriptProperties().getProperty("SYNC_ENVIRONMENT") || "production", minimumClientVersion: MINIMUM_CLIENT_VERSION, serverTime: new Date().toISOString() };
   // Bootstrap is intentionally small.  It is the only read required before
   // the application is usable; large business tables are loaded per-module.
   // DashboardSummary is deliberately a small, read-only endpoint.  Do not
@@ -59,6 +105,7 @@ function doGet(e) {
 }
 
 function doPost(e) {
+  assertV147ProductionSafe_();
   const lock = LockService.getScriptLock();
   // Jangan menumpuk puluhan eksekusi selama perangkat lain sedang menulis.
   // Klien mempertahankan paket secara lokal dan akan mencoba lagi setelah
@@ -163,14 +210,85 @@ function operationReceiptMap_(ss, operationIds) {
   return result;
 }
 
+
+// v154 terminal ACK classification.
+// Only deterministic business/validation failures are terminal.
+// Infrastructure/unknown failures stay retryable to protect data.
+function classifyOperationFailure_(status, errorText) {
+  const statusText = String(status || "").toLowerCase();
+  const message = String(errorText || "").trim();
+  const lower = message.toLowerCase();
+
+  if (statusText === "acknowledged") return "acknowledged";
+  if (statusText === "conflict") return "conflict";
+
+  // Known transient infrastructure classes. These must retain the same
+  // immutable operationId and be safe to retry.
+  const transientPatterns = [
+    "layanan spreadsheet gagal",
+    "service invoked too many times",
+    "service timed out",
+    "timed out",
+    "timeout",
+    "backend sedang",
+    "antrean perangkat lain",
+    "try again",
+    "coba lagi",
+    "internal error",
+    "temporary",
+    "temporarily",
+    "rate limit",
+    "quota"
+  ];
+  if (transientPatterns.some(function(pattern) { return lower.indexOf(pattern) >= 0; })) return "retryable";
+
+  // Deterministic business/schema validation. Retrying the identical command
+  // cannot repair these conditions and previously caused endless retry loops.
+  const permanentPatterns = [
+    "validasi ",
+    "referensi pembayaran tidak ditemukan",
+    "tidak ditemukan:",
+    "tidak valid",
+    "tidak dikenal",
+    "stok tidak cukup",
+    "saldo tidak cukup",
+    "produk tidak ditemukan",
+    "invoice tidak ditemukan",
+    "faktur tidak ditemukan",
+    "supplier tidak ditemukan",
+    "pelanggan tidak ditemukan",
+    "ambiguous",
+    "ambigu",
+    "duplikat",
+    "duplicate"
+  ];
+  if (permanentPatterns.some(function(pattern) { return lower.indexOf(pattern) >= 0; })) return "permanent";
+
+  // Unknown failures are deliberately retryable. False-terminal is more
+  // dangerous than a delayed sync because it can strand valid business data.
+  return "retryable";
+}
+
 function operationAcknowledgement_(ss, idsCsv) {
   const ids = String(idsCsv || "").split(",").map((id) => id.trim()).filter(Boolean).slice(0, 100);
   const receipts = operationReceiptMap_(ss, ids);
+  const acknowledged = [], conflicts = [], permanent = [], retryable = [], pending = [];
+  ids.forEach(function(id) {
+    const receipt = receipts[id];
+    if (!receipt) { pending.push(id); return; }
+    const classification = classifyOperationFailure_(receipt.status, receipt.error);
+    if (classification === "acknowledged") acknowledged.push(id);
+    else if (classification === "conflict") conflicts.push(id);
+    else if (classification === "permanent") permanent.push(id);
+    else retryable.push(id);
+  });
   return {
     ok: true,
-    acknowledged: ids.filter((id) => receipts[id] && receipts[id].status === "acknowledged"),
-    conflicts: ids.filter((id) => receipts[id] && receipts[id].status === "conflict"),
-    pending: ids.filter((id) => !receipts[id]),
+    acknowledged: acknowledged,
+    conflicts: conflicts,
+    permanent: permanent,
+    retryable: retryable,
+    pending: pending,
     revision: getRevision_()
   };
 }
@@ -184,14 +302,19 @@ function stableJson_(value) {
 function reconcileOperations_(ss, operationsJson) {
   let operations = [];
   try { operations = JSON.parse(operationsJson || "[]"); } catch (error) { return { ok: false, error: "Payload reconciliation tidak valid" }; }
-  const acknowledged = [], alreadyPresent = [], conflicts = [], manualReview = [], pending = [];
+  const acknowledged = [], alreadyPresent = [], conflicts = [], permanent = [], retryable = [], manualReview = [], pending = [];
   const receiptMap = operationReceiptMap_(ss, operations.map(function(op) { return String(op.operationId || ""); }));
   const tableCache = {};
   operations.slice(0, 25).forEach(function(operation) {
     const operationId = String(operation.operationId || "");
     if (!operationId) return;
-    if (receiptMap[operationId] && receiptMap[operationId].status === "acknowledged") { acknowledged.push(operationId); return; }
-    if (receiptMap[operationId] && receiptMap[operationId].status === "conflict") { conflicts.push(operationId); return; }
+    if (receiptMap[operationId]) {
+      const receiptClass = classifyOperationFailure_(receiptMap[operationId].status, receiptMap[operationId].error);
+      if (receiptClass === "acknowledged") { acknowledged.push(operationId); return; }
+      if (receiptClass === "conflict") { conflicts.push(operationId); return; }
+      if (receiptClass === "permanent") { permanent.push(operationId); return; }
+      if (receiptClass === "retryable") { retryable.push(operationId); return; }
+    }
     const type = String(operation.type || ""), entity = String(operation.entity || ""), entityId = String(operation.entityId || "");
     // These operations are safe to retry because processOperations_ applies
     // them under ScriptLock and records operationId receipts. They must not be
@@ -229,7 +352,229 @@ function reconcileOperations_(ss, operationsJson) {
     else if (changed > 0 || stableJson_(incoming) === stableJson_(backendRow)) alreadyPresent.push(operationId);
     else alreadyPresent.push(operationId);
   });
-  return { ok: true, acknowledged: acknowledged, alreadyPresent: alreadyPresent, conflicts: conflicts, manualReview: manualReview, pending: pending, revision: getRevision_() };
+  return { ok: true, acknowledged: acknowledged, alreadyPresent: alreadyPresent, conflicts: conflicts, permanent: permanent, retryable: retryable, manualReview: manualReview, pending: pending, revision: getRevision_() };
+}
+
+function commandReceiptSheet_(ss) {
+  return ensureSheet_(ss, "CommandReceipts", ["commandId", "status", "processedAt", "deviceId", "commandType", "operationCount", "error"]);
+}
+
+function commandReceiptMap_(ss, commandIds) {
+  const result = {};
+  const sheet = commandReceiptSheet_(ss);
+  if (sheet.getLastRow() < 2) return result;
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 7).getValues();
+  const wanted = {};
+  (commandIds || []).forEach(function(id) { if (id) wanted[String(id)] = true; });
+  values.forEach(function(row) {
+    const id = String(row[0] || "");
+    if (wanted[id]) result[id] = { status: String(row[1] || ""), error: String(row[6] || "") };
+  });
+  return result;
+}
+
+// Validate every critical target in a business command before its first write.
+// Sheets is not an ACID database, so this does not pretend to provide rollback;
+// it prevents the common partial-commit class caused by a known bad stock or
+// payment reference discovered halfway through a Sale/Purchase/Return command.
+// v153: repair stale local product IDs left by historical recovery/baseline changes.
+// Resolution is deliberately strict: only a missing product ID with exactly one
+// production match by product code, or (fallback) normalized name, is remapped.
+// This prevents creating a duplicate product while keeping ambiguous cases blocked.
+function normalizeLegacyProductReferences_(ss, operations) {
+    const productTable = TABLES.find(function(item) { return item.key === "products"; });
+  const rows = readTableDefinition_(ss, productTable);
+  const byId = {}, byCode = {};
+
+  function norm(value) {
+    return String(value == null ? "" : value)
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+  }
+
+  rows.forEach(function(row) {
+    const id = String(row.id || "").trim();
+    if (!id) return;
+
+    byId[id] = row;
+
+    const code = norm(row.code);
+    if (code) {
+      (byCode[code] || (byCode[code] = [])).push(id);
+    }
+  });
+
+  const aliases = {};
+
+  (operations || []).forEach(function(op) {
+    if (
+      String(op.entity || "") !== "products" ||
+      String(op.type || "") !== "upsert"
+    ) return;
+
+    const incomingId = String(
+      op.entityId ||
+      op.payload && op.payload.row && op.payload.row.id ||
+      ""
+    ).trim();
+
+    if (!incomingId || byId[incomingId]) return;
+
+    const row = op.payload && op.payload.row || {};
+    const base = op.payload && op.payload.base;
+    const code = norm(row.code);
+
+    const codeMatches = code
+      ? Array.from(new Set(byCode[code] || []))
+      : [];
+
+    // v161:
+    // base == null berarti benar-benar CREATE produk baru,
+    // bukan edit terhadap produk lama/stale.
+    if (base == null) {
+      if (codeMatches.length === 0) return;
+
+      const duplicate = new Error(
+        "Kode produk baru sudah ada di production: " +
+        String(row.code || "") +
+        " (" +
+        String(row.name || incomingId) +
+        ")"
+      );
+
+      duplicate.name = "ConflictError";
+      throw duplicate;
+    }
+
+    // Produk lama hanya boleh dipetakan otomatis
+    // menggunakan kode produk yang EXACT dan UNIQUE.
+    // Tidak ada fallback berdasarkan nama produk.
+    if (codeMatches.length === 1) {
+      aliases[incomingId] = codeMatches[0];
+      return;
+    }
+
+    const conflict = new Error(
+      "Produk lokal lama tidak dapat dipetakan aman: " +
+      incomingId +
+      " (" +
+      String(row.name || row.code || "tanpa identitas") +
+      ")"
+    );
+
+    conflict.name = "ConflictError";
+    throw conflict;
+  });
+
+  function rewriteObject(obj) {
+    if (!obj || typeof obj !== "object") return;
+
+    [
+      "productId",
+      "sourceProductId",
+      "targetProductId",
+      "parentProductId",
+      "childProductId"
+    ].forEach(function(key) {
+      const value = String(obj[key] || "").trim();
+
+      if (aliases[value]) {
+        obj[key] = aliases[value];
+      }
+    });
+
+    Object.keys(obj).forEach(function(key) {
+      const value = obj[key];
+
+      if (Array.isArray(value)) {
+        value.forEach(rewriteObject);
+      } else if (value && typeof value === "object") {
+        rewriteObject(value);
+      }
+    });
+  }
+
+  (operations || []).forEach(function(op) {
+    const entityId = String(op.entityId || "").trim();
+
+    if (
+      String(op.entity || "") === "products" &&
+      aliases[entityId]
+    ) {
+      op.entityId = aliases[entityId];
+    }
+
+    if (op.payload) {
+      const pid = String(op.payload.productId || "").trim();
+
+      if (aliases[pid]) {
+        op.payload.productId = aliases[pid];
+      }
+
+      rewriteObject(op.payload);
+    }
+  });
+
+  return aliases;
+}
+
+function validateBusinessCommand_(ss, operations) {
+  const productTable = TABLES.find(function(item) { return item.key === "products"; });
+  const products = {};
+  readTableDefinition_(ss, productTable).forEach(function(row) { products[String(row.id || "")] = row; });
+  const stockProjected = {};
+  const salesIds = {};
+  const purchaseIds = {};
+  readTableDefinition_(ss, TABLES.find(function(item) { return item.key === "sales"; })).forEach(function(row) { salesIds[String(row.id || "")] = true; });
+  readTableDefinition_(ss, TABLES.find(function(item) { return item.key === "purchases"; })).forEach(function(row) { purchaseIds[String(row.id || "")] = true; });
+  // Upserts in this same command may create the invoice referenced by payment.
+  (operations || []).forEach(function(operation) {
+    if (String(operation.type || "") !== "upsert") return;
+    const id = String(operation.entityId || operation.payload && operation.payload.row && operation.payload.row.id || "");
+    if (operation.entity === "sales") salesIds[id] = true;
+    if (operation.entity === "purchases") purchaseIds[id] = true;
+  });
+  (operations || []).forEach(function(operation) {
+    const type = String(operation.type || "");
+    const entity = String(operation.entity || "");
+    if (!String(operation.operationId || "").trim()) throw new Error("Business command memiliki operationId kosong");
+    if (type === "stock_delta") {
+      const id = String(operation.payload && operation.payload.productId || operation.entityId || "").trim();
+      const delta = Number(operation.payload && operation.payload.delta || 0);
+      if (!id || !products[id] || !isFinite(delta)) {
+        const conflict = new Error("Validasi stok gagal untuk produk: " + id);
+        conflict.name = "ConflictError";
+        throw conflict;
+      }
+      if (!Object.prototype.hasOwnProperty.call(stockProjected, id)) stockProjected[id] = Number(products[id].stock || products[id].stockAkhir || 0);
+      stockProjected[id] += delta;
+      if (stockProjected[id] < -0.000001) {
+        const conflict = new Error("Stok tidak cukup untuk command. Produk " + id + ", proyeksi " + stockProjected[id]);
+        conflict.name = "ConflictError";
+        throw conflict;
+      }
+    } else if (type === "payment_delta") {
+      const payment = operation.payload && operation.payload.payment;
+      if (!payment || !String(payment.id || "").trim() || !isFinite(Number(payment.amount || 0)) || Number(payment.amount || 0) < 0) throw new Error("Payment command tidak valid");
+      if (!/^DP\s/i.test(String(payment.method || ""))) {
+        const isDebt = String(payment.type || "").toLowerCase() === "hutang";
+        const ref = String(payment.refId || "").trim();
+        if (!ref) throw new Error("Referensi pembayaran tidak ditemukan: " + ref);
+        if (!(isDebt ? purchaseIds[ref] : salesIds[ref])) {
+          // v152: historical Hutang/Piutang rows can exist only in the ledger and
+          // therefore have synthetic HUT-/PIU- ids. Validate by the unique invoice
+          // number and exact expected balance instead of rejecting them forever.
+          validateLegacyLedgerPayment_(ss, isDebt ? "debt" : "receivable", payment);
+        }
+      }
+    } else if (["upsert", "delete", "settings"].indexOf(type) < 0) {
+      throw new Error("Tipe operasi command tidak dikenal: " + type);
+    } else if (type !== "settings" && !TABLES.some(function(item) { return item.key === entity; })) {
+      throw new Error("Entitas command tidak dikenal: " + entity);
+    }
+  });
+  return true;
 }
 
 function processOperations_(ss, payload) {
@@ -237,45 +582,96 @@ function processOperations_(ss, payload) {
   if (String(payload.environment || "production") !== configuredEnvironment) {
     return { ok: false, environmentMismatch: true, error: "Endpoint " + configuredEnvironment + " menolak payload " + payload.environment };
   }
-  const operations = (payload.operations || []).slice(0, 25);
-  const existing = operationReceiptMap_(ss, operations.map((operation) => operation.operationId));
+  const operations = (payload.operations || []);
+  const existing = operationReceiptMap_(ss, operations.map(function(operation) { return operation.operationId; }));
   const receiptSheet = operationReceiptSheet_(ss);
+  const commandSheet = commandReceiptSheet_(ss);
   const acknowledged = [];
   const conflicts = [];
   const seenBatch = {};
-  operations.forEach((operation) => {
-    const operationId = String(operation.operationId || "").trim();
-    if (!operationId) return;
-    if (seenBatch[operationId]) {
-      if (seenBatch[operationId] === "conflict") conflicts.push(operationId);
-      else acknowledged.push(operationId);
+
+  // Legacy operations without commandId remain compatible, but v147 commands
+  // are processed as indivisible validation groups and are never split client-side.
+  const groups = [];
+  const groupMap = {};
+  operations.forEach(function(operation) {
+    const commandId = String(operation.commandId || "").trim();
+    const key = commandId ? "cmd:" + commandId : "op:" + String(operation.operationId || "");
+    if (!groupMap[key]) { groupMap[key] = { commandId: commandId, operations: [] }; groups.push(groupMap[key]); }
+    groupMap[key].operations.push(operation);
+  });
+  const commandExisting = commandReceiptMap_(ss, groups.map(function(group) { return group.commandId; }).filter(Boolean));
+
+  groups.forEach(function(group) {
+    const commandId = group.commandId;
+    const groupOps = group.operations;
+    if (commandId && commandExisting[commandId] && commandExisting[commandId].status === "acknowledged") {
+      groupOps.forEach(function(op) { if (op.operationId) acknowledged.push(String(op.operationId)); });
       return;
     }
-    if (existing[operationId] && ["acknowledged", "conflict"].indexOf(existing[operationId].status) >= 0) {
-      if (existing[operationId].status === "conflict") conflicts.push(operationId);
-      else acknowledged.push(operationId);
-      seenBatch[operationId] = existing[operationId].status;
-      return;
-    }
-    let status = "acknowledged";
-    let error = "";
+    let groupStatus = "acknowledged";
+    let groupError = "";
     try {
-      applyOperation_(ss, operation);
-      syncLedgerForOperation_(ss, operation);
-      appendChangeLog_(ss, operation);
-      acknowledged.push(operationId);
+      if (commandId) {
+        const remainingOps = groupOps.filter(function(op) {
+          const receipt = existing[String(op.operationId || "")];
+          return !(receipt && receipt.status === "acknowledged");
+        });
+        normalizeLegacyProductReferences_(ss, remainingOps);
+        validateBusinessCommand_(ss, remainingOps);
+      }
+      groupOps.forEach(function(operation) {
+        const operationId = String(operation.operationId || "").trim();
+        if (!operationId) return;
+        if (seenBatch[operationId]) return;
+        if (existing[operationId] && existing[operationId].status === "acknowledged") {
+          acknowledged.push(operationId); seenBatch[operationId] = "acknowledged"; return;
+        }
+        if (existing[operationId]) {
+          const existingClass = classifyOperationFailure_(existing[operationId].status, existing[operationId].error);
+          if (existingClass === "conflict" || existingClass === "permanent") {
+            const conflict = new Error(existing[operationId].error || "Operasi sebelumnya terminal");
+            conflict.name = "ConflictError";
+            throw conflict;
+          }
+        }
+        applyOperation_(ss, operation);
+        syncLedgerForOperation_(ss, operation);
+        appendChangeLog_(ss, operation);
+        receiptSheet.appendRow([operationId, "acknowledged", new Date(), payload.deviceId || operation.deviceId || "", operation.entity || "", operation.entityId || "", ""]);
+        CacheService.getScriptCache().put("OP_" + operationId.slice(-64), JSON.stringify({ status: "acknowledged", error: "" }), 21600);
+        acknowledged.push(operationId);
+        seenBatch[operationId] = "acknowledged";
+      });
     } catch (operationError) {
-      status = String(operationError && operationError.name || "") === "ConflictError" ? "conflict" : "failed";
-      error = String(operationError && operationError.message ? operationError.message : operationError);
-      if (status === "conflict") conflicts.push(operationId);
+      groupError = String(operationError && operationError.message ? operationError.message : operationError);
+      if (String(operationError && operationError.name || "") === "ConflictError") groupStatus = "conflict";
+      else groupStatus = classifyOperationFailure_("failed", groupError) === "permanent" ? "permanent" : "retryable";
+      groupOps.forEach(function(operation) {
+        const operationId = String(operation.operationId || "").trim();
+        if (!operationId || seenBatch[operationId] === "acknowledged") return;
+        receiptSheet.appendRow([operationId, groupStatus, new Date(), payload.deviceId || operation.deviceId || "", operation.entity || "", operation.entityId || "", groupError]);
+        CacheService.getScriptCache().put("OP_" + operationId.slice(-64), JSON.stringify({ status: groupStatus, error: groupError }), 21600);
+        if (groupStatus === "conflict") conflicts.push(operationId);
+        seenBatch[operationId] = groupStatus;
+      });
     }
-    receiptSheet.appendRow([operationId, status, new Date(), payload.deviceId || operation.deviceId || "", operation.entity || "", operation.entityId || "", error]);
-    CacheService.getScriptCache().put("OP_" + operationId.slice(-64), JSON.stringify({ status: status, error: error }), 21600);
-    seenBatch[operationId] = status;
+    if (commandId) commandSheet.appendRow([commandId, groupStatus, new Date(), payload.deviceId || groupOps[0] && groupOps[0].deviceId || "", groupOps[0] && groupOps[0].commandType || "", groupOps.length, groupError]);
   });
   trimTechnicalSheet_(receiptSheet, 100000);
+  trimTechnicalSheet_(commandSheet, 50000);
   const revision = touchRevision_();
-  return { ok: true, acknowledged: acknowledged, conflicts: conflicts, revision: revision };
+  const finalReceipts = operationReceiptMap_(ss, operations.map(function(operation) { return operation.operationId; }));
+  const permanent = [], retryable = [];
+  operations.forEach(function(operation) {
+    const id = String(operation.operationId || "");
+    const receipt = finalReceipts[id];
+    if (!id || !receipt) return;
+    const classification = classifyOperationFailure_(receipt.status, receipt.error);
+    if (classification === "permanent") permanent.push(id);
+    else if (classification === "retryable") retryable.push(id);
+  });
+  return { ok: true, acknowledged: acknowledged, conflicts: conflicts, permanent: permanent, retryable: retryable, revision: revision };
 }
 
 // Operasi sync-v2 menulis Sales/Purchases secara targeted. Sinkronkan hanya
@@ -409,12 +805,25 @@ function applyOperation_(ss, operation) {
   throw new Error("Tipe operasi tidak dikenal: " + type);
 }
 
+function stockEffectJournalSheet_(ss) {
+  return ensureSheet_(ss, "StockEffectJournal", ["operationId", "status", "preparedAt", "productId", "baseStock", "targetStock", "baseStockIn", "targetStockIn", "baseStockOut", "targetStockOut", "error"]);
+}
+
+function latestStockEffect_(ss, operationId) {
+  const sheet = stockEffectJournalSheet_(ss);
+  if (sheet.getLastRow() < 2) return null;
+  const matches = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).createTextFinder(String(operationId)).matchEntireCell(true).findAll();
+  if (!matches.length) return null;
+  const row = sheet.getRange(matches[matches.length - 1].getRow(), 1, 1, 11).getValues()[0];
+  return { status: String(row[1] || ""), productId: String(row[3] || ""), baseStock: Number(row[4] || 0), targetStock: Number(row[5] || 0), baseStockIn: Number(row[6] || 0), targetStockIn: Number(row[7] || 0), baseStockOut: Number(row[8] || 0), targetStockOut: Number(row[9] || 0), error: String(row[10] || "") };
+}
+
 function applyStockDelta_(ss, operation) {
-  const table = TABLES.find((item) => item.key === "products");
-  const sheet = ensureSheet_(ss, table.sheet, table.fields);
   const id = String(operation.payload && operation.payload.productId || operation.entityId || "").trim();
   const delta = Number(operation.payload && operation.payload.delta || 0);
   if (!id || !isFinite(delta)) throw new Error("Stock delta tidak valid");
+  const table = TABLES.find((item) => item.key === "products");
+  const sheet = ensureSheet_(ss, table.sheet, table.fields);
   const idColumn = table.fields.indexOf("id") + 1;
   const stockColumn = table.fields.indexOf("stock") + 1;
   const stockAkhirColumn = table.fields.indexOf("stockAkhir") + 1;
@@ -425,47 +834,245 @@ function applyStockDelta_(ss, operation) {
   if (index < 0) throw new Error("Produk stock delta tidak ditemukan: " + id);
   const rowNumber = index + 2;
   const current = Number(sheet.getRange(rowNumber, stockColumn).getValue() || 0);
-  const next = current + delta;
-  if (next < -0.000001) {
-    const conflict = new Error("Stok tidak cukup. Stok terbaru " + current + ", delta " + delta);
-    conflict.name = "ConflictError";
-    throw conflict;
-  }
-  sheet.getRange(rowNumber, stockColumn).setValue(Math.max(0, next));
-  sheet.getRange(rowNumber, stockAkhirColumn).setValue(Math.max(0, next));
-  if (delta > 0) sheet.getRange(rowNumber, stockInColumn).setValue(Number(sheet.getRange(rowNumber, stockInColumn).getValue() || 0) + delta);
-  if (delta < 0) sheet.getRange(rowNumber, stockOutColumn).setValue(Number(sheet.getRange(rowNumber, stockOutColumn).getValue() || 0) + Math.abs(delta));
-}
+  const operationId = String(operation.operationId || "");
+  const journal = latestStockEffect_(ss, operationId);
+  const currentIn = Number(sheet.getRange(rowNumber, stockInColumn).getValue() || 0);
+  const currentOut = Number(sheet.getRange(rowNumber, stockOutColumn).getValue() || 0);
+  let base = current;
+  let target = current + delta;
+  let baseIn = currentIn, targetIn = currentIn + (delta > 0 ? delta : 0);
+  let baseOut = currentOut, targetOut = currentOut + (delta < 0 ? Math.abs(delta) : 0);
 
-function applyPaymentDelta_(ss, operation) {
-  const payment = operation.payload && operation.payload.payment;
-  if (!payment || !payment.id) throw new Error("Payment delta tidak valid");
-
-  // v175: payment.id is the business-level idempotency key. OperationReceipts
-  // protects retries of one operationId; this second fence also protects the
-  // same payment if a client ever rebuilds it under a different operationId.
-  const paymentTable = TABLES.find((item) => item.key === "payments");
-  const paymentId = String(payment.id || "").trim();
-  const existingPayment = readTableDefinition_(ss, paymentTable)
-    .find((row) => String(row.id || "").trim() === paymentId);
-  if (existingPayment) {
-    const sameBusinessPayment =
-      String(existingPayment.refId || "") === String(payment.refId || "") &&
-      String(existingPayment.type || "").toLowerCase() === String(payment.type || "").toLowerCase() &&
-      Math.abs(Number(existingPayment.amount || 0) - Number(payment.amount || 0)) < 0.000001;
-    if (!sameBusinessPayment) {
-      const conflict = new Error("Payment ID sudah ada dengan isi berbeda: " + paymentId);
+  if (journal) {
+    base = Number(journal.baseStock || 0);
+    target = Number(journal.targetStock || 0);
+    baseIn = Number(journal.baseStockIn || 0); targetIn = Number(journal.targetStockIn || 0);
+    baseOut = Number(journal.baseStockOut || 0); targetOut = Number(journal.targetStockOut || 0);
+    if (journal.status === "applied") return;
+    // Crash-safe recovery: a prepared effect may have reached the product row
+    // before its operation receipt was written. Never apply the delta twice.
+    if (Math.abs(current - target) <= 0.000001) {
+      sheet.getRange(rowNumber, stockInColumn).setValue(targetIn);
+      sheet.getRange(rowNumber, stockOutColumn).setValue(targetOut);
+      stockEffectJournalSheet_(ss).appendRow([operationId, "applied", new Date(), id, base, target, baseIn, targetIn, baseOut, targetOut, "recovered-after-unknown-ack"]);
+      return;
+    }
+    if (Math.abs(current - base) > 0.000001) {
+      const ambiguous = new Error("Stock effect tidak dapat direkonsiliasi aman. Produk " + id + ", base " + base + ", target " + target + ", current " + current);
+      ambiguous.name = "ConflictError";
+      throw ambiguous;
+    }
+  } else {
+    if (target < -0.000001) {
+      const conflict = new Error("Stok tidak cukup. Stok terbaru " + current + ", delta " + delta);
       conflict.name = "ConflictError";
       throw conflict;
     }
-    return; // Safe retry: payment already committed, never apply its delta twice.
+    stockEffectJournalSheet_(ss).appendRow([operationId, "prepared", new Date(), id, base, target, baseIn, targetIn, baseOut, targetOut, ""]);
   }
 
-  const amount = Number(payment.amount || 0);
-  if (!isFinite(amount) || amount <= 0) throw new Error("Nominal pembayaran harus lebih dari 0");
+  sheet.getRange(rowNumber, stockColumn).setValue(Math.max(0, target));
+  sheet.getRange(rowNumber, stockAkhirColumn).setValue(Math.max(0, target));
+  sheet.getRange(rowNumber, stockInColumn).setValue(targetIn);
+  sheet.getRange(rowNumber, stockOutColumn).setValue(targetOut);
+  stockEffectJournalSheet_(ss).appendRow([operationId, "applied", new Date(), id, base, target, baseIn, targetIn, baseOut, targetOut, ""]);
+}
 
+function legacyLedgerPaymentTarget_(ss, kind, payment) {
+  const sheetName = kind === "debt" ? "Hutang" : "Piutang";
+  const sheet = ss.getSheetByName(sheetName);
+  const invoiceNo = String(payment && payment.invoiceNo || "").trim();
+  if (!sheet || sheet.getLastRow() < 2 || !invoiceNo) {
+    const error = new Error("Referensi pembayaran legacy tidak ditemukan: " + invoiceNo);
+    error.name = "ConflictError";
+    throw error;
+  }
+  const invoices = sheet.getRange(2, 3, sheet.getLastRow() - 1, 1).getDisplayValues();
+  const matches = [];
+  invoices.forEach(function(row, index) {
+    if (String(row[0] || "").trim().toLowerCase() === invoiceNo.toLowerCase()) matches.push(index + 2);
+  });
+  if (matches.length !== 1) {
+    const error = new Error("Referensi pembayaran legacy ambigu/tidak unik: " + invoiceNo);
+    error.name = "ConflictError";
+    throw error;
+  }
+  const rowNumber = matches[0];
+  const values = sheet.getRange(rowNumber, 1, 1, Math.max(9, sheet.getLastColumn())).getValues()[0];
+  return {
+    sheet: sheet,
+    rowNumber: rowNumber,
+    currentPaid: numeric_(values[5]),
+    currentDue: numeric_(values[7])
+  };
+}
+
+function validateLegacyLedgerPayment_(ss, kind, payment) {
+  const target = legacyLedgerPaymentTarget_(ss, kind, payment);
+  const amount = Number(payment && payment.amount || 0);
+  const remaining = Number(payment && payment.remaining);
+  if (!isFinite(amount) || amount < 0 || !isFinite(remaining) || remaining < -0.000001) {
+    const error = new Error("Saldo pembayaran legacy tidak valid");
+    error.name = "ConflictError";
+    throw error;
+  }
+  const paymentTable = TABLES.find(function(item) { return item.key === "payments"; });
+  const existingPayment = readTableDefinition_(ss, paymentTable).find(function(row) { return String(row.id || "") === String(payment.id || ""); });
+  const expectedBefore = remaining + amount;
+  const same = function(a, b) { return Math.abs(Number(a || 0) - Number(b || 0)) <= 0.000001; };
+  // Fresh application: ledger still has exactly the balance the client saw.
+  if (same(target.currentDue, expectedBefore)) return true;
+  // Idempotent retry: only the SAME stable payment ID may prove that the target
+  // balance was already committed. A different payment ID is never auto-accepted.
+  if (existingPayment && same(target.currentDue, remaining)) return true;
+  const error = new Error("Saldo ledger berubah; pembayaran legacy perlu diperiksa. Faktur " + String(payment.invoiceNo || ""));
+  error.name = "ConflictError";
+  throw error;
+}
+
+function paymentIntegrityJournalSheet_(ss) {
+  return ensureSheet_(ss, "PaymentIntegrityJournal", [
+    "intentId", "status", "preparedAt", "committedAt", "operationId", "commandId",
+    "paymentId", "refId", "invoiceNo", "paymentType", "amount",
+    "baselinePaid", "baselineDue", "serverPaidBefore", "serverDueBefore",
+    "serverPaidAfter", "serverDueAfter", "receiptId", "error"
+  ]);
+}
+
+function paymentIntentRecord_(ss, intentId) {
+  const id = String(intentId || "").trim();
+  if (!id) return null;
+  const sheet = paymentIntegrityJournalSheet_(ss);
+  if (sheet.getLastRow() < 2) return null;
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+  for (let i = values.length - 1; i >= 0; i -= 1) {
+    if (String(values[i][0] || "").trim() === id) return { rowNumber: i + 2, values: values[i], sheet: sheet };
+  }
+  return null;
+}
+
+function paymentIntegrityConflict_(message) {
+  const error = new Error(message);
+  error.name = "ConflictError";
+  return error;
+}
+
+// v175: payment.id is the business-level idempotency key. Validate its
+// immutable business identity without bypassing PREPARED journal recovery.
+function assertPaymentIdentity_(existingPayment, payment) {
+  if (!existingPayment) return;
+  const amount = Number(payment.amount);
+  const sameBusinessPayment =
+    String(existingPayment.refId || "").trim() === String(payment.refId || "").trim() &&
+    String(existingPayment.type || "").trim().toLowerCase() === String(payment.type || "").trim().toLowerCase() &&
+    isFinite(amount) && Math.abs(Number(existingPayment.amount) - amount) < 0.000001;
+  if (!sameBusinessPayment) throw paymentIntegrityConflict_("PAYMENT_ID_REUSE_CONFLICT: Payment ID sudah ada dengan isi berbeda: " + payment.id);
+}
+
+// A client may rebuild the same Payment under another intent/operation ID.
+// Recover its ORIGINAL journal before treating the Payment row as committed.
+function paymentJournalByPaymentId_(ss, paymentId) {
+  const sheet = ss.getSheetByName("PaymentIntegrityJournal");
+  if (!sheet || sheet.getLastRow() < 2) return null;
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+  for (let i = values.length - 1; i >= 0; i -= 1) {
+    if (String(values[i][6] || "").trim() === String(paymentId || "").trim()) {
+      return { rowNumber: i + 2, values: values[i], sheet: sheet };
+    }
+  }
+  return null;
+}
+
+
+function markPaymentJournal_(record, status, errorText) {
+  record.sheet.getRange(record.rowNumber, 2).setValue(status);
+  if (status === "COMMITTED" || status === "ACKNOWLEDGED") {
+    record.sheet.getRange(record.rowNumber, 4).setValue(new Date());
+  }
+  if (errorText != null) record.sheet.getRange(record.rowNumber, 19).setValue(String(errorText || ""));
+}
+
+function recoverPreparedPaymentIntent_(ss, record, operation, payment, ctx) {
+  const v = record.values;
+  const same = ctx.same;
+  const paymentTable = TABLES.find((item) => item.key === "payments");
+  const expectedPaymentId = String(v[6] || "");
+  const expectedRefId = String(v[7] || "");
+  const expectedAmount = Number(v[10] || 0);
+  const beforePaid = Number(v[13] || 0);
+  const beforeDue = Number(v[14] || 0);
+  const afterPaid = Number(v[15] || 0);
+  const afterDue = Number(v[16] || 0);
+
+  if (expectedPaymentId !== String(payment.id || "") ||
+      expectedRefId !== String(payment.refId || "") ||
+      !same(expectedAmount, Number(payment.amount || 0))) {
+    markPaymentJournal_(record, "MANUAL_REVIEW", "RECOVERY_IDENTITY_CONFLICT");
+    throw paymentIntegrityConflict_("PAYMENT_RECOVERY_MANUAL_REVIEW: identitas intent tidak cocok");
+  }
+
+  const paymentExists = !!ctx.existingPayment;
+  const ledgerAtBefore = same(ctx.serverPaid, beforePaid) && same(ctx.serverDue, beforeDue);
+  const ledgerAtAfter = same(ctx.serverPaid, afterPaid) && same(ctx.serverDue, afterDue);
+
+  // Crash before Payment row: nothing financial was applied. Safe to resume the
+  // exact prepared intent by writing the original Payment and authoritative target.
+  if (!paymentExists && ledgerAtBefore) {
+    try {
+      applyTableChanges_(ss, paymentTable, { upserts: [payment], deletes: [] });
+      ctx.sheet.getRange(ctx.rowNumber, ctx.paidColumn).setValue(afterPaid);
+      ctx.sheet.getRange(ctx.rowNumber, ctx.dueColumn).setValue(afterDue);
+      markPaymentJournal_(record, "COMMITTED", "RECOVERED_FROM_PREPARED_BEFORE_PAYMENT");
+      return;
+    } catch (error) {
+      markPaymentJournal_(record, "PREPARED", "RECOVERY_RESUME_FAILED: " + String(error && error.message || error));
+      throw error;
+    }
+  }
+
+  // Crash after Payment row but before ledger projection: Payment is already
+  // durable, so only finish the authoritative ledger projection. Never add Payment again.
+  if (paymentExists && ledgerAtBefore) {
+    try {
+      ctx.sheet.getRange(ctx.rowNumber, ctx.paidColumn).setValue(afterPaid);
+      ctx.sheet.getRange(ctx.rowNumber, ctx.dueColumn).setValue(afterDue);
+      markPaymentJournal_(record, "COMMITTED", "RECOVERED_PAYMENT_EXISTS_LEDGER_BEFORE");
+      return;
+    } catch (error) {
+      markPaymentJournal_(record, "PREPARED", "RECOVERY_LEDGER_FAILED: " + String(error && error.message || error));
+      throw error;
+    }
+  }
+
+  // Crash after both durable writes but before journal COMMITTED.
+  if (paymentExists && ledgerAtAfter) {
+    markPaymentJournal_(record, "COMMITTED", "RECOVERED_WRITES_COMPLETE");
+    return;
+  }
+
+  // Ledger at target without the matching Payment row is not safe to invent or
+  // reverse automatically. Any third state can also indicate unrelated edits.
+  markPaymentJournal_(record, "MANUAL_REVIEW",
+    "RECOVERY_AMBIGUOUS paymentExists=" + paymentExists +
+    " serverPaid=" + ctx.serverPaid + " serverDue=" + ctx.serverDue);
+  throw paymentIntegrityConflict_("PAYMENT_RECOVERY_MANUAL_REVIEW: kondisi journal/payment/ledger ambigu");
+}
+
+function applyPaymentDelta_(ss, operation) {
+  const payload = operation.payload || {};
+  const payment = payload.payment;
+  if (!payment || !String(payment.id || "").trim()) throw new Error("Payment delta tidak valid");
+  const paymentTable = TABLES.find((item) => item.key === "payments");
+  const existingPayment = readTableDefinition_(ss, paymentTable).find(function(row) { return String(row.id || "").trim() === String(payment.id || "").trim(); });
+  assertPaymentIdentity_(existingPayment, payment);
+  if (!existingPayment && (!isFinite(Number(payment.amount)) || Number(payment.amount) <= 0)) {
+    throw paymentIntegrityConflict_("PAYMENT_AMOUNT_INVALID");
+  }
+
+  // DP records are historical/non-ledger payment projections. Preserve the
+  // existing behavior; Payment Integrity Guard protects Hutang/Piutang effects.
   if (/^DP\s/i.test(String(payment.method || ""))) {
-    applyTableChanges_(ss, paymentTable, { upserts: [payment], deletes: [] });
+    if (!existingPayment) applyTableChanges_(ss, paymentTable, { upserts: [payment], deletes: [] });
     return;
   }
 
@@ -475,35 +1082,102 @@ function applyPaymentDelta_(ss, operation) {
   const idColumn = targetTable.fields.indexOf("id") + 1;
   const ids = sheet.getLastRow() > 1 ? sheet.getRange(2, idColumn, sheet.getLastRow() - 1, 1).getDisplayValues() : [];
   const index = ids.findIndex((row) => String(row[0] || "").trim() === String(payment.refId || "").trim());
-  if (index < 0) throw new Error("Referensi pembayaran tidak ditemukan: " + payment.refId);
+
+  // Historical synthetic HUT-/PIU- records remain on the stricter legacy gate.
+  if (index < 0) {
+    validateLegacyLedgerPayment_(ss, isDebt ? "debt" : "receivable", payment);
+    const ledger = legacyLedgerPaymentTarget_(ss, isDebt ? "debt" : "receivable", payment);
+    const amount = Number(payment.amount || 0);
+    const remaining = Number(payment.remaining || 0);
+    const same = function(a, b) { return Math.abs(Number(a || 0) - Number(b || 0)) <= 0.000001; };
+    if (!existingPayment) applyTableChanges_(ss, paymentTable, { upserts: [payment], deletes: [] });
+    if (existingPayment && same(ledger.currentDue, remaining)) return;
+    ledger.sheet.getRange(ledger.rowNumber, 6).setValue(ledger.currentPaid + amount);
+    ledger.sheet.getRange(ledger.rowNumber, 8).setValue(Math.max(0, remaining));
+    return;
+  }
+
   const rowNumber = index + 2;
   const paidColumn = targetTable.fields.indexOf("paid") + 1;
   const dueColumn = targetTable.fields.indexOf("due") + 1;
-  const paid = Number(sheet.getRange(rowNumber, paidColumn).getValue() || 0);
-  const due = Number(sheet.getRange(rowNumber, dueColumn).getValue() || 0);
-  const baseline = operation.payload && operation.payload.baseline || {};
-  const baselineDue = Number(baseline.due);
-  const baselinePaid = Number(baseline.paid);
-  if (isFinite(baselineDue) && Math.abs(due - baselineDue) > 0.000001) {
-    const conflict = new Error("Saldo tagihan berubah. Sisa server " + due + ", baseline pembayaran " + baselineDue);
-    conflict.name = "ConflictError";
-    throw conflict;
-  }
-  if (isFinite(baselinePaid) && Math.abs(paid - baselinePaid) > 0.000001) {
-    const conflict = new Error("Total pembayaran berubah. Paid server " + paid + ", baseline pembayaran " + baselinePaid);
-    conflict.name = "ConflictError";
-    throw conflict;
-  }
-  if (amount > due + 0.000001) {
-    const conflict = new Error("Pembayaran melebihi sisa tagihan. Sisa server " + due + ", pembayaran " + amount);
-    conflict.name = "ConflictError";
-    throw conflict;
+  const serverPaid = Number(sheet.getRange(rowNumber, paidColumn).getValue() || 0);
+  const serverDue = Number(sheet.getRange(rowNumber, dueColumn).getValue() || 0);
+  const amount = Number(payment.amount || 0);
+  const intentId = String(payload.intentId || payment.intentId || "").trim();
+  const baseline = payload.baseline || {};
+  const baselinePaid = Number(baseline.paid != null ? baseline.paid : payment.baselinePaid);
+  const baselineDue = Number(baseline.due != null ? baseline.due : payment.baselineDue);
+  const same = function(a, b) { return Math.abs(Number(a || 0) - Number(b || 0)) <= 0.000001; };
+
+  // Backwards compatibility: old queued v172 operations can still be retried by
+  // stable Payment ID, but new v173 operations must carry a durable business intent.
+  const isV173 = !!intentId;
+  const originalJournal = paymentJournalByPaymentId_(ss, payment.id);
+  if (!isV173 && !originalJournal) {
+    if (existingPayment) return;
+    throw paymentIntegrityConflict_("PAYMENT_INTENT_REQUIRED: pembayaran baru harus dikirim ulang dari aplikasi v173");
   }
 
-  // Write the payment record only after all authoritative ledger checks pass.
-  applyTableChanges_(ss, paymentTable, { upserts: [payment], deletes: [] });
-  sheet.getRange(rowNumber, paidColumn).setValue(paid + amount);
-  sheet.getRange(rowNumber, dueColumn).setValue(Math.max(0, due - amount));
+  const priorIntent = paymentIntentRecord_(ss, intentId) || originalJournal;
+  if (priorIntent) {
+    const status = String(priorIntent.values[1] || "");
+    const priorPaymentId = String(priorIntent.values[6] || "");
+    const priorRefId = String(priorIntent.values[7] || "");
+    const priorAmount = Number(priorIntent.values[10] || 0);
+    const priorType = String(priorIntent.values[9] || "").trim().toLowerCase();
+    if (priorPaymentId !== String(payment.id || "") || priorRefId !== String(payment.refId || "") || priorType !== String(payment.type || "").trim().toLowerCase() || !same(priorAmount, amount)) {
+      throw paymentIntegrityConflict_("PAYMENT_INTENT_REUSE_CONFLICT: intent sudah terikat pada pembayaran lain");
+    }
+    if (status === "COMMITTED" || status === "ACKNOWLEDGED") return;
+    if (status === "PREPARED") {
+      return recoverPreparedPaymentIntent_(ss, priorIntent, operation, payment, {
+        sheet: sheet,
+        rowNumber: rowNumber,
+        paidColumn: paidColumn,
+        dueColumn: dueColumn,
+        serverPaid: serverPaid,
+        serverDue: serverDue,
+        existingPayment: existingPayment,
+        same: same
+      });
+    }
+    throw paymentIntegrityConflict_("PAYMENT_INTENT_INCOMPLETE: status intent tidak dapat dipulihkan otomatis");
+  }
+
+  if (existingPayment) return; // stable Payment ID retry
+  if (!isFinite(amount) || amount <= 0) throw paymentIntegrityConflict_("PAYMENT_AMOUNT_INVALID");
+  if (!isFinite(baselinePaid) || !isFinite(baselineDue)) throw paymentIntegrityConflict_("PAYMENT_BASELINE_REQUIRED");
+  if (serverDue <= 0.000001) throw paymentIntegrityConflict_("INVOICE_ALREADY_PAID");
+  if (!same(serverPaid, baselinePaid) || !same(serverDue, baselineDue)) {
+    throw paymentIntegrityConflict_("STALE_PAYMENT: saldo server berubah sejak form pembayaran dibuka");
+  }
+  if (amount > serverDue + 0.000001) throw paymentIntegrityConflict_("OVERPAYMENT: nominal melebihi sisa tagihan server");
+
+  const newPaid = serverPaid + amount;
+  const newDue = Math.max(0, serverDue - amount);
+  const receiptId = "PAYREC-" + Utilities.getUuid();
+  const journal = paymentIntegrityJournalSheet_(ss);
+  const preparedAt = new Date();
+  journal.appendRow([
+    intentId, "PREPARED", preparedAt, "", String(operation.operationId || ""), String(operation.commandId || ""),
+    String(payment.id || ""), String(payment.refId || ""), String(payment.invoiceNo || ""), String(payment.type || ""), amount,
+    baselinePaid, baselineDue, serverPaid, serverDue, newPaid, newDue, receiptId, ""
+  ]);
+  const journalRow = journal.getLastRow();
+
+  try {
+    // Payment row first, then authoritative ledger projection. A PREPARED journal
+    // makes an interrupted commit visible instead of silently replaying money.
+    applyTableChanges_(ss, paymentTable, { upserts: [payment], deletes: [] });
+    sheet.getRange(rowNumber, paidColumn).setValue(newPaid);
+    sheet.getRange(rowNumber, dueColumn).setValue(newDue);
+    journal.getRange(journalRow, 2).setValue("COMMITTED");
+    journal.getRange(journalRow, 4).setValue(new Date());
+    return;
+  } catch (error) {
+    journal.getRange(journalRow, 19).setValue(String(error && error.message || error));
+    throw error;
+  }
 }
 
 function appendChangeLog_(ss, operation) {
@@ -1623,3 +2297,74 @@ function output_(value, callback) {
   return ContentService.createTextOutput(body).setMimeType(mime);
 }
 
+function v161RunNewProductResolverTest() {
+  const ss = SpreadsheetApp.openById(V147_PRODUCTION_SPREADSHEET_ID);
+
+  const uniqueCode = "V161-TEST-" + new Date().getTime();
+
+  // TEST 1:
+  // Produk yang benar-benar baru harus diizinkan.
+  const createOp = [{
+    operationId: "V161-CREATE-TEST",
+    type: "upsert",
+    entity: "products",
+    entityId: "PRD-V161-TEST",
+    payload: {
+      row: {
+        id: "PRD-V161-TEST",
+        code: uniqueCode,
+        name: "V161 Resolver Test"
+      },
+      base: null
+    }
+  }];
+
+  normalizeLegacyProductReferences_(ss, createOp);
+
+  if (createOp[0].entityId !== "PRD-V161-TEST") {
+    throw new Error(
+      "FAIL: genuine CREATE was unexpectedly remapped"
+    );
+  }
+
+  // TEST 2:
+  // ID produk lama yang hilang dan tidak dapat dibuktikan
+  // harus tetap diblokir.
+  let staleBlocked = false;
+
+  try {
+    normalizeLegacyProductReferences_(ss, [{
+      operationId: "V161-STALE-TEST",
+      type: "upsert",
+      entity: "products",
+      entityId: "PRD-MISSING-V161",
+      payload: {
+        row: {
+          id: "PRD-MISSING-V161",
+          code: uniqueCode + "-MISSING",
+          name: "Missing stale product"
+        },
+        base: {
+          id: "PRD-MISSING-V161"
+        }
+      }
+    }]);
+  } catch (error) {
+    staleBlocked =
+      error &&
+      error.name === "ConflictError";
+  }
+
+  if (!staleBlocked) {
+    throw new Error(
+      "FAIL: unsafe stale edit was not blocked"
+    );
+  }
+
+  return {
+    ok: true,
+    createAllowed: true,
+    unsafeStaleBlocked: true,
+    writesPerformed: 0
+  };
+}

@@ -16,9 +16,9 @@ assert.match(backend, /"pendingPurchases"[\s\S]*"discount", "dp"/, "Backend Pend
 assert.doesNotMatch(html, /id="manualDebtPaid"/, "Input Data Hutang tidak boleh membuat pembayaran langsung");
 assert.doesNotMatch(html, /id="manualReceivablePaid"/, "Input Data Piutang tidak boleh membuat pembayaran langsung");
 assert.match(backend, /payment\.id is the business-level idempotency key/, "Backend harus memiliki pagar idempotensi di level payment");
-assert.match(backend, /if \(existingPayment\)[\s\S]*return; \/\/ Safe retry/, "Retry payment ID yang sama tidak boleh menerapkan delta dua kali");
-assert.match(backend, /Saldo tagihan berubah/, "Backend harus menolak baseline saldo yang sudah berubah");
-assert.match(backend, /Pembayaran melebihi sisa tagihan/, "Backend harus menolak overpayment");
+assert.match(backend, /assertPaymentIdentity_\(existingPayment, payment\)/, "Payment ID harus diperiksa sebelum jalur retry/recovery");
+assert.match(backend, /STALE_PAYMENT/, "Backend harus menolak baseline saldo yang sudah berubah");
+assert.match(backend, /OVERPAYMENT/, "Backend harus menolak overpayment");
 assert.match(html, /baseline: \{ paid: Number\(row\.baselinePaid \?\? invoiceBefore\?\.paid \?\? 0\), due: Number\(row\.baselineDue \?\? invoiceBefore\?\.due \?\? 0\) \}/, "payment_delta harus membawa baseline paid/due ke backend");
 assert.match(html, /v166PaymentCommandScope[\s\S]*String\(op\.type \|\| ""\) === "payment_delta"/, "Aksi pembayaran harus dibatasi hanya ke payment_delta");
 assert.match(html, /v169SetPaymentGuard\(type, row, paymentId, amount\)/, "Pembayaran harus memasang durable payment guard");

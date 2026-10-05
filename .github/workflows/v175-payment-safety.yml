@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/v175-payment-idempotency
+      - fix/v175-production-reconciliation
   pull_request:
     branches:
       - main
@@ -24,3 +25,5 @@ jobs:
           node-version: "20"
       - name: Run purchase and payment regression tests
         run: node outputs/mdd-kasir-complete/purchase-payment.test.js
+      - name: Run actual backend payment and recovery tests
+        run: node google-workspace-backend/payment-safety-runtime.test.js

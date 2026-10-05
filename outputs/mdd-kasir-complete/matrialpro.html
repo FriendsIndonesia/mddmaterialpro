@@ -4739,6 +4739,11 @@
           v166SetPaymentCommandScope(v166BulkPaymentIds);
           try {
             await saveStateDurable(`${processed} pembayaran hutang-piutang diproses sekaligus`);
+          } catch (error) {
+            restoreStateSnapshot(beforeWrite);
+            v173BulkGuardRows.forEach(({ type, row }) => v169ClearPaymentGuard(type, row));
+            renderAll();
+            return toast("Pembayaran massal BELUM tersimpan. Semua perubahan lokal dipulihkan.");
           } finally {
             v166ClearPaymentCommandScope();
           }

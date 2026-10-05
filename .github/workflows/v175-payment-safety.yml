@@ -1,0 +1,26 @@
+name: v175 Payment Safety
+
+on:
+  push:
+    branches:
+      - fix/v175-payment-idempotency
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  payment-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run purchase and payment regression tests
+        run: node outputs/mdd-kasir-complete/purchase-payment.test.js

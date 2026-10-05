@@ -2444,6 +2444,57 @@
         return false;
       }
 
+      async function v174ResolveBjbuOwnerDeleteConflicts() {
+        // Owner confirmed the red conflicts were created by deleting the two
+        // authoritative PT.BJBU DEVI debt rows. The production ledger keeps
+        // both invoices as historical, fully-paid records. Retire only local
+        // delete conflicts for those exact invoice/ledger IDs and remove their
+        // local tombstones so the server-authoritative rows can rehydrate.
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return false;
+        const markerKey = "v174BjbuOwnerDeleteConflictResolution";
+        if (await syncOutbox.getMeta(markerKey)) return false;
+        const invoiceNos = ["PUR20260610", "PUR20260628"];
+        const ledgerIds = ["HUT-PUR20260610-R19", "HUT-PUR20260628-R20"];
+        const conflicts = await syncOutbox.list(["conflict"], 100000);
+        const isTargetDelete = (row) => {
+          const payload = row?.payload || {};
+          const haystack = JSON.stringify({
+            entityType: row?.entityType, entityId: row?.entityId,
+            commandType: row?.commandType, payload
+          });
+          const targetsBjbu = invoiceNos.some((id) => haystack.includes(id)) || ledgerIds.some((id) => haystack.includes(id));
+          const deletion = /delete|deletion|tombstone|hapus/i.test(haystack) ||
+            (payload?.tables?.purchases?.deletes || []).some((id) => ledgerIds.includes(String(id))) ||
+            (payload?.settings?.deletionTombstones?.purchases || []).some((id) => ledgerIds.includes(String(id)));
+          return targetsBjbu && deletion;
+        };
+        const matches = conflicts.filter(isTargetDelete);
+        if (matches.length) {
+          await syncOutbox.setMeta(markerKey + "Audit", {
+            at: new Date().toISOString(),
+            rows: matches,
+            reason: "Owner confirmed PT.BJBU DEVI deletion caused the red conflict; production historical ledger wins."
+          });
+          await syncOutbox.mark(matches.map((row) => row.operationId).filter(Boolean), "retired", {
+            retiredAt: new Date().toISOString(),
+            lastError: "",
+            terminal: true,
+            resolvedBy: "v174-owner-confirmed-bjbu-delete-rejected",
+            resolution: "Server-authoritative paid PT.BJBU DEVI ledger retained; local delete intent retired."
+          });
+        }
+        state.deletionTombstones = state.deletionTombstones || {};
+        for (const key of ["purchases", "payments"]) {
+          state.deletionTombstones[key] = (state.deletionTombstones[key] || []).filter((id) => {
+            const value = String(id || "");
+            return !ledgerIds.includes(value) && !invoiceNos.some((inv) => value.includes(inv));
+          });
+        }
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        await syncOutbox.setMeta(markerKey, { completed: true, at: new Date().toISOString(), retired: matches.length });
+        return matches.length > 0;
+      }
+
       async function v173RetireServerConfirmedRejectedSaleP8NLI() {
         // Targeted production repair only for SAL-P8NLI. Production audit proved
         // the backend rejected this sale for insufficient stock and committed
@@ -2837,6 +2888,7 @@
             await v167RetireConfirmedRejectedPaymentConflictEarly();
             await v170RetireServerConfirmedSaifulDuplicateConflictEarly();
             await v173RetireServerConfirmedRejectedSaleP8NLI();
+            await v174ResolveBjbuOwnerDeleteConflicts();
           } catch (v167RepairError) {
             console.warn("v167 confirmed rejected payment cleanup skipped:", v167RepairError);
           }
@@ -4879,7 +4931,12 @@
       async function deleteDebtRecord(debtId) {
         const debt = state.purchases.find((p) => p.id === debtId);
         if (!debt) return toast("Data hutang tidak ditemukan.");
-        if (!confirm(`Hapus data hutang ${debt.invoiceNo || debt.id}?`)) return;
+        const authoritativeLedger = String(debt.id || "").startsWith("HUT-") || String(debt.source || debt.status || "").toLowerCase() === "hutang";
+        const settled = toNumber(debt.due ?? debt.remaining ?? debt.sisaHutang ?? debt.sisa) <= 0;
+        if (authoritativeLedger && settled) {
+          return toast("Hutang yang sudah lunas tetap disimpan sebagai riwayat. Data tidak dihapus.");
+        }
+        if (!confirm(`Hapus data hutang ${debt.invoiceNo || debt.id}? Tindakan ini hanya untuk data yang benar-benar salah, bukan untuk hutang yang sudah lunas.`)) return;
         markExplicitDeletion("purchases", debtId);
         state.payments.filter((payment) => payment.refId === debtId).forEach((payment) => markExplicitDeletion("payments", payment.id));
         state.purchases = state.purchases.filter((p) => p.id !== debtId);

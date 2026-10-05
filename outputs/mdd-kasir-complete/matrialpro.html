@@ -4893,7 +4893,7 @@
         const nextInvoice = editing?.invoiceNo || nextPurchaseNo();
         const selectedSupplier = selectedSupplierData(editing?.supplierId || "");
         let existingDebtPaid = debtPaidAmount(editing || {});
-        openModal(editing ? "Edit Data Pembayaran Hutang" : "Input Data Pembayaran Hutang", `
+        openModal(editing ? "Edit Data Hutang" : "Input Data Hutang", `
           <div class="row g-3">
             <div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${esc(editing?.date || today())}" class="form-control" required></div>
             <div class="col-md-4"><label class="form-label">Jatuh Tempo</label><input id="manualDebtDueDate" name="dueDate" type="date" value="${esc(editing?.dueDate || "")}" class="form-control"></div>
@@ -4922,7 +4922,7 @@
         });
         const syncDebtDue = () => {
           const total = Number(document.getElementById("manualDebtTotal").value || 0);
-          const paid = existingDebtPaid + Number(document.getElementById("manualDebtPaid").value || 0);
+          const paid = existingDebtPaid;
           const retur = Number(document.getElementById("manualDebtReturn").value || 0);
           document.getElementById("manualDebtDue").value = Math.max(0, total - paid - retur);
         };
@@ -4963,9 +4963,9 @@
             results.innerHTML = "";
           });
         };
-        document.getElementById("manualDebtSupplier").addEventListener("input", () => { selectedDebtRecord = null; existingDebtPaid = 0; document.getElementById("manualDebtSupplierId").value = ""; document.getElementById("manualDebtPaid").value = ""; syncDebtDue(); renderDebtSupplierResults(); });
+        document.getElementById("manualDebtSupplier").addEventListener("input", () => { selectedDebtRecord = null; existingDebtPaid = 0; document.getElementById("manualDebtSupplierId").value = ""; syncDebtDue(); renderDebtSupplierResults(); });
         document.getElementById("manualDebtSupplier").addEventListener("focus", renderDebtSupplierResults);
-        ["manualDebtTotal", "manualDebtPaid", "manualDebtReturn"].forEach((id) => document.getElementById(id).addEventListener("input", syncDebtDue));
+        ["manualDebtTotal", "manualDebtReturn"].forEach((id) => document.getElementById(id).addEventListener("input", syncDebtDue));
         if (!editing) syncDebtDue();
       }
       async function deleteDebtRecord(debtId) {
@@ -4991,7 +4991,7 @@
         const nextInvoice = editing?.invoiceNo || nextInvoiceNo();
         const selectedCustomer = state.customers.find((c) => c.id === editing?.customerId) || {};
         let existingReceivablePaid = receivablePaidAmount(editing || {});
-        openModal(editing ? "Edit Data Pembayaran Piutang" : "Input Data Pembayaran Piutang", `
+        openModal(editing ? "Edit Data Piutang" : "Input Data Piutang", `
           <div class="row g-3">
             <div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${esc(editing?.date || today())}" class="form-control" required></div>
             <div class="col-md-4"><label class="form-label">Jatuh Tempo</label><input id="manualReceivableDueDate" name="dueDate" type="date" value="${esc(editing?.dueDate || "")}" class="form-control"></div>
@@ -5020,7 +5020,7 @@
         });
         const syncReceivableDue = () => {
           const total = Number(document.getElementById("manualReceivableTotal").value || 0);
-          const paid = existingReceivablePaid + Number(document.getElementById("manualReceivablePaid").value || 0);
+          const paid = existingReceivablePaid;
           const retur = Number(document.getElementById("manualReceivableReturn").value || 0);
           document.getElementById("manualReceivableDue").value = Math.max(0, total - paid - retur);
         };
@@ -5061,9 +5061,9 @@
             results.innerHTML = "";
           });
         };
-        document.getElementById("manualReceivableCustomer").addEventListener("input", () => { selectedReceivableRecord = null; existingReceivablePaid = 0; document.getElementById("manualReceivableCustomerId").value = ""; document.getElementById("manualReceivablePaid").value = ""; syncReceivableDue(); renderReceivableCustomerResults(); });
+        document.getElementById("manualReceivableCustomer").addEventListener("input", () => { selectedReceivableRecord = null; existingReceivablePaid = 0; document.getElementById("manualReceivableCustomerId").value = ""; syncReceivableDue(); renderReceivableCustomerResults(); });
         document.getElementById("manualReceivableCustomer").addEventListener("focus", renderReceivableCustomerResults);
-        ["manualReceivableTotal", "manualReceivablePaid", "manualReceivableReturn"].forEach((id) => document.getElementById(id).addEventListener("input", syncReceivableDue));
+        ["manualReceivableTotal", "manualReceivableReturn"].forEach((id) => document.getElementById(id).addEventListener("input", syncReceivableDue));
         if (!editing) syncReceivableDue();
       }
       async function deleteReceivableRecord(receivableId) {

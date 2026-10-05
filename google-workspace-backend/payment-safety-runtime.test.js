@@ -37,6 +37,9 @@ class Spreadsheet {
   getSheetByName(name) {return this.sheets[name]||null;}
   insertSheet(name) {return this.sheets[name]=new Sheet(name);}
   getSpreadsheetTimeZone() {return 'Asia/Jakarta';}
+  getId() {return 'ISOLATED-TEST-ID';}
+  getName() {return this.name||'ISOLATED-TEST';}
+  getUrl() {return 'https://example.invalid/isolated-test';}
 }
 function setup(kind='Hutang', legacy=false) {
   let serial=0;const cache=new Map();const props=new Map([['SYNC_ENVIRONMENT','production'],['SPREADSHEET_ID','1rW1DGbvGJM5jVPF1NbCgDURFStpGqbfAQtq3a8Tt1FQ']]);
@@ -72,4 +75,5 @@ for(const kind of ['Hutang','Piutang']) {
   test(kind+' DP projection has no extra ledger effect',()=>{const t=setup(kind);const o=t.op();o.payload.payment.method='DP (Uang Muka)';t.apply(o);o.operationId+='retry';t.apply(o);assert.equal(t.count(),1);assert.deepEqual(t.ledger(),{paid:0,due:10000000});});
 }
 test('production environment guard retained',()=>{const t=setup();t.context.assertV147ProductionSafe_();const r=t.process([]);assert.ok(r.ok);const wrong=t.context.processOperations_(t.ss,{environment:'staging',operations:[t.op()]});assert.ok(wrong.environmentMismatch);assert.equal(t.count(),0);});
+test('isolated live-Sheets test runner uses a fresh workbook',()=>{const t=setup();t.context.SpreadsheetApp={create:name=>{const ss=new Spreadsheet();ss.name=name;return ss;}};vm.runInContext(fs.readFileSync(path.join(__dirname,'PaymentSafetyStagingTest.gs'),'utf8'),t.context);const result=t.context.v175RunIsolatedSheetsTests();assert.equal(result.ok,true);assert.equal(result.passed,20);assert.equal(result.productionWrites,0);});
 console.log(JSON.stringify({passed,failed:0,storage:'in-memory Spreadsheet API emulator',productionWrites:0}));

@@ -19,6 +19,9 @@ assert.match(backend, /payment\.id is the business-level idempotency key/, "Back
 assert.match(backend, /if \(existingPayment\)[\s\S]*return; \/\/ Safe retry/, "Retry payment ID yang sama tidak boleh menerapkan delta dua kali");
 assert.match(backend, /Saldo tagihan berubah/, "Backend harus menolak baseline saldo yang sudah berubah");
 assert.match(backend, /Pembayaran melebihi sisa tagihan/, "Backend harus menolak overpayment");
+assert.match(html, /baseline: \{ paid: Number\(row\.baselinePaid \?\? invoiceBefore\?\.paid \?\? 0\), due: Number\(row\.baselineDue \?\? invoiceBefore\?\.due \?\? 0\) \}/, "payment_delta harus membawa baseline paid/due ke backend");
+assert.match(html, /v166PaymentCommandScope[\s\S]*String\(op\.type \|\| ""\) === "payment_delta"/, "Aksi pembayaran harus dibatasi hanya ke payment_delta");
+assert.match(html, /v169SetPaymentGuard\(type, row, paymentId, amount\)/, "Pembayaran harus memasang durable payment guard");
 
 const total = (items, ongkir, bankCharge, discount) => Math.max(0, items + ongkir + bankCharge - discount);
 assert.equal(total(2_900_000, 0, 0, 0), 2_900_000);

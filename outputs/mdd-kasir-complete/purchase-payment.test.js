@@ -13,6 +13,12 @@ assert.match(html, /const due = Math\.max\(0, total - paid\)/, "Sisa hutang haru
 assert.match(html, /purchasePaymentFormula/, "Rincian rumus pembayaran harus terlihat");
 assert.match(backend, /"purchases"[\s\S]*"discount", "dp"/, "Backend Purchases harus menyimpan diskon dan DP");
 assert.match(backend, /"pendingPurchases"[\s\S]*"discount", "dp"/, "Backend PendingPurchases harus menyimpan diskon dan DP");
+assert.doesNotMatch(html, /id="manualDebtPaid"/, "Input Data Hutang tidak boleh membuat pembayaran langsung");
+assert.doesNotMatch(html, /id="manualReceivablePaid"/, "Input Data Piutang tidak boleh membuat pembayaran langsung");
+assert.match(backend, /payment\.id is the business-level idempotency key/, "Backend harus memiliki pagar idempotensi di level payment");
+assert.match(backend, /if \(existingPayment\)[\s\S]*return; \/\/ Safe retry/, "Retry payment ID yang sama tidak boleh menerapkan delta dua kali");
+assert.match(backend, /Saldo tagihan berubah/, "Backend harus menolak baseline saldo yang sudah berubah");
+assert.match(backend, /Pembayaran melebihi sisa tagihan/, "Backend harus menolak overpayment");
 
 const total = (items, ongkir, bankCharge, discount) => Math.max(0, items + ongkir + bankCharge - discount);
 assert.equal(total(2_900_000, 0, 0, 0), 2_900_000);

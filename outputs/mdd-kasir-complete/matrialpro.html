@@ -801,7 +801,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 174;
+      const APP_VERSION = 175;
       // The v136 baseline marker is retained solely to avoid running another
       // destructive recovery migration. Version 137 only repairs routing and
       // snapshot loading.
@@ -2444,6 +2444,45 @@
         return false;
       }
 
+            async function v175ResolveBjbuPaymentConflicts() {
+        if (SYNC_ENVIRONMENT !== "production" || !outboxReady) return false;
+
+        const markerKey = "v175BjbuPaymentConflictResolution";
+        if (await syncOutbox.getMeta(markerKey)) return false;
+
+        const commandIds = new Set([
+          "2aec3f6b-4660-4a6b-a3ad-4d856c667128",
+          "63314950-7330-449e-8214-e6fdaaf7440e"
+        ]);
+
+        const conflicts = await syncOutbox.list(["conflict"], 100000);
+
+        const matches = conflicts.filter((row) =>
+          commandIds.has(String(row.commandId || ""))
+        );
+
+        if (matches.length) {
+          await syncOutbox.mark(
+            matches.map((row) => row.operationId).filter(Boolean),
+            "retired",
+            {
+              retiredAt: new Date().toISOString(),
+              lastError: "",
+              terminal: true,
+              resolvedBy: "v175-bjbu-payment-conflict-resolution"
+            }
+          );
+        }
+
+        await syncOutbox.setMeta(markerKey, {
+          completed: true,
+          at: new Date().toISOString(),
+          retired: matches.length
+        });
+
+        return matches.length > 0;
+      }
+
       async function v174ResolveBjbuOwnerDeleteConflicts() {
         // Owner confirmed the red conflicts were created by deleting the two
         // authoritative PT.BJBU DEVI debt rows. The production ledger keeps
@@ -2888,7 +2927,8 @@
             await v167RetireConfirmedRejectedPaymentConflictEarly();
             await v170RetireServerConfirmedSaifulDuplicateConflictEarly();
             await v173RetireServerConfirmedRejectedSaleP8NLI();
-            await v174ResolveBjbuOwnerDeleteConflicts();
+            await v174ResolveBjbuOwnerDelAPP_VERSION = 174eteConflicts();
+            await v175ResolveBjbuPaymentConflicts();
           } catch (v167RepairError) {
             console.warn("v167 confirmed rejected payment cleanup skipped:", v167RepairError);
           }

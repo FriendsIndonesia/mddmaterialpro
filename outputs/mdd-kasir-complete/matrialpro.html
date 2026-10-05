@@ -4893,36 +4893,33 @@
         const nextInvoice = editing?.invoiceNo || nextPurchaseNo();
         const selectedSupplier = selectedSupplierData(editing?.supplierId || "");
         let existingDebtPaid = debtPaidAmount(editing || {});
-        openModal(editing ? "Edit Data Pembayaran Hutang" : "Input Data Pembayaran Hutang", `
+        openModal(editing ? "Edit Data Hutang" : "Input Data Hutang", `
           <div class="row g-3">
             <div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${esc(editing?.date || today())}" class="form-control" required></div>
             <div class="col-md-4"><label class="form-label">Jatuh Tempo</label><input id="manualDebtDueDate" name="dueDate" type="date" value="${esc(editing?.dueDate || "")}" class="form-control"></div>
             <div class="col-md-4"><label class="form-label">No. Faktur</label><input id="manualDebtInvoiceNo" name="invoiceNo" class="form-control" value="${esc(nextInvoice)}" required></div>
             <div class="col-12"><label class="form-label">Supplier</label><input id="manualDebtSupplier" name="supplier" class="form-control" autocomplete="off" value="${esc(editing?.salesName || selectedSupplier.name || "")}" placeholder="Ketik nama supplier/perusahaan atau nomor faktur" required><input id="manualDebtSupplierId" name="supplierId" type="hidden" value="${esc(editing?.supplierId || "")}"><div id="manualDebtSupplierResults" class="search-results mt-2"></div></div>
-            <div class="col-md-3"><label class="form-label">Hutang Aktif</label><input id="manualDebtTotal" name="total" type="number" min="0" value="${Number(editing?.total || 0)}" class="form-control" required></div>
-            <div class="col-md-3"><label class="form-label">Sisa Hutang</label><input id="manualDebtDue" name="due" type="number" min="0" value="${Number(editing?.due || 0)}" class="form-control" readonly></div>
-            <div class="col-md-3"><label class="form-label">Retur</label><input id="manualDebtReturn" name="returnAmount" type="number" min="0" value="${Number(editing?.returnAmount || 0)}" class="form-control"></div>
-            <div class="col-md-3"><label class="form-label">Bayar</label><input id="manualDebtPaid" name="paid" type="number" min="0" value="" placeholder="Pembayaran baru" class="form-control"></div>
+            <div class="col-md-4"><label class="form-label">Hutang Aktif</label><input id="manualDebtTotal" name="total" type="number" min="0" value="${Number(editing?.total || 0)}" class="form-control" required></div>
+            <div class="col-md-4"><label class="form-label">Sisa Hutang</label><input id="manualDebtDue" name="due" type="number" min="0" value="${Number(editing?.due || 0)}" class="form-control" readonly></div>
+            <div class="col-md-4"><label class="form-label">Retur</label><input id="manualDebtReturn" name="returnAmount" type="number" min="0" value="${Number(editing?.returnAmount || 0)}" class="form-control"></div>
             <div class="col-12"><p class="small text-secondary mb-0">Supplier bisa dipilih dari Master Supplier, atau diketik manual ketika data berasal dari backend/spreadsheet.</p></div>
           </div>`, async (fd) => {
           const supplierId = fd.get("supplierId");
           const supplier = selectedSupplierData(supplierId);
           const total = Number(fd.get("total") || 0);
-          const newPayment = Number(fd.get("paid") || 0);
           const returnAmount = Number(fd.get("returnAmount") || 0);
-          const paid = existingDebtPaid + newPayment;
+          const paid = existingDebtPaid;
           const due = Math.max(0, total - paid - returnAmount);
           const row = selectedDebtRecord || { id: uid("PUR"), items: [], ongkir: 0, bankCharge: 0, note: "Input manual pembayaran hutang" };
           Object.assign(row, { invoiceNo: fd.get("invoiceNo"), date: fd.get("date"), dueDate: fd.get("dueDate"), supplierId, salesName: fd.get("supplier") || supplier.name || "-", company: supplier.company || row.company || "", whatsapp: supplier.phone || row.whatsapp || "", method: "Hutang", status: due > 0 ? "Hutang" : "Lunas", total, due, paid, returnAmount });
           if (!selectedDebtRecord) state.purchases.unshift(row);
-          if (newPayment > 0) state.payments.unshift({ id: uid("PAY"), date: fd.get("date"), refId: row.id, invoiceNo: row.invoiceNo, relation: row.salesName, type: "Hutang", amount: newPayment, remaining: due, method: "Input Data", note: "Pembayaran hutang baru" });
           await saveStateDurable(`Data hutang ${row.invoiceNo} ${editing ? "diperbarui" : "ditambahkan"}`);
           closeModal();
           renderAll();
         });
         const syncDebtDue = () => {
           const total = Number(document.getElementById("manualDebtTotal").value || 0);
-          const paid = existingDebtPaid + Number(document.getElementById("manualDebtPaid").value || 0);
+          const paid = existingDebtPaid;
           const retur = Number(document.getElementById("manualDebtReturn").value || 0);
           document.getElementById("manualDebtDue").value = Math.max(0, total - paid - retur);
         };
@@ -4947,7 +4944,6 @@
             document.getElementById("manualDebtInvoiceNo").value = row.invoiceNo || row.id;
             document.getElementById("manualDebtTotal").value = toNumber(row.total);
             existingDebtPaid = debtPaidAmount(row);
-            document.getElementById("manualDebtPaid").value = "";
             document.getElementById("manualDebtReturn").value = debtReturnAmount(row);
             document.getElementById("manualDebtDue").value = toNumber(row.due);
             results.innerHTML = "";
@@ -4958,14 +4954,13 @@
             existingDebtPaid = 0;
             document.getElementById("manualDebtSupplierId").value = supplier.id || button.dataset.debtSupplierId;
             input.value = supplier.company || supplier.name || "";
-            document.getElementById("manualDebtPaid").value = "";
-            syncDebtDue();
+                        syncDebtDue();
             results.innerHTML = "";
           });
         };
-        document.getElementById("manualDebtSupplier").addEventListener("input", () => { selectedDebtRecord = null; existingDebtPaid = 0; document.getElementById("manualDebtSupplierId").value = ""; document.getElementById("manualDebtPaid").value = ""; syncDebtDue(); renderDebtSupplierResults(); });
+        document.getElementById("manualDebtSupplier").addEventListener("input", () => { selectedDebtRecord = null; existingDebtPaid = 0; document.getElementById("manualDebtSupplierId").value = ""; syncDebtDue(); renderDebtSupplierResults(); });
         document.getElementById("manualDebtSupplier").addEventListener("focus", renderDebtSupplierResults);
-        ["manualDebtTotal", "manualDebtPaid", "manualDebtReturn"].forEach((id) => document.getElementById(id).addEventListener("input", syncDebtDue));
+        ["manualDebtTotal", "manualDebtReturn"].forEach((id) => document.getElementById(id).addEventListener("input", syncDebtDue));
         if (!editing) syncDebtDue();
       }
       async function deleteDebtRecord(debtId) {
@@ -4991,36 +4986,33 @@
         const nextInvoice = editing?.invoiceNo || nextInvoiceNo();
         const selectedCustomer = state.customers.find((c) => c.id === editing?.customerId) || {};
         let existingReceivablePaid = receivablePaidAmount(editing || {});
-        openModal(editing ? "Edit Data Pembayaran Piutang" : "Input Data Pembayaran Piutang", `
+        openModal(editing ? "Edit Data Piutang" : "Input Data Piutang", `
           <div class="row g-3">
             <div class="col-md-4"><label class="form-label">Tanggal</label><input name="date" type="date" value="${esc(editing?.date || today())}" class="form-control" required></div>
             <div class="col-md-4"><label class="form-label">Jatuh Tempo</label><input id="manualReceivableDueDate" name="dueDate" type="date" value="${esc(editing?.dueDate || "")}" class="form-control"></div>
             <div class="col-md-4"><label class="form-label">No. Faktur</label><input id="manualReceivableInvoiceNo" name="invoiceNo" class="form-control" value="${esc(nextInvoice)}" required></div>
             <div class="col-12"><label class="form-label">Pelanggan</label><input id="manualReceivableCustomer" name="customer" class="form-control" autocomplete="off" value="${esc(editing?.customerName || selectedCustomer.name || "")}" placeholder="Ketik nama pelanggan atau nomor faktur" required><input id="manualReceivableCustomerId" name="customerId" type="hidden" value="${esc(editing?.customerId || "")}"><div id="manualReceivableCustomerResults" class="search-results mt-2"></div></div>
-            <div class="col-md-3"><label class="form-label">Piutang Aktif</label><input id="manualReceivableTotal" name="total" type="number" min="0" value="${Number(editing?.total || 0)}" class="form-control" required></div>
-            <div class="col-md-3"><label class="form-label">Sisa Piutang</label><input id="manualReceivableDue" name="due" type="number" min="0" value="${Number(editing?.due || 0)}" class="form-control" readonly></div>
-            <div class="col-md-3"><label class="form-label">Retur</label><input id="manualReceivableReturn" name="returnAmount" type="number" min="0" value="${Number(editing?.returnAmount || 0)}" class="form-control"></div>
-            <div class="col-md-3"><label class="form-label">Bayar</label><input id="manualReceivablePaid" name="paid" type="number" min="0" value="" placeholder="Pembayaran baru" class="form-control"></div>
+            <div class="col-md-4"><label class="form-label">Piutang Aktif</label><input id="manualReceivableTotal" name="total" type="number" min="0" value="${Number(editing?.total || 0)}" class="form-control" required></div>
+            <div class="col-md-4"><label class="form-label">Sisa Piutang</label><input id="manualReceivableDue" name="due" type="number" min="0" value="${Number(editing?.due || 0)}" class="form-control" readonly></div>
+            <div class="col-md-4"><label class="form-label">Retur</label><input id="manualReceivableReturn" name="returnAmount" type="number" min="0" value="${Number(editing?.returnAmount || 0)}" class="form-control"></div>
             <div class="col-12"><p class="small text-secondary mb-0">Pelanggan bisa dipilih dari Master Pelanggan, atau diketik manual ketika data berasal dari backend/spreadsheet.</p></div>
           </div>`, async (fd) => {
           const customerId = fd.get("customerId");
           const customer = state.customers.find((c) => c.id === customerId) || {};
           const total = Number(fd.get("total") || 0);
-          const newPayment = Number(fd.get("paid") || 0);
           const returnAmount = Number(fd.get("returnAmount") || 0);
-          const paid = existingReceivablePaid + newPayment;
+          const paid = existingReceivablePaid;
           const due = Math.max(0, total - paid - returnAmount);
           const row = selectedReceivableRecord || { id: uid("SAL"), items: [], ongkir: 0, bankCharge: 0, note: "Input manual pembayaran piutang" };
           Object.assign(row, { invoiceNo: fd.get("invoiceNo"), date: fd.get("date"), dueDate: fd.get("dueDate"), customerId, customerName: fd.get("customer") || customer.name || "-", customerType: customer.type || row.customerType || "", customerAddress: customer.address || row.customerAddress || "", customerWhatsapp: customer.phone || customer.whatsapp || row.customerWhatsapp || "", method: "Piutang", status: due > 0 ? "Piutang" : "Lunas", total, due, paid, returnAmount });
           if (!selectedReceivableRecord) state.sales.unshift(row);
-          if (newPayment > 0) state.payments.unshift({ id: uid("PAY"), date: fd.get("date"), refId: row.id, invoiceNo: row.invoiceNo, relation: row.customerName, type: "Piutang", amount: newPayment, remaining: due, method: "Input Data", note: "Pembayaran piutang baru" });
           await saveStateDurable(`Data piutang ${row.invoiceNo} ${editing ? "diperbarui" : "ditambahkan"}`);
           closeModal();
           renderAll();
         });
         const syncReceivableDue = () => {
           const total = Number(document.getElementById("manualReceivableTotal").value || 0);
-          const paid = existingReceivablePaid + Number(document.getElementById("manualReceivablePaid").value || 0);
+          const paid = existingReceivablePaid;
           const retur = Number(document.getElementById("manualReceivableReturn").value || 0);
           document.getElementById("manualReceivableDue").value = Math.max(0, total - paid - retur);
         };
@@ -5045,7 +5037,6 @@
             document.getElementById("manualReceivableInvoiceNo").value = row.invoiceNo || row.id;
             document.getElementById("manualReceivableTotal").value = toNumber(row.total);
             existingReceivablePaid = receivablePaidAmount(row);
-            document.getElementById("manualReceivablePaid").value = "";
             document.getElementById("manualReceivableReturn").value = receivableReturnAmount(row);
             document.getElementById("manualReceivableDue").value = toNumber(row.due);
             results.innerHTML = "";
@@ -5056,14 +5047,13 @@
             existingReceivablePaid = 0;
             document.getElementById("manualReceivableCustomerId").value = customer.id || button.dataset.receivableCustomerId;
             input.value = customer.name || "";
-            document.getElementById("manualReceivablePaid").value = "";
-            syncReceivableDue();
+                        syncReceivableDue();
             results.innerHTML = "";
           });
         };
-        document.getElementById("manualReceivableCustomer").addEventListener("input", () => { selectedReceivableRecord = null; existingReceivablePaid = 0; document.getElementById("manualReceivableCustomerId").value = ""; document.getElementById("manualReceivablePaid").value = ""; syncReceivableDue(); renderReceivableCustomerResults(); });
+        document.getElementById("manualReceivableCustomer").addEventListener("input", () => { selectedReceivableRecord = null; existingReceivablePaid = 0; document.getElementById("manualReceivableCustomerId").value = ""; syncReceivableDue(); renderReceivableCustomerResults(); });
         document.getElementById("manualReceivableCustomer").addEventListener("focus", renderReceivableCustomerResults);
-        ["manualReceivableTotal", "manualReceivablePaid", "manualReceivableReturn"].forEach((id) => document.getElementById(id).addEventListener("input", syncReceivableDue));
+        ["manualReceivableTotal", "manualReceivableReturn"].forEach((id) => document.getElementById(id).addEventListener("input", syncReceivableDue));
         if (!editing) syncReceivableDue();
       }
       async function deleteReceivableRecord(receivableId) {

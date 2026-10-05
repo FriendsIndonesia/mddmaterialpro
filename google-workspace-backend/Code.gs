@@ -440,9 +440,35 @@ function applyStockDelta_(ss, operation) {
 function applyPaymentDelta_(ss, operation) {
   const payment = operation.payload && operation.payload.payment;
   if (!payment || !payment.id) throw new Error("Payment delta tidak valid");
+
+  // v175: payment.id is the business-level idempotency key. OperationReceipts
+  // protects retries of one operationId; this second fence also protects the
+  // same payment if a client ever rebuilds it under a different operationId.
   const paymentTable = TABLES.find((item) => item.key === "payments");
-  applyTableChanges_(ss, paymentTable, { upserts: [payment], deletes: [] });
-  if (/^DP\s/i.test(String(payment.method || ""))) return;
+  const paymentId = String(payment.id || "").trim();
+  const existingPayment = readTableDefinition_(ss, paymentTable)
+    .find((row) => String(row.id || "").trim() === paymentId);
+  if (existingPayment) {
+    const sameBusinessPayment =
+      String(existingPayment.refId || "") === String(payment.refId || "") &&
+      String(existingPayment.type || "").toLowerCase() === String(payment.type || "").toLowerCase() &&
+      Math.abs(Number(existingPayment.amount || 0) - Number(payment.amount || 0)) < 0.000001;
+    if (!sameBusinessPayment) {
+      const conflict = new Error("Payment ID sudah ada dengan isi berbeda: " + paymentId);
+      conflict.name = "ConflictError";
+      throw conflict;
+    }
+    return; // Safe retry: payment already committed, never apply its delta twice.
+  }
+
+  const amount = Number(payment.amount || 0);
+  if (!isFinite(amount) || amount <= 0) throw new Error("Nominal pembayaran harus lebih dari 0");
+
+  if (/^DP\s/i.test(String(payment.method || ""))) {
+    applyTableChanges_(ss, paymentTable, { upserts: [payment], deletes: [] });
+    return;
+  }
+
   const isDebt = String(payment.type || "").toLowerCase() === "hutang";
   const targetTable = TABLES.find((item) => item.key === (isDebt ? "purchases" : "sales"));
   const sheet = ensureSheet_(ss, targetTable.sheet, targetTable.fields);
@@ -453,9 +479,29 @@ function applyPaymentDelta_(ss, operation) {
   const rowNumber = index + 2;
   const paidColumn = targetTable.fields.indexOf("paid") + 1;
   const dueColumn = targetTable.fields.indexOf("due") + 1;
-  const amount = Number(payment.amount || 0);
   const paid = Number(sheet.getRange(rowNumber, paidColumn).getValue() || 0);
   const due = Number(sheet.getRange(rowNumber, dueColumn).getValue() || 0);
+  const baseline = operation.payload && operation.payload.baseline || {};
+  const baselineDue = Number(baseline.due);
+  const baselinePaid = Number(baseline.paid);
+  if (isFinite(baselineDue) && Math.abs(due - baselineDue) > 0.000001) {
+    const conflict = new Error("Saldo tagihan berubah. Sisa server " + due + ", baseline pembayaran " + baselineDue);
+    conflict.name = "ConflictError";
+    throw conflict;
+  }
+  if (isFinite(baselinePaid) && Math.abs(paid - baselinePaid) > 0.000001) {
+    const conflict = new Error("Total pembayaran berubah. Paid server " + paid + ", baseline pembayaran " + baselinePaid);
+    conflict.name = "ConflictError";
+    throw conflict;
+  }
+  if (amount > due + 0.000001) {
+    const conflict = new Error("Pembayaran melebihi sisa tagihan. Sisa server " + due + ", pembayaran " + amount);
+    conflict.name = "ConflictError";
+    throw conflict;
+  }
+
+  // Write the payment record only after all authoritative ledger checks pass.
+  applyTableChanges_(ss, paymentTable, { upserts: [payment], deletes: [] });
   sheet.getRange(rowNumber, paidColumn).setValue(paid + amount);
   sheet.getRange(rowNumber, dueColumn).setValue(Math.max(0, due - amount));
 }

@@ -4720,11 +4720,14 @@
           for (const { type, row } of selected) {
             const amount = Math.min(toNumber(row.due), toNumber(fd.get(`amount:${type}:${row.id}`)));
             if (amount <= 0) return;
+            const paymentId = uid("PAY");
+            const paymentIntent = v169SetPaymentGuard(type, row, paymentId, amount);
+            v173BulkGuardRows.push({ type, row });
             row.due = Math.max(0, toNumber(row.due) - amount);
             row.paid = toNumber(row.paid) + amount;
             if (row.due === 0) row.status = "Lunas";
             const relation = type === "debt" ? (row.company || row.salesName || personName(state.suppliers, row.supplierId)) : (row.customerName || personName(state.customers, row.customerId));
-            const v166Payment = { id: uid("PAY"), date: fd.get("date"), refId: row.id, invoiceNo: row.invoiceNo || row.id, relation, type: type === "debt" ? "Hutang" : "Piutang", amount, remaining: row.due, method: fd.get("method"), note: fd.get("note") || "Pembayaran sekaligus" };
+            const v166Payment = { id: paymentId, intentId: paymentIntent.intentId, baselinePaid: paymentIntent.baselinePaid, baselineDue: paymentIntent.baselineDue, date: fd.get("date"), refId: row.id, invoiceNo: row.invoiceNo || row.id, relation, type: type === "debt" ? "Hutang" : "Piutang", amount, remaining: row.due, method: fd.get("method"), note: fd.get("note") || "Pembayaran sekaligus" };
             state.payments.unshift(v166Payment);
             v166BulkPaymentIds.push(v166Payment.id);
             const account = state.cashAccounts.find((item) => item.id === fd.get("accountId"));

@@ -801,7 +801,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 176;
+      const APP_VERSION = 177;
 /* One audited pre-write stock rejection. Never a general conflict reset. */
 const MDDRecovery176 = (() => {
   const command = '4b56f78e-6945-4947-a7fe-4b78f0318d29';
@@ -4074,12 +4074,58 @@ const MDDRecovery176 = (() => {
         salesChart = new Chart(document.getElementById("salesChart"), { type: "bar", data: { labels: labels.map(displayDate), datasets: [{ label: "Omzet", data: values, backgroundColor: "#2563eb", minBarLength: 4 }] }, plugins: [todayValueLabelPlugin], options: { responsive: true, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (context) => `Omzet: ${idr.format(context.raw || 0)}` } } } } });
       }
 
+      function saleStockProblems(cart = activeCart) {
+        const required = new Map();
+        const restored = new Map();
+        const problems = [];
+        const previousSale = editingSaleId ? state.sales.find((sale) => sale.id === editingSaleId) : null;
+        for (const item of previousSale?.items || []) {
+          const product = findProduct(item.productId);
+          if (!product) continue;
+          const qty = Number(item.primaryQty ?? productQuantityInPrimary(product, item.qty, item.unit));
+          if (Number.isFinite(qty) && qty > 0) restored.set(product.id, (restored.get(product.id) || 0) + qty);
+        }
+        for (const item of cart) {
+          const product = findProduct(item.productId);
+          if (!product) { problems.push(`${item.name || "Produk"}: data stok tidak tersedia.`); continue; }
+          // Recompute from current quantity/unit: cached primaryQty may predate a cart edit.
+          let qty;
+          try { qty = productQuantityInPrimary(product, item.qty, item.unit); } catch (_) { qty = NaN; }
+          if (!Number.isFinite(qty) || qty <= 0) { problems.push(`${product.name}: jumlah atau konversi satuan tidak valid.`); continue; }
+          required.set(product.id, (required.get(product.id) || 0) + qty);
+        }
+        for (const [id, qty] of required) {
+          const product = findProduct(id);
+          const stock = Number(product.stock ?? product.stockAkhir ?? 0);
+          const available = Math.max(0, stock) + (restored.get(id) || 0);
+          const unit = product.primaryUnit || product.unit || "";
+          if (!Number.isFinite(stock)) problems.push(`${product.name}: data stok tidak valid.`);
+          else if (available <= 0 || qty > available + 0.000001) problems.push(`${product.name}: stok tersedia ${number.format(available)} ${unit}, diperlukan ${number.format(qty)} ${unit}.`);
+        }
+        return problems;
+      }
+      function updateSaleStockGuard() {
+        const problems = saleStockProblems();
+        const button = document.getElementById("salePayBtn");
+        const warning = document.getElementById("saleStockWarning");
+        if (button) {
+          button.disabled = problems.length > 0;
+          button.title = problems.length ? "Stok belum mencukupi untuk penjualan ini." : "";
+        }
+        if (warning) {
+          warning.hidden = !problems.length;
+          warning.textContent = problems.length ? `Belum bisa Simpan & Bayar. ${problems.join(" ")} Kurangi jumlah barang atau tunggu stok masuk tersinkron.` : "";
+        }
+        return problems;
+      }
+
       function renderCashier() {
         restoreSaleProductDraft();
         ensureSaleDraft();
         const cashierSales = visibleReportRows("cashierView", "sales", state.sales.filter(isCashierSale));
         document.getElementById("cashierView").innerHTML = `
-          <div class="page-header"><div><p class="eyebrow">Kasir</p><h2>Penjualan dan Retur</h2></div><div class="header-actions"><button class="btn btn-outline-secondary" id="saleCancelBtn"><i class="bi bi-x-circle"></i> Batal</button><button class="btn btn-outline-secondary" id="salePendingBtn"><i class="bi bi-pause-circle"></i> Pending</button><button class="btn btn-primary" id="salePayBtn"><i class="bi bi-cash-coin"></i> Simpan & Bayar</button></div></div>
+          <div class="page-header"><div><p class="eyebrow">Kasir</p><h2>Penjualan dan Retur</h2></div><div class="header-actions"><button class="btn btn-outline-secondary" id="saleCancelBtn"><i class="bi bi-x-circle"></i> Batal</button><button class="btn btn-outline-secondary" id="salePendingBtn"><i class="bi bi-pause-circle"></i> Pending</button><button class="btn btn-primary" id="salePayBtn" aria-describedby="saleStockWarning"><i class="bi bi-cash-coin"></i> Simpan & Bayar</button></div></div>
+          <div id="saleStockWarning" class="alert alert-warning" role="status" aria-live="polite" hidden></div>
           <div class="content-grid">
             <section class="panel">
               <div class="panel-header"><h3>Cari Barang</h3><span class="chip"><i class="bi bi-upc-scan"></i> Scan/Kode/Nama</span></div>
@@ -4151,6 +4197,7 @@ const MDDRecovery176 = (() => {
         document.getElementById("saleCancelBtn").onclick = () => { activeCart = []; editingSaleId = ""; resetSaleDraft(); renderAll(); toast("Transaksi dibatalkan."); };
         document.getElementById("salePendingBtn").onclick = pendingSale;
         document.getElementById("salePayBtn").onclick = checkoutSale;
+        updateSaleStockGuard();
         document.getElementById("saleReturnBtn").onclick = () => openReturnModal("Penjualan");
         bindPendingSalesActions();
         bindCompletedSalesActions();
@@ -4411,6 +4458,8 @@ const MDDRecovery176 = (() => {
       let saleCheckoutBusy = false;
       async function checkoutSale() {
         if (saleCheckoutBusy) return toast("Transaksi penjualan sedang diproses.");
+        const stockProblems = updateSaleStockGuard();
+        if (stockProblems.length) return toast(stockProblems.join(" "));
         if (!activeCart.length) return toast("Keranjang masih kosong.");
         updateSaleDraftTotals();
         saleDraft.method = document.getElementById("salePayMethod").value;

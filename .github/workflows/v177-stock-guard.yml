@@ -1,0 +1,11 @@
+name: v177 Sale Stock Guard
+on: [push, pull_request]
+jobs:
+  stock-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test outputs/mdd-kasir-complete/sale-stock-guard.test.js outputs/mdd-kasir-complete/sale-recovery.test.js

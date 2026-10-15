@@ -801,7 +801,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 177;
+      const APP_VERSION = 178;
 /* One audited pre-write stock rejection. Never a general conflict reset. */
 const MDDRecovery176 = (() => {
   const command = '4b56f78e-6945-4947-a7fe-4b78f0318d29';
@@ -884,17 +884,39 @@ const MDDRecovery176 = (() => {
 
 
       let recovery176Busy = false;
+      let recovery178Timer = null;
+      let recovery178NextAttempt = 0;
+      let recovery178Attempts = 0;
+      let recovery178Status = "";
+      function recovery178Message(code) {
+        if (/RECEIPTS_CHANGED|WRONG_BACKEND|SNAPSHOT_INCOMPLETE/.test(code)) return "Jawaban server belum lengkap; pemeriksaan akan diulang otomatis.";
+        if (code === "RECOVERY_STOCK_NOT_READY") return "Stok untuk transaksi tertunda belum mencukupi; akan diperiksa kembali otomatis.";
+        if (/ALREADY_EXISTS|STOCK_ALREADY_EXISTS/.test(code)) return "Ada data terkait di server; pemulihan dihentikan untuk mencegah duplikasi.";
+        if (/SOURCE_|QUANTITY_|INVALID_|NOT_A_NEW_RECORD|QUEUE_INCOMPLETE/.test(code)) return "Data transaksi perlu dicocokkan; data asli tetap tersimpan.";
+        return "Pemulihan perlu diperiksa; data asli tetap tersimpan.";
+      }
+      function scheduleRecovery178() {
+        clearTimeout(recovery178Timer);
+        const delay = Math.min(300000, 30000 * (2 ** Math.min(recovery178Attempts++, 4)));
+        recovery178NextAttempt = Date.now() + delay;
+        recovery178Timer = setTimeout(() => { void recoverAuditedSaleV176(); }, delay);
+      }
       async function recoverAuditedSaleV176() {
-        if (recovery176Busy || !outboxReady || SYNC_ENVIRONMENT !== "production" || !navigator.onLine) return;
+        if (recovery176Busy || !outboxReady || SYNC_ENVIRONMENT !== "production" || Date.now() < recovery178NextAttempt) return;
+        clearTimeout(recovery178Timer);
+        if (!navigator.onLine) { scheduleRecovery178(); return; }
         recovery176Busy = true;
+        let retry = false;
         try {
           const result = await MDDRecovery176.run({
             box: syncOutbox,
-            ack: ids => requestGoogleWorkspaceJsonp("acknowledgement", {operationIds: ids.join(",")}),
+            // Production receipt lookups can exceed the normal 10-second budget.
+            // Keep the same seven operation IDs across every read and retry.
+            ack: ids => requestGoogleWorkspaceJsonp("acknowledgement", {operationIds: ids.join(",")}, {timeoutMs: 60000}),
             snapshot: async () => {
               const [finance, master] = await Promise.all([
-                requestGoogleWorkspaceJsonp("finance", {}),
-                requestGoogleWorkspaceJsonp("master", {})
+                requestGoogleWorkspaceJsonp("finance", {}, {timeoutMs: 90000}),
+                requestGoogleWorkspaceJsonp("master", {}, {timeoutMs: 90000})
               ]);
               for (const response of [finance, master]) {
                 if (!response?.ok || response.spreadsheetId !== EXPECTED_SPREADSHEET_ID) throw Error("RECOVERY_WRONG_BACKEND");
@@ -902,11 +924,25 @@ const MDDRecovery176 = (() => {
               return {sales: finance.data?.sales, products: master.data?.products, stockMoves: master.data?.stockMoves};
             }
           });
-          if (result === "enqueued") queueGoogleWorkspaceSync();
-          if (result === "completed") await updateSyncIndicator();
+          retry = result === "enqueued" || result === "waiting";
+          recovery178Status = retry ? "Pemulihan transaksi sedang menunggu konfirmasi server." : "";
+          if (retry) queueGoogleWorkspaceSync();
+          if (result === "completed" || result === "not-this-device") {
+            recovery178Attempts = 0;
+            recovery178NextAttempt = 0;
+          }
         } catch (error) {
+          const code = String(error?.message || "RECOVERY_ERROR");
+          recovery178Status = recovery178Message(code);
+          // Malformed records or possible duplicates require review, never replay.
+          retry = /RECEIPTS_CHANGED|WRONG_BACKEND|SNAPSHOT_INCOMPLETE|STOCK_NOT_READY/.test(code);
+          try { await syncOutbox.setMeta("v178-sale-recovery-diagnostic", {code, at:new Date().toISOString(), appVersion:APP_VERSION, retry}); } catch (_) {}
           console.warn("Pemulihan penjualan tertahan:", error);
-        } finally { recovery176Busy = false; }
+        } finally {
+          recovery176Busy = false;
+          if (retry) scheduleRecovery178();
+          await updateSyncIndicator();
+        }
       }
 
       // The v136 baseline marker is retained solely to avoid running another
@@ -1787,6 +1823,11 @@ const MDDRecovery176 = (() => {
         } catch {
           return setBackendSyncBanner("danger", "SYNC ERROR • IndexedDB tidak dapat dibaca");
         }
+        if (conflicts.length) {
+          const audited = conflicts.some(row => row.commandId === MDDRecovery176.command || row.commandId === MDDRecovery176.command + "-r176");
+          const detail = audited && recovery178Status ? ` • ${recovery178Status}` : "";
+          return setBackendSyncBanner("danger", `PERLU TINDAKAN • ${conflicts.length} perubahan perlu diperiksa${detail} • v${APP_VERSION}`);
+        }
         if (SYNC_ENVIRONMENT === "production" && dashboardLoadState === "DASHBOARD_STALE" && productionBootstrap?.summary) {
           if (isDashboardViewActive()) return setBackendSyncBanner("warning", "ONLINE - DATA TERAKHIR • memperbarui Dashboard di latar belakang");
           return setBackendSyncBanner("success", "ONLINE - MODULES READY");
@@ -1799,7 +1840,7 @@ const MDDRecovery176 = (() => {
           if (isDashboardViewActive()) return setBackendSyncBanner("warning", "Data Dashboard belum dapat dimuat dari server");
           return setBackendSyncBanner("success", "ONLINE - MODULES READY");
         }
-        if (conflicts.length) return setBackendSyncBanner("danger", `PERLU TINDAKAN • ${conflicts.length} perubahan perlu diperiksa`);
+
         if (forcedStatus === "syncing" || pending.some((row) => row.status === "sending")) return setBackendSyncBanner("warning", `SYNCING • ${pending.length} MENUNGGU SINKRONISASI`);
         if (pending.length) return setBackendSyncBanner(pending.some((row) => row.status === "failed") ? "danger" : "warning", `${pending.length} MENUNGGU SINKRONISASI${pending.some((row) => row.status === "failed") ? " • AKAN DICOBA LAGI" : ""}`);
         // v162: green means both write queue AND the authoritative Products read
@@ -1912,7 +1953,7 @@ const MDDRecovery176 = (() => {
         return SYNC_SETTING_KEYS.some((key) => JSON.stringify(state[key]) !== JSON.stringify(lastSyncedSnapshot[key]));
       }
 
-      function requestGoogleWorkspaceJsonpAt(endpoint, action = "state", params = {}) {
+      function requestGoogleWorkspaceJsonpAt(endpoint, action = "state", params = {}, options = {}) {
         return new Promise((resolve) => {
           if (!backendRuntimeEnabled() || !endpoint) return resolve(false);
           const callbackName = `mddBackendState${Date.now()}${Math.random().toString(36).slice(2)}`;
@@ -1927,7 +1968,7 @@ const MDDRecovery176 = (() => {
             resolve(false);
           // Bootstrap/module are intentionally bounded.  A mobile UI may use
           // last-known-good cache rather than remain blocked by a slow request.
-          }, ["state", "finance", "masterlite", "master", "products", "baselinepart"].includes(action) ? 45000 : (action === "dashboardSummary" ? 20000 : (action === "revenueChart" ? 12000 : (action === "bootstrap" || action === "module" || action === "health" ? 7000 : 10000))));
+          }, options.timeoutMs || (["state", "finance", "masterlite", "master", "products", "baselinepart"].includes(action) ? 45000 : (action === "dashboardSummary" ? 20000 : (action === "revenueChart" ? 12000 : (action === "bootstrap" || action === "module" || action === "health" ? 7000 : 10000)))));
           window[callbackName] = (response) => {
             clearTimeout(timer);
             cleanup();
@@ -1943,8 +1984,8 @@ const MDDRecovery176 = (() => {
           document.head.appendChild(script);
         });
       }
-      function requestGoogleWorkspaceJsonp(action = "state", params = {}) {
-        return requestGoogleWorkspaceJsonpAt(activeBackendEndpoint(), action, params);
+      function requestGoogleWorkspaceJsonp(action = "state", params = {}, options = {}) {
+        return requestGoogleWorkspaceJsonpAt(activeBackendEndpoint(), action, params, options);
       }
       function normalizeProductionResponse(payload) {
         if (!payload || typeof payload !== "object") return false;
@@ -3066,7 +3107,7 @@ const MDDRecovery176 = (() => {
           // Phase 1 deliberately does not invoke a new baseline or conflict
           // recovery. Existing business cache and durable outbox remain intact.
           operationSnapshot = JSON.parse(JSON.stringify(state));
-          await recoverAuditedSaleV176();
+          void recoverAuditedSaleV176();
           const pending = await syncOutbox.list(["pending", "failed", "sending"], 1);
           // v141 never hydrates the full business snapshot during login.
           // The lightweight bootstrap establishes READY; modules hydrate later.
@@ -6587,7 +6628,7 @@ const MDDRecovery176 = (() => {
         let batch = [];
         try {
           if (!await verifyActiveBackend()) throw new Error("Endpoint backend tidak terverifikasi");
-          await recoverAuditedSaleV176();
+          void recoverAuditedSaleV176();
           // v159: device-wide worker intentionally finishes durable operations from prior users.
           batch = await syncOutbox.due(25);
           if (!batch.length) return updateSyncIndicator();
@@ -6641,7 +6682,7 @@ const MDDRecovery176 = (() => {
           await updateSyncIndicator();
           renderSyncedState();
           try { await recoverAuditedMortarTransactionV161(); } catch (recoveryError) { console.warn("v161 recovery progression:", recoveryError); }
-          await recoverAuditedSaleV176();
+          void recoverAuditedSaleV176();
           if ((await syncOutbox.due(1)).length) queueGoogleWorkspaceSync();
         } catch (error) {
           // Jangan pernah menurunkan operasi yang sudah ACK menjadi failed.

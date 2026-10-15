@@ -1,0 +1,11 @@
+name: v178 Recovery Transport
+on: [push, pull_request]
+jobs:
+  recovery-transport:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test outputs/mdd-kasir-complete/recovery-transport.test.js outputs/mdd-kasir-complete/sale-recovery.test.js outputs/mdd-kasir-complete/sale-stock-guard.test.js

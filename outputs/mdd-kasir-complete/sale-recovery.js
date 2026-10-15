@@ -13,6 +13,31 @@ const MDDRecovery176 = (() => {
   ];
   const key = 'v176-sale-Q6D53-recovery';
   const cloneId = id => id + '-r176';
+  function productSet(row) {
+    let items = row?.items;
+    if (typeof items === 'string') {
+      try { items = JSON.parse(items); } catch (_) { return null; }
+    }
+    if (!Array.isArray(items) || !items.length || items.some(i => !i || typeof i.productId !== 'string' || !i.productId.trim())) return null;
+    return JSON.stringify([...new Set(items.map(i => i.productId.trim()))].sort());
+  }
+  function checkExistingSales(sales, sale) {
+    const invoice = value => String(value || '').trim().toLowerCase();
+    const sourceProducts = productSet(sale);
+    const collisions = [];
+    for (const row of sales) {
+      if (row.id === sale.id) throw Error('RECOVERY_SALE_ALREADY_EXISTS');
+      const sameInvoice = invoice(row.invoiceNo) === invoice(sale.invoiceNo);
+      const products = productSet(row);
+      // A different ID (or invoice) is not enough to rule out a re-entered sale.
+      // Keep all same-product-set candidates blocked, even with different totals.
+      if (products === sourceProducts || (sameInvoice && !products)) throw Error('RECOVERY_SALE_ALREADY_EXISTS');
+      if (sameInvoice) collisions.push({id: row.id, invoiceNo: row.invoiceNo, productSet: products});
+    }
+    // The production backend reserves a unique invoice on insert under its lock.
+    // Preserve the original payload and record why an invoice-only clash is safe.
+    return collisions;
+  }
   function validate(rows) {
     if (rows.length !== 7) throw Error('RECOVERY_SOURCE_INCOMPLETE');
     for (const [id,entity,entityId,type] of expected) {
@@ -60,7 +85,7 @@ const MDDRecovery176 = (() => {
     if (!ack?.ok || !ids.every(id => (ack.conflicts || []).includes(id)) || (ack.acknowledged || []).some(id => ids.includes(id))) throw Error('RECOVERY_RECEIPTS_CHANGED');
     const snapshot = await a.snapshot();
     if (!snapshot || !Array.isArray(snapshot.sales) || !Array.isArray(snapshot.products) || !Array.isArray(snapshot.stockMoves)) throw Error('RECOVERY_SNAPSHOT_INCOMPLETE');
-    if (snapshot.sales.some(r => r.id === saleId || r.invoiceNo === sale.invoiceNo)) throw Error('RECOVERY_SALE_ALREADY_EXISTS');
+    const invoiceCollisions = checkExistingSales(snapshot.sales, sale);
     if (snapshot.stockMoves.some(r => expected.some(e => e[1] === 'stockMoves' && e[2] === r.id))) throw Error('RECOVERY_STOCK_ALREADY_EXISTS');
     for (const op of originals.filter(r => r.type === 'stock_delta')) {
       const product = snapshot.products.find(p => p.id === op.entityId);
@@ -68,7 +93,7 @@ const MDDRecovery176 = (() => {
       if (!product || !Number.isFinite(stock) || stock + op.payload.delta < -1e-6) throw Error('RECOVERY_STOCK_NOT_READY');
     }
     // Persist the unmodified evidence before creating a deterministic retry.
-    await a.box.setMeta(key+'-archive',{records:originals,at:new Date().toISOString()});
+    await a.box.setMeta(key+'-archive',{records:originals,at:new Date().toISOString(),invoiceCollisions,validationVersion:179});
     const clones = originals.map(source => ({...JSON.parse(JSON.stringify(source)),operationId:cloneId(source.operationId),commandId:cloneId(command),status:'pending',attempts:0,nextAttemptAt:0,lastError:'',terminal:false,recoveryOf:source.operationId,recoveryVersion:176}));
     await a.box.putMany(clones);
     await a.box.setMeta(key,{enqueued:true,recoveryIds});

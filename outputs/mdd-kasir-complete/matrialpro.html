@@ -801,7 +801,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 179;
+      const APP_VERSION = 180;
 /* One audited pre-write stock rejection. Never a general conflict reset. */
 const MDDRecovery176 = (() => {
   const command = '4b56f78e-6945-4947-a7fe-4b78f0318d29';
@@ -1504,8 +1504,12 @@ const MDDRecovery176 = (() => {
           // committed ke transaksi IndexedDB. Jika putMany gagal, diff berikutnya
           // tetap dapat membentuk ulang operasi yang belum durable.
           operationSnapshot = candidateSnapshot;
-          updateSyncIndicator();
-          queueGoogleWorkspaceSync();
+          // The IndexedDB transaction has committed. Optional UI/scheduling
+          // failures must never turn that durable success into a failed save.
+          try { Promise.resolve(updateSyncIndicator()).catch((error) => console.warn("POST_COMMIT_INDICATOR", error)); }
+          catch (error) { console.warn("POST_COMMIT_INDICATOR", error); }
+          try { queueGoogleWorkspaceSync(); }
+          catch (error) { console.warn("POST_COMMIT_SYNC_SCHEDULE", error); }
           return operations;
         }).catch((error) => {
           setBackendSyncBanner("danger", `SIMPAN LOKAL GAGAL • data belum masuk antrean aman (${error.message || error})`);
@@ -1517,25 +1521,38 @@ const MDDRecovery176 = (() => {
         Object.keys(state).forEach((key) => delete state[key]);
         Object.assign(state, JSON.parse(JSON.stringify(snapshot)));
       }
-      async function saveStateDurable(action) {
-        // v154 final durability gate:
-        // UI/business state is provisional until the IndexedDB outbox commit succeeds.
-        // If durable enqueue fails, restore the exact pre-command snapshot so the
-        // screen cannot show a mutation that has no recoverable outbox record.
-        const beforeCommand = JSON.parse(JSON.stringify(operationSnapshot || state));
+      function persistStateCacheAfterDurableWrite() {
+        // Read cache is best-effort. IndexedDB outbox remains the durable record.
+        // Never remove storage, evict transactions, or roll back a committed outbox.
         try {
-          const operations = await captureOperations(action);
-          if (action) addHistory(action);
           localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-          return operations;
+          return true;
         } catch (error) {
+          console.warn("STATE_CACHE_WRITE_FAILED", error);
+          return false;
+        }
+      }
+      async function saveStateDurable(action) {
+        const beforeCommand = JSON.parse(JSON.stringify(operationSnapshot || state));
+        let operations;
+        try {
+          if (baselineInProgress) throw new Error("BASELINE_IN_PROGRESS");
+          operations = await captureOperations(action);
+        } catch (error) {
+          // Only failure before durable enqueue may restore provisional state.
           restoreStateSnapshot(beforeCommand);
           operationSnapshot = JSON.parse(JSON.stringify(beforeCommand));
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-          renderAll();
+          persistStateCacheAfterDurableWrite();
+          try { renderAll(); } catch (renderError) { console.warn("SAVE_ROLLBACK_RENDER", renderError); }
           setBackendSyncBanner("danger", "SIMPAN DIBATALKAN • penyimpanan aman perangkat gagal, perubahan dikembalikan");
           throw error;
         }
+        // History and localStorage are not the transaction commit boundary.
+        // A failure here must leave the same durable operation IDs intact.
+        try { if (action) addHistory(action, false); }
+        catch (error) { console.warn("POST_COMMIT_HISTORY", error); }
+        persistStateCacheAfterDurableWrite();
+        return operations;
       }
       function saveState(action, options = {}) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -1546,10 +1563,10 @@ const MDDRecovery176 = (() => {
           console.error("WRITE_CORE_V147_LEGACY_ENQUEUE_FAILED", error);
         });
       }
-      function addHistory(action) {
+      function addHistory(action, persistCache = true) {
         state.history.unshift({ id: uid("HIS"), date: new Date().toLocaleString("id-ID"), user: session?.name || "Sistem", action });
         state.history = state.history.slice(0, 500);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        if (persistCache) localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       }
       function toast(message) {
         document.getElementById("toastBody").textContent = message;
@@ -4585,7 +4602,12 @@ const MDDRecovery176 = (() => {
           activeCart = writeCoreCartBefore;
           saleCheckoutBusy = false;
           renderAll();
-          toast("TRANSAKSI BELUM TERSIMPAN. Data dikembalikan; silakan coba Simpan lagi.");
+          console.error("SALE_DURABLE_SAVE_FAILED", error);
+          const storageFailure = /QuotaExceededError|InvalidStateError|SecurityError|AbortError/.test(String(error?.name || ""));
+          toast(storageFailure
+            ? "TRANSAKSI BELUM TERSIMPAN • penyimpanan aman perangkat gagal (" + error.name + "). Keranjang tetap tersedia; jangan hapus data aplikasi."
+            : "TRANSAKSI BELUM TERSIMPAN • " + String(error?.message || "Penyimpanan aman gagal") + ". Keranjang tetap tersedia.");
+
           return;
         }
         activeCart = [];
@@ -6813,4 +6835,5 @@ const MDDRecovery176 = (() => {
   </script>
 </body>
 </html>
+
 

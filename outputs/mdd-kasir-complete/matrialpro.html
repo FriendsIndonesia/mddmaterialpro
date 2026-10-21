@@ -801,7 +801,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 182;
+      const APP_VERSION = 183;
 /* One audited pre-write stock rejection. Never a general conflict reset. */
 const MDDRecovery176 = (() => {
   const command = '4b56f78e-6945-4947-a7fe-4b78f0318d29';
@@ -1870,6 +1870,10 @@ const MDDRecovery176 = (() => {
           const detail = audited && recovery178Status ? ` • ${recovery178Status}` : "";
           return setBackendSyncBanner("danger", `PERLU TINDAKAN • ${conflicts.length} perubahan perlu diperiksa${detail} • v${APP_VERSION}`);
         }
+        const view = document.querySelector(".view-section.active")?.id;
+        if (!pending.length && v182ViewReadWarnings(view).length) {
+          return setBackendSyncBanner("warning", "ONLINE - LAPORAN BELUM TERKONFIRMASI TERBARU");
+        }
         if (SYNC_ENVIRONMENT === "production" && dashboardLoadState === "DASHBOARD_STALE" && productionBootstrap?.summary) {
           if (isDashboardViewActive()) return setBackendSyncBanner("warning", "ONLINE - DATA TERAKHIR • memperbarui Dashboard di latar belakang");
           return setBackendSyncBanner("success", "ONLINE - MODULES READY");
@@ -2497,12 +2501,15 @@ const MDDRecovery176 = (() => {
         if (!await v182ReadApplyAllowed()) return false;
         const beforeModule = JSON.stringify(state[module] || []);
         const serverMeta = productionModuleRevisions?.[module] || {};
-        if (!serverMeta.revision) return false;
+        // DashboardSummary deliberately has no entityRevisions. Read the module
+        // itself before deciding whether its local cache is current.
         const cachedRevisions = readCachedModuleRevisions();
         const cached = cachedRevisions[module] || {};
-        if (String(cached.revision || "") === String(serverMeta.revision || "")
-            && Number(cached.count || 0) === Number(serverMeta.count || 0)
-            && (state[module] || []).length === Number(serverMeta.count || 0)) return true;
+        const firstPage = await requestModulePage(module, 0, 300, "");
+        if (!firstPage || !firstPage.revision || !Number.isInteger(firstPage.count) || firstPage.count < 0) return false;
+        if (String(cached.revision || "") === firstPage.revision
+            && Number(cached.count) === firstPage.count
+            && (state[module] || []).length === firstPage.count) return true;
 
         if (module === "products") {
           productsHydrationInFlight = true;
@@ -2512,12 +2519,18 @@ const MDDRecovery176 = (() => {
           let cursor = 0, pages = 0, snapshotRevision = "", expectedCount = null;
           const authoritative = new Map();
           do {
-            const page = await requestModulePage(module, cursor, 300, "");
-            if (!page) return false;
+            const page = pages === 0 ? firstPage : await requestModulePage(module, cursor, 300, "");
+            if (!page || !page.revision || !Number.isInteger(page.count) || page.count < 0) return false;
+            if (expectedCount !== null && page.count !== expectedCount) return false;
+            if (page.hasMore && (!Number.isInteger(page.next) || page.next <= cursor || !page.rows.length)) return false;
             if (!snapshotRevision) snapshotRevision = page.revision;
             if (page.revision && snapshotRevision && page.revision !== snapshotRevision) return false;
             if (expectedCount === null) expectedCount = page.count;
-            for (const row of page.rows) authoritative.set(operationRowId(module, row), row);
+            for (const row of page.rows) {
+              const id = operationRowId(module, row);
+              if (!id || authoritative.has(id)) return false;
+              authoritative.set(id, row);
+            }
             cursor = page.next;
             pages += 1;
             if (!page.hasMore) break;
@@ -6947,6 +6960,7 @@ const MDDRecovery176 = (() => {
   </script>
 </body>
 </html>
+
 
 
 

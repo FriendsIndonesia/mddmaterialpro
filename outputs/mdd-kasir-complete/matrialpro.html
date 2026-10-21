@@ -801,7 +801,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 181;
+      const APP_VERSION = 182;
 /* One audited pre-write stock rejection. Never a general conflict reset. */
 const MDDRecovery176 = (() => {
   const command = '4b56f78e-6945-4947-a7fe-4b78f0318d29';
@@ -2406,8 +2406,9 @@ const MDDRecovery176 = (() => {
             // or alter DashboardSummary readiness.
             setTimeout(async () => {
               try {
+                if (lastChangeCursor) return;
                 const latestCursor = await requestProductionTransport("changes", { cursor: "latest" });
-                if (latestCursor?.ok && latestCursor.cursor) {
+                if (!lastChangeCursor && latestCursor?.ok && latestCursor.cursor) {
                   lastChangeCursor = String(latestCursor.cursor);
                   localStorage.setItem(PRODUCTION_CHANGE_CURSOR_KEY, lastChangeCursor);
                   if (outboxReady) await syncOutbox.setMeta("changeCursor", lastChangeCursor);
@@ -2484,7 +2485,17 @@ const MDDRecovery176 = (() => {
       // The live cache is replaced only after every page arrives at one stable
       // revision. This removes stale/deleted rows and prevents partial pages
       // from being presented as synchronized.
+      async function v182ReadApplyAllowed() {
+        // Never replace optimistic transactions or a form that is currently editing.
+        if (!outboxReady || baselineInProgress || saleCheckoutBusy || purchaseCheckoutBusy || modalSubmitting) return false;
+        if (document.getElementById("formModal")?.classList.contains("show")) return false;
+        const outstanding = await syncOutbox.list(["pending", "sending", "failed", "conflict"], 100000);
+        return outstanding.length === 0;
+      }
+
       async function hydrateAuthoritativeModule(module) {
+        if (!await v182ReadApplyAllowed()) return false;
+        const beforeModule = JSON.stringify(state[module] || []);
         const serverMeta = productionModuleRevisions?.[module] || {};
         if (!serverMeta.revision) return false;
         const cachedRevisions = readCachedModuleRevisions();
@@ -2513,6 +2524,7 @@ const MDDRecovery176 = (() => {
           } while (pages < 100);
 
           if (expectedCount === null || authoritative.size !== Number(expectedCount)) return false;
+          if (!await v182ReadApplyAllowed() || JSON.stringify(state[module] || []) !== beforeModule) return false;
           // v163: the module snapshot itself is authoritative for this module.
           // DashboardSummary entity metadata can lag behind the module endpoint,
           // which previously caused a permanent yellow banner even after a
@@ -2528,7 +2540,6 @@ const MDDRecovery176 = (() => {
           state[module] = [...authoritative.values()];
           normalizeState(state);
           if (module === "purchases" || module === "sales") applyFinanceLedgerAuthority();
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
           operationSnapshot = JSON.parse(JSON.stringify(state));
           cachedRevisions[module] = {
             revision: snapshotRevision || String(serverMeta.revision || ""),
@@ -2536,7 +2547,12 @@ const MDDRecovery176 = (() => {
             syncedAt: new Date().toISOString(),
             mode: "authoritative-full-v164"
           };
-          localStorage.setItem(PRODUCTION_MODULE_REVISION_KEY, JSON.stringify(cachedRevisions));
+          // v182: cache failure must not abort other modules or hide fresh in-memory data.
+          // Write state before revision; never mark stale persisted rows as current.
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+            localStorage.setItem(PRODUCTION_MODULE_REVISION_KEY, JSON.stringify(cachedRevisions));
+          } catch (error) { console.warn("MODULE_READ_CACHE_FAILED", module, error); }
           return true;
         } finally {
           if (module === "products") {
@@ -2601,18 +2617,54 @@ const MDDRecovery176 = (() => {
         }
       }
 
+      const moduleReadErrors = Object.create(null);
+      function v182ViewReadWarnings(view) {
+        const modules = {
+          cashierView: ["sales"], purchaseView: ["purchases"],
+          financeView: ["sales", "purchases", "payments", "cashTx"],
+          reportsView: ["sales", "purchases", "payments", "cashTx", "returns"]
+        }[view] || [];
+        return modules.filter((module) => moduleReadErrors[module]);
+      }
+      function v182ShowReadStatus() {
+        const root = document.querySelector(".view-section.active");
+        if (!root) return;
+        let notice = root.querySelector("[data-module-read-status]");
+        const stale = v182ViewReadWarnings(root.id);
+        if (!stale.length) { if (notice) notice.remove(); return; }
+        if (!notice) {
+          notice = document.createElement("div");
+          notice.setAttribute("data-module-read-status", "true");
+          notice.className = "alert alert-warning";
+          notice.setAttribute("role", "status");
+          root.prepend(notice);
+        }
+        notice.textContent = "DATA BELUM TERKONFIRMASI TERBARU • " + stale.join(", ") + ". Data sebelumnya tetap ditampilkan. Pembaruan menunggu koneksi/penyimpanan siap atau transaksi lokal selesai disinkronkan. Jangan input ulang transaksi yang masih menunggu.";
+      }
+      let moduleBackgroundRefreshPromise = null;
       async function syncModulesInBackground() {
         if (!authoritativeSnapshotReady || !navigator.onLine) return;
-        for (const module of ["sales", "purchases", "payments", "cashTx", "stockMoves", "returns", "customers", "suppliers", "cashAccounts", "categories", "discounts", "packages", "employees"]) {
-          const ok = await hydrateAuthoritativeModule(module);
-          if (ok) {
-            const activeView = document.querySelector(".view-section.active")?.id;
-            if ((module === "products" && (activeView === "productsView" || activeView === "cashierView"))) renderAll();
+        if (moduleBackgroundRefreshPromise) return moduleBackgroundRefreshPromise;
+        moduleBackgroundRefreshPromise = (async () => {
+          for (const module of ["sales", "purchases", "payments", "cashTx", "stockMoves", "returns", "customers", "suppliers", "cashAccounts", "categories", "discounts", "packages", "employees"]) {
+            try {
+              const ok = await hydrateAuthoritativeModule(module);
+              moduleReadErrors[module] = !ok;
+              if (ok) renderSyncedState(); // Existing renderer preserves active forms/cart input.
+              else console.warn("MODULE_REFRESH_PENDING", module);
+            } catch (error) {
+              moduleReadErrors[module] = true;
+              console.warn("MODULE_REFRESH_FAILED", module, error);
+            }
+            await new Promise((resolve) => setTimeout(resolve, 0));
           }
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-        await v166RepairKnownLegacyPaymentConflict();
-        await updateSyncIndicator();
+          v182ShowReadStatus();
+          try { await v166RepairKnownLegacyPaymentConflict(); }
+          catch (error) { console.warn("LEGACY_PAYMENT_CHECK_FAILED", error); }
+          await updateSyncIndicator();
+        })();
+        try { return await moduleBackgroundRefreshPromise; }
+        finally { moduleBackgroundRefreshPromise = null; }
       }
       async function applyAuthoritativeChangesToCurrentRevision() {
         if (!lastChangeCursor || hasLocalSyncChanges()) return false;
@@ -3639,6 +3691,7 @@ const MDDRecovery176 = (() => {
         injectClearReportButton(active);
         makeTablesMobileFriendly(document.getElementById(active));
         enhanceRupiahInputs(document.getElementById(active));
+        v182ShowReadStatus();
       }
 
       function makeTablesMobileFriendly(root = document) {
@@ -6894,6 +6947,7 @@ const MDDRecovery176 = (() => {
   </script>
 </body>
 </html>
+
 
 
 

@@ -15,6 +15,65 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="conversion-utils.js"></script>
   <script src="sync-v2.js"></script>
+  <script>
+const MDDReadCache = (() => {
+  // Independent read cache: never opens, clears, or migrates the business outbox.
+  const DB = "mdd_read_cache_v185", STORE = "modules";
+  function run(scope, module, record) {
+    return new Promise((resolve, reject) => {
+      let db, tx, finished = false, value = null;
+      const finish = (error) => {
+        if (finished) return;
+        finished = true; clearTimeout(timer);
+        if (db) db.close();
+        error ? reject(error) : resolve(value);
+      };
+      const timer = setTimeout(() => {
+        try { if (tx) tx.abort(); } catch {}
+        finish(new Error("READ_CACHE_TIMEOUT"));
+      }, 8000);
+      try {
+        if (typeof indexedDB === "undefined") throw new Error("READ_CACHE_UNAVAILABLE");
+        const request = indexedDB.open(DB, 1);
+        request.onupgradeneeded = () => {
+          if (!request.result.objectStoreNames.contains(STORE)) request.result.createObjectStore(STORE);
+        };
+        request.onerror = () => finish(new Error(request.error?.name || "READ_CACHE_OPEN_FAILED"));
+        request.onblocked = () => finish(new Error("READ_CACHE_BLOCKED"));
+        request.onsuccess = () => {
+          db = request.result;
+          if (finished) { db.close(); return; }
+          try {
+            tx = db.transaction(STORE, record === undefined ? "readonly" : "readwrite");
+            const store = tx.objectStore(STORE), key = scope + ":" + module;
+            const op = record === undefined ? store.get(key) : store.put(record, key);
+            op.onsuccess = () => { value = record === undefined ? op.result || null : true; };
+            tx.oncomplete = () => finish();
+            tx.onabort = () => finish(new Error(tx.error?.name || "READ_CACHE_ABORTED"));
+            tx.onerror = () => {}; // Abort, not request success, determines failure.
+          } catch (error) { finish(error); }
+        };
+      } catch (error) { finish(error); }
+    });
+  }
+  function valid(record, scope, module) {
+    return record?.schema === 1 && record.scope === scope && record.module === module
+      && typeof record.revision === "string" && !!record.revision
+      && Array.isArray(record.rows) && record.count === record.rows.length;
+  }
+  return {
+    async get(scope, module) {
+      const record = await run(scope, module);
+      return valid(record, scope, module) ? record : null;
+    },
+    async put(scope, module, rows, revision) {
+      if (!Array.isArray(rows) || !revision) throw new Error("READ_CACHE_RECORD_INVALID");
+      return run(scope, module, { schema: 1, scope, module, rows, count: rows.length,
+        revision: String(revision), savedAt: new Date().toISOString() });
+    }
+  };
+})();
+  </script>
   <style>
     :root {
       --sidebar: #17212b;
@@ -801,7 +860,7 @@
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 184;
+      const APP_VERSION = 185;
 /* One audited pre-write stock rejection. Never a general conflict reset. */
 const MDDRecovery176 = (() => {
   const command = '4b56f78e-6945-4947-a7fe-4b78f0318d29';
@@ -1238,7 +1297,8 @@ const MDDRecovery176 = (() => {
           if (account.name === ["Bank", "BSI"].join(" ")) account.name = "Rek. Bank";
           if (/^(kas\s*2|petty\s*cash)$/i.test(String(account.name || "").trim())) account.name = "Petty Kas";
         });
-        data.products = (data.products || []).map((product) => {
+        data.products = Array.isArray(data.products) ? data.products : [];
+        data.products.forEach((product) => {
           product.code = String(product.code ?? product.kode ?? "").trim();
           const hasExplicitStock = product.stock !== undefined && product.stock !== null && product.stock !== "";
           const rawStock = toNumber(product.stock);
@@ -2064,6 +2124,14 @@ const MDDRecovery176 = (() => {
       }
       async function requestProductionTransport(action = "state", params = {}) {
         const endpoint = activeBackendEndpoint();
+        if (action === "module") {
+          // One server execution per page. Do not abort fetch and start the same
+          // slow sheet read again through JSONP while the first execution runs.
+          try {
+            return normalizeProductionResponse(await requestGoogleWorkspaceJsonpAt(
+              endpoint, action, params, { timeoutMs: 30000 }));
+          } catch { return false; }
+        }
         const fetched = await requestGoogleWorkspaceFetchAt(endpoint, action, params);
         // CORS/WebView failures fall through immediately; JSONP is retained as
         // the compatible Apps Script transport, with the same response schema.
@@ -2518,11 +2586,20 @@ const MDDRecovery176 = (() => {
         // itself before deciding whether its local cache is current.
         const cachedRevisions = readCachedModuleRevisions();
         const cached = cachedRevisions[module] || {};
-        const firstPage = await requestModulePage(module, 0, 300, "");
+        let firstPage = await requestModulePage(module, 0, 300, "");
         if (!firstPage || !firstPage.revision || !Number.isInteger(firstPage.count) || firstPage.count < 0) return fail("MODULE_RESPONSE_INVALID");
         if (String(cached.revision || "") === firstPage.revision
             && Number(cached.count) === firstPage.count
             && (state[module] || []).length === firstPage.count) return true;
+
+        // Reuse only a module cache whose revision was just confirmed by server.
+        try {
+          const saved = await MDDReadCache.get(EXPECTED_SPREADSHEET_ID, module);
+          if (saved && saved.revision === firstPage.revision && saved.count === firstPage.count) {
+            firstPage = { rows: saved.rows, revision: saved.revision, count: saved.count,
+              next: saved.count, hasMore: false };
+          }
+        } catch (error) { console.warn("MODULE_CACHE_READ_FAILED", module, error); }
 
         if (module === "products") {
           productsHydrationInFlight = true;
@@ -2574,12 +2651,9 @@ const MDDRecovery176 = (() => {
             syncedAt: new Date().toISOString(),
             mode: "authoritative-full-v164"
           };
-          // v182: cache failure must not abort other modules or hide fresh in-memory data.
-          // Write state before revision; never mark stale persisted rows as current.
           try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-            localStorage.setItem(PRODUCTION_MODULE_REVISION_KEY, JSON.stringify(cachedRevisions));
-          } catch (error) { console.warn("MODULE_READ_CACHE_FAILED", module, error); }
+            await MDDReadCache.put(EXPECTED_SPREADSHEET_ID, module, state[module], cachedRevisions[module].revision);
+          } catch (error) { errors[module] = "READ_CACHE_WRITE_FAILED"; console.warn("MODULE_READ_CACHE_FAILED", module, error); }
           return true;
         } finally {
           if (module === "products") {
@@ -2610,6 +2684,20 @@ const MDDRecovery176 = (() => {
           const rows = response?.data?.products;
           if (!response?.ok || String(response.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID || !Array.isArray(rows)) {
             ensureProductsFirstPage.lastError = "PRODUCTS_RESPONSE_INVALID";
+            // Last-known-good is a fallback, never proof of current server data.
+            try {
+              const saved = await MDDReadCache.get(EXPECTED_SPREADSHEET_ID, "products");
+              if (saved && saved.rows.length && await v182ReadApplyAllowed()
+                  && JSON.stringify(state.products || []) === beforeProducts) {
+                const ids = saved.rows.map(row => operationRowId("products", row));
+                if (ids.every(Boolean) && new Set(ids).size === ids.length) {
+                  state.products = saved.rows;
+                  normalizeState(state);
+                  operationSnapshot = JSON.parse(JSON.stringify(state));
+                  renderSyncedState();
+                }
+              }
+            } catch {}
             return false;
           }
           const authoritative = new Map();
@@ -2641,11 +2729,9 @@ const MDDRecovery176 = (() => {
             mode: "authoritative-full-single-response-v165"
           };
           try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-            localStorage.setItem(PRODUCTION_MODULE_REVISION_KEY, JSON.stringify(cachedRevisions));
-          } catch {
-            // A valid server response remains usable in memory. Never persist a
-            // new revision if persisting its rows failed.
+            await MDDReadCache.put(EXPECTED_SPREADSHEET_ID, "products", state.products,
+              String(response.revision || cachedRevisions.products.revision));
+          } catch (error) {
             ensureProductsFirstPage.lastError = "READ_CACHE_WRITE_FAILED";
           }
           productionModuleRevisions.products = {
@@ -2698,7 +2784,7 @@ const MDDRecovery176 = (() => {
           for (const module of ["sales", "purchases", "payments", "cashTx", "stockMoves", "returns", "customers", "suppliers", "cashAccounts", "categories", "discounts", "packages", "employees"]) {
             try {
               const ok = await hydrateAuthoritativeModule(module);
-              moduleReadErrors[module] = !ok;
+              moduleReadErrors[module] = !ok || Boolean(hydrateAuthoritativeModule.errors?.[module]);
               if (ok) renderSyncedState(); // Existing renderer preserves active forms/cart input.
               else console.warn("MODULE_REFRESH_PENDING", module);
             } catch (error) {

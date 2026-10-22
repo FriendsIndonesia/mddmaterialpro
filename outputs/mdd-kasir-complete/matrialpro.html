@@ -860,7 +860,7 @@ const MDDReadCache = (() => {
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 185;
+      const APP_VERSION = 186;
 /* One audited pre-write stock rejection. Never a general conflict reset. */
 const MDDRecovery176 = (() => {
   const command = '4b56f78e-6945-4947-a7fe-4b78f0318d29';
@@ -1937,6 +1937,11 @@ const MDDRecovery176 = (() => {
         if (!pending.length && v182ViewReadWarnings(view).length) {
           return setBackendSyncBanner("warning", "ONLINE - LAPORAN BELUM TERKONFIRMASI TERBARU");
         }
+        if (!pending.length && SYNC_ENVIRONMENT === "production" &&
+            ["sales", "purchases", "payments", "cashTx", "returns"].some((module) =>
+              moduleReadErrors[module] || syncModulesInBackground.verified?.[module] !== true)) {
+          return setBackendSyncBanner("warning", "ONLINE - DATA TRANSAKSI BELUM TERKONFIRMASI TERBARU • v" + APP_VERSION);
+        }
         if (SYNC_ENVIRONMENT === "production" && dashboardLoadState === "DASHBOARD_STALE" && productionBootstrap?.summary) {
           if (isDashboardViewActive()) return setBackendSyncBanner("warning", "ONLINE - DATA TERAKHIR • memperbarui Dashboard di latar belakang");
           return setBackendSyncBanner("success", "ONLINE - MODULES READY");
@@ -2064,7 +2069,7 @@ const MDDRecovery176 = (() => {
 
       function requestGoogleWorkspaceJsonpAt(endpoint, action = "state", params = {}, options = {}) {
         return new Promise((resolve) => {
-          if (!backendRuntimeEnabled() || !endpoint) return resolve(false);
+          if (!backendRuntimeEnabled() || !endpoint) return resolve(options.diagnostics ? { ok: false, readError: "MODULE_ENDPOINT_UNAVAILABLE" } : false);
           const callbackName = `mddBackendState${Date.now()}${Math.random().toString(36).slice(2)}`;
           const script = document.createElement("script");
           const separator = endpoint.includes("?") ? "&" : "?";
@@ -2074,7 +2079,7 @@ const MDDRecovery176 = (() => {
           };
           const timer = setTimeout(() => {
             cleanup();
-            resolve(false);
+            resolve(options.diagnostics ? { ok: false, readError: "MODULE_TIMEOUT" } : false);
           // Bootstrap/module are intentionally bounded.  A mobile UI may use
           // last-known-good cache rather than remain blocked by a slow request.
           }, options.timeoutMs || (["state", "finance", "masterlite", "master", "products", "baselinepart"].includes(action) ? 45000 : (action === "dashboardSummary" ? 20000 : (action === "revenueChart" ? 12000 : (action === "bootstrap" || action === "module" || action === "health" ? 7000 : 10000)))));
@@ -2086,7 +2091,7 @@ const MDDRecovery176 = (() => {
           script.onerror = () => {
             clearTimeout(timer);
             cleanup();
-            resolve(false);
+            resolve(options.diagnostics ? { ok: false, readError: "MODULE_TRANSPORT_ERROR" } : false);
           };
           const query = new URLSearchParams({ action, callback: callbackName, _: String(Date.now()), ...params });
           script.src = `${endpoint}${separator}${query.toString()}`;
@@ -2129,8 +2134,8 @@ const MDDRecovery176 = (() => {
           // slow sheet read again through JSONP while the first execution runs.
           try {
             return normalizeProductionResponse(await requestGoogleWorkspaceJsonpAt(
-              endpoint, action, params, { timeoutMs: 30000 }));
-          } catch { return false; }
+              endpoint, action, params, { timeoutMs: 60000, diagnostics: true }));
+          } catch { return { ok: false, readError: "MODULE_DECODE_FAILED" }; }
         }
         const fetched = await requestGoogleWorkspaceFetchAt(endpoint, action, params);
         // CORS/WebView failures fall through immediately; JSONP is retained as
@@ -2544,15 +2549,26 @@ const MDDRecovery176 = (() => {
 
       async function requestModulePage(module, cursor = 0, limit = 300, updatedSince = "") {
         const response = await requestProductionTransport("module", {
-          module, cursor: String(cursor), limit: String(limit), updatedSince: String(updatedSince || "")
+          module, cursor: String(cursor), limit: String(limit), updatedSince: String(updatedSince || ""),
+          ...(Number(cursor) === 0 && !updatedSince ? { snapshot: "full" } : {})
         });
-        if (!response?.ok || String(response.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID || !Array.isArray(response.data?.rows)) return false;
+        const errors = requestModulePage.errors || (requestModulePage.errors = {});
+        errors[module] = "";
+        const invalid = (reason) => { errors[module] = reason; return false; };
+        if (!response?.ok) return invalid(response?.readError ||
+          (["SNAPSHOT_REVISION_CHANGED", "SNAPSHOT_TOO_LARGE", "SNAPSHOT_CURSOR_INVALID"].includes(response?.error) ? response.error : "MODULE_SERVER_RESPONSE_INVALID"));
+        if (String(response.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) return invalid("MODULE_SCOPE_MISMATCH");
+        if (String(response.module || "") !== String(module)) return invalid("MODULE_NAME_MISMATCH");
+        if (!Array.isArray(response.data?.rows)) return invalid("MODULE_ROWS_INVALID");
+        if (response.data.count === undefined || response.data.count === null ||
+            !Number.isInteger(Number(response.data.count)) || Number(response.data.count) < 0) return invalid("MODULE_COUNT_INVALID");
+        if (typeof response.hasMore !== "boolean") return invalid("MODULE_CURSOR_INVALID");
         return {
           rows: response.data.rows,
           next: Number(response.cursor || 0),
           hasMore: Boolean(response.hasMore),
           revision: String(response.revision || ""),
-          count: Number(response.data.count || 0)
+          count: Number(response.data.count)
         };
       }
 
@@ -2587,7 +2603,7 @@ const MDDRecovery176 = (() => {
         const cachedRevisions = readCachedModuleRevisions();
         const cached = cachedRevisions[module] || {};
         let firstPage = await requestModulePage(module, 0, 300, "");
-        if (!firstPage || !firstPage.revision || !Number.isInteger(firstPage.count) || firstPage.count < 0) return fail("MODULE_RESPONSE_INVALID");
+        if (!firstPage || !firstPage.revision || !Number.isInteger(firstPage.count) || firstPage.count < 0) return fail(requestModulePage.errors?.[module] || "MODULE_RESPONSE_INVALID");
         if (String(cached.revision || "") === firstPage.revision
             && Number(cached.count) === firstPage.count
             && (state[module] || []).length === firstPage.count) return true;
@@ -2610,7 +2626,7 @@ const MDDRecovery176 = (() => {
           const authoritative = new Map();
           do {
             const page = pages === 0 ? firstPage : await requestModulePage(module, cursor, 300, "");
-            if (!page || !page.revision || !Number.isInteger(page.count) || page.count < 0) return fail("PAGE_RESPONSE_INVALID");
+            if (!page || !page.revision || !Number.isInteger(page.count) || page.count < 0) return fail(requestModulePage.errors?.[module] || "PAGE_RESPONSE_INVALID");
             if (expectedCount !== null && page.count !== expectedCount) return fail("COUNT_CHANGED");
             if (page.hasMore && (!Number.isInteger(page.next) || page.next <= cursor || !page.rows.length)) return false;
             if (!snapshotRevision) snapshotRevision = page.revision;
@@ -2782,9 +2798,12 @@ const MDDRecovery176 = (() => {
         if (moduleBackgroundRefreshPromise) return moduleBackgroundRefreshPromise;
         moduleBackgroundRefreshPromise = (async () => {
           for (const module of ["sales", "purchases", "payments", "cashTx", "stockMoves", "returns", "customers", "suppliers", "cashAccounts", "categories", "discounts", "packages", "employees"]) {
+            const verified = syncModulesInBackground.verified || (syncModulesInBackground.verified = {});
+            verified[module] = false;
             try {
               const ok = await hydrateAuthoritativeModule(module);
               moduleReadErrors[module] = !ok || Boolean(hydrateAuthoritativeModule.errors?.[module]);
+              verified[module] = !moduleReadErrors[module];
               if (ok) renderSyncedState(); // Existing renderer preserves active forms/cart input.
               else console.warn("MODULE_REFRESH_PENDING", module);
             } catch (error) {

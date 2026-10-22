@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="id">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Pemeriksaan Koneksi MDD</title>
+<style>
+body{margin:0;background:#f1f5fb;color:#152c4a;font:16px system-ui,sans-serif}main{max-width:600px;margin:32px auto;padding:24px}h1{font-size:26px}li{list-style:none;background:white;border:1px solid #ccd7e5;border-radius:12px;margin:12px 0;padding:18px}ul{padding:0}strong,span{display:block}span{margin-top:8px}.pass{border-color:#16805b}.fail{border-color:#ba4444}p{line-height:1.6}pre{font:13px monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:white;padding:16px;border-radius:10px}button{font:inherit;padding:10px 16px;border:0;border-radius:8px;background:#164fbd;color:white}button:disabled{opacity:.5}
+</style>
+<main>
+<h1>Pemeriksaan Koneksi MDD</h1>
+<p>Pemeriksaan dimulai otomatis. Tunggu paling lama 45 detik. Halaman ini hanya membaca status server; tidak membaca atau mengubah transaksi dan akun toko.</p>
+<ul>
+<li id="normal"><strong>1. Jalur aplikasi biasa</strong><span>Memeriksa…</span></li>
+<li id="anonymous"><strong>2. Jalur tanpa sesi Google</strong><span>Memeriksa…</span></li>
+<li id="json"><strong>3. Jalur JSON tanpa sesi Google</strong><span>Memeriksa…</span></li>
+</ul>
+<p id="summary" role="status">Pemeriksaan berlangsung. Tidak perlu masuk ke akun Google.</p>
+<pre id="report">Menunggu hasil…</pre>
+<button id="copy" disabled>Salin hasil pemeriksaan</button>
+</main>
+<script>
+'use strict';
+const ENDPOINT='https://script.google.com/macros/s/AKfycbz9yQQmE6P5EnTplKVlFTZL1GNPyvblgKBGvOL6qBwG3zjlnO6kRBeWJb0JBvH2MIur/exec';
+const BUDGET=45000;
+const valid=p=>p&&p.ok===true&&p.app==='MDD Material Pro';
+function jsonp(anonymous){return new Promise(resolve=>{
+ const started=Date.now(),name='mddConnection'+Date.now()+Math.random().toString(36).slice(2);
+ const script=document.createElement('script');let settled=false;
+ const finish=code=>{if(settled)return;settled=true;clearTimeout(timer);script.remove();delete window[name];resolve({ok:code==='PASS',code,ms:Date.now()-started});};
+ const timer=setTimeout(()=>finish('TIMEOUT'),BUDGET);
+ window[name]=p=>finish(valid(p)?'PASS':'RESPONSE_INVALID');
+ script.onerror=()=>finish('SCRIPT_LOAD_ERROR');
+ if(anonymous)script.crossOrigin='anonymous';
+ script.src=ENDPOINT+'?action=health&callback='+encodeURIComponent(name)+'&_='+Date.now();
+ document.head.appendChild(script);
+});}
+async function jsonRead(){const started=Date.now(),controller=new AbortController();const timer=setTimeout(()=>controller.abort(),BUDGET);
+ try{const response=await fetch(ENDPOINT+'?action=health&_='+Date.now(),{credentials:'omit',cache:'no-store',redirect:'follow',signal:controller.signal});
+  if(!response.ok)return{ok:false,code:'HTTP_ERROR',http:response.status,ms:Date.now()-started};
+  const payload=await response.json();return{ok:valid(payload),code:valid(payload)?'PASS':'RESPONSE_INVALID',ms:Date.now()-started};
+ }catch(error){return{ok:false,code:error.name==='AbortError'?'TIMEOUT':'FETCH_OR_CORS_ERROR',ms:Date.now()-started};}finally{clearTimeout(timer);}
+}
+const results={};
+function show(id,result){results[id]=result;const row=document.getElementById(id);row.className=result.ok?'pass':'fail';row.querySelector('span').textContent=(result.ok?'Berhasil':'Gagal')+' · '+result.code+' · '+(result.ms/1000).toFixed(1)+' detik';document.getElementById('report').textContent=JSON.stringify({check:'mdd-health-transport-v1',results},null,2);}
+Promise.all([['normal',()=>jsonp(false)],['anonymous',()=>jsonp(true)],['json',jsonRead]].map(async([id,run])=>{try{show(id,await run());}catch{show(id,{ok:false,code:'CHECK_UNAVAILABLE',ms:0});}})).then(()=>{
+ const working=Object.values(results).filter(r=>r.ok).length;
+ document.getElementById('summary').textContent=working?'Pemeriksaan selesai. '+working+' jalur berhasil. Kirim hasil pemeriksaan ini ke percakapan MDD.':'Pemeriksaan selesai. Ketiga jalur gagal pada perangkat ini. Kirim hasil pemeriksaan ini ke percakapan MDD.';
+ document.getElementById('copy').disabled=false;
+});
+document.getElementById('copy').onclick=async()=>{try{await navigator.clipboard.writeText(document.getElementById('report').textContent);document.getElementById('copy').textContent='Hasil sudah disalin';}catch{document.getElementById('summary').textContent='Penyalinan tidak tersedia. Kirim foto hasil pemeriksaan di layar ini.';}};
+</script>
+</html>

@@ -860,7 +860,7 @@ const MDDReadCache = (() => {
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 186;
+      const APP_VERSION = 187;
 /* One audited pre-write stock rejection. Never a general conflict reset. */
 const MDDRecovery176 = (() => {
   const command = '4b56f78e-6945-4947-a7fe-4b78f0318d29';
@@ -2072,6 +2072,9 @@ const MDDRecovery176 = (() => {
           if (!backendRuntimeEnabled() || !endpoint) return resolve(options.diagnostics ? { ok: false, readError: "MODULE_ENDPOINT_UNAVAILABLE" } : false);
           const callbackName = `mddBackendState${Date.now()}${Math.random().toString(36).slice(2)}`;
           const script = document.createElement("script");
+          // The public read endpoint must not inherit a device Google login.
+          // CORS anonymous omits cross-origin cookies, including on redirects.
+          script.crossOrigin = "anonymous";
           const separator = endpoint.includes("?") ? "&" : "?";
           const cleanup = () => {
             delete window[callbackName];
@@ -2118,7 +2121,7 @@ const MDDRecovery176 = (() => {
         try {
           const separator = endpoint.includes("?") ? "&" : "?";
           const query = new URLSearchParams({ action, _: String(Date.now()), ...params });
-          const response = await fetch(`${endpoint}${separator}${query.toString()}`, { cache: "no-store", redirect: "follow", signal: controller?.signal });
+          const response = await fetch(`${endpoint}${separator}${query.toString()}`, { credentials: "omit", cache: "no-store", redirect: "follow", signal: controller?.signal });
           if (!response.ok) return false;
           return normalizeProductionResponse(await response.json());
         } catch {

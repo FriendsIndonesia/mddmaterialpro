@@ -860,7 +860,7 @@ const MDDReadCache = (() => {
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 187;
+      const APP_VERSION = 188;
 /* One audited pre-write stock rejection. Never a general conflict reset. */
 const MDDRecovery176 = (() => {
   const command = '4b56f78e-6945-4947-a7fe-4b78f0318d29';
@@ -1146,6 +1146,7 @@ const MDDRecovery176 = (() => {
       let masterSearchSources = {};
       let productDatabaseQuery = "";
       let financeDatabaseQuery = "";
+      let financeShowSettled = false;
       let financeProductQuery = "";
       let reportPeriod = "bulanan";
       let reportTransactionQuery = "";
@@ -1938,7 +1939,7 @@ const MDDRecovery176 = (() => {
           return setBackendSyncBanner("warning", "ONLINE - LAPORAN BELUM TERKONFIRMASI TERBARU");
         }
         if (!pending.length && SYNC_ENVIRONMENT === "production" &&
-            ["sales", "purchases", "payments", "cashTx", "returns"].some((module) =>
+            ["sales", "purchases", "payments", "cashTx", "returns", "finance"].some((module) =>
               moduleReadErrors[module] || syncModulesInBackground.verified?.[module] !== true)) {
           return setBackendSyncBanner("warning", "ONLINE - DATA TRANSAKSI BELUM TERKONFIRMASI TERBARU • v" + APP_VERSION);
         }
@@ -2132,7 +2133,7 @@ const MDDRecovery176 = (() => {
       }
       async function requestProductionTransport(action = "state", params = {}) {
         const endpoint = activeBackendEndpoint();
-        if (action === "module") {
+        if (action === "module" || action === "finance") {
           // One server execution per page. Do not abort fetch and start the same
           // slow sheet read again through JSONP while the first execution runs.
           try {
@@ -2319,14 +2320,24 @@ const MDDRecovery176 = (() => {
         apply(state.purchases, financeLedgerAuthority.debt || {}, "debt");
         apply(state.sales, financeLedgerAuthority.receivable || {}, "receivable");
       }
-      async function refreshAuthoritativeFinanceLedger() {
+      async function refreshAuthoritativeFinanceLedger(options = {}) {
         if (!backendRuntimeEnabled() || !activeBackendEndpoint() || !navigator.onLine) return false;
+        if (options.guardRead && !await v182ReadApplyAllowed()) return false;
         const payload = await requestProductionTransport("finance");
         if (!payload?.ok || !payload?.data || String(payload.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) return false;
+        for (const module of ["sales", "purchases"]) {
+          const rows = payload.data[module];
+          if (!Array.isArray(rows) || rows.some((row) => !row || !row.id)
+              || new Set(rows.map((row) => String(row.id))).size !== rows.length) return false;
+        }
+        if (options.guardRead && !await v182ReadApplyAllowed()) return false;
         captureFinanceLedgerAuthority(payload.data);
         mergeSubsetFromBackend(payload.data);
         applyFinanceLedgerAuthority();
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        const verified = syncModulesInBackground.verified || (syncModulesInBackground.verified = {});
+        verified.finance = true;
+        moduleReadErrors.finance = false;
         return true;
       }
 
@@ -2580,6 +2591,33 @@ const MDDRecovery176 = (() => {
       // The live cache is replaced only after every page arrives at one stable
       // revision. This removes stale/deleted rows and prevents partial pages
       // from being presented as synchronized.
+      // Finance carries historical ledger-only documents which canonical module
+      // snapshots do not contain. Retain these server-supplied rows across a
+      // canonical refresh; the next finance read replaces the complete ledger.
+      function retainLegacyFinanceRows(module, canonicalRows, previousRows) {
+        if (!["sales", "purchases"].includes(module)) return canonicalRows;
+        const prefix = module === "sales" ? "PIU-" : "HUT-";
+        const result = [...canonicalRows];
+        const ids = new Set(result.map((row) => String(row.id || "")));
+        const key = (row) => String(row.invoiceNo || "").trim().toLowerCase();
+        const signature = (row) => JSON.stringify([
+          String(row.salesName || row.company || row.customerName || row.relation || "").trim().toLowerCase(),
+          String(row.date || "").slice(0, 10), Number(row.total || 0), Number(row.paid || 0),
+          Number(row.returnAmount || 0), Number(row.due || 0)
+        ]);
+        const matched = new Set();
+        for (const ledger of previousRows || []) {
+          if (!String(ledger.id || "").startsWith(prefix) || ids.has(String(ledger.id))) continue;
+          const candidates = canonicalRows.map((row, index) => ({ row, index }))
+            .filter(({ row, index }) => !matched.has(index) && key(row) === key(ledger));
+          const exact = candidates.find(({ row }) => signature(row) === signature(ledger));
+          const match = exact || (candidates.length === 1 ? candidates[0] : null);
+          if (match) matched.add(match.index);
+          else { result.push({ ...ledger }); ids.add(String(ledger.id)); }
+        }
+        return result;
+      }
+
       async function v182ReadApplyAllowed() {
         v182ReadApplyAllowed.lastReason = "";
         const block = (reason) => { v182ReadApplyAllowed.lastReason = reason; return false; };
@@ -2660,7 +2698,8 @@ const MDDRecovery176 = (() => {
             source: module === "products" ? "authoritative-products-snapshot-v164" : "authoritative-module-snapshot-v164"
           });
 
-          state[module] = [...authoritative.values()];
+          const canonicalRows = [...authoritative.values()];
+          state[module] = retainLegacyFinanceRows(module, canonicalRows, state[module]);
           normalizeState(state);
           if (module === "purchases" || module === "sales") applyFinanceLedgerAuthority();
           operationSnapshot = JSON.parse(JSON.stringify(state));
@@ -2671,7 +2710,7 @@ const MDDRecovery176 = (() => {
             mode: "authoritative-full-v164"
           };
           try {
-            await MDDReadCache.put(EXPECTED_SPREADSHEET_ID, module, state[module], cachedRevisions[module].revision);
+            await MDDReadCache.put(EXPECTED_SPREADSHEET_ID, module, canonicalRows, cachedRevisions[module].revision);
           } catch (error) { errors[module] = "READ_CACHE_WRITE_FAILED"; console.warn("MODULE_READ_CACHE_FAILED", module, error); }
           return true;
         } finally {
@@ -2775,8 +2814,8 @@ const MDDRecovery176 = (() => {
       function v182ViewReadWarnings(view) {
         const modules = {
           cashierView: ["sales"], purchaseView: ["purchases"],
-          financeView: ["sales", "purchases", "payments", "cashTx"],
-          reportsView: ["sales", "purchases", "payments", "cashTx", "returns"]
+          financeView: ["sales", "purchases", "payments", "cashTx", "finance"],
+          reportsView: ["sales", "purchases", "payments", "cashTx", "returns", "finance"]
         }[view] || [];
         return modules.filter((module) => moduleReadErrors[module]);
       }
@@ -2816,6 +2855,14 @@ const MDDRecovery176 = (() => {
             }
             await new Promise((resolve) => setTimeout(resolve, 0));
           }
+          const verified = syncModulesInBackground.verified || (syncModulesInBackground.verified = {});
+          verified.finance = false;
+          try {
+            const loaded = await refreshAuthoritativeFinanceLedger({ guardRead: true });
+            moduleReadErrors.finance = !loaded;
+            verified.finance = loaded;
+            if (loaded) renderSyncedState();
+          } catch (error) { moduleReadErrors.finance = true; console.warn("FINANCE_LEDGER_REFRESH_FAILED", error); }
           v182ShowReadStatus();
           try { await v166RepairKnownLegacyPaymentConflict(); }
           catch (error) { console.warn("LEGACY_PAYMENT_CHECK_FAILED", error); }
@@ -5102,10 +5149,11 @@ const MDDRecovery176 = (() => {
             <div class="metric-card"><div class="metric-icon bg-cyan"><i class="bi bi-graph-up"></i></div><div><span>Arus Kas Operasional Bersih</span><strong>${idr.format(flow.total)}</strong><small class="metric-source">Penerimaan penjualan − pembayaran pembelian + transaksi kas bersih</small></div></div>
           </div>
           <div class="audit-box mb-3"><strong>Rincian arus kas:</strong> penerimaan penjualan ${idr.format(flow.salesReceived)} − pembayaran pembelian ${idr.format(flow.purchasesPaid)} + kas masuk ${idr.format(flow.cashIn)} − kas keluar ${idr.format(flow.cashOut)} = <strong>${idr.format(flow.total)}</strong>. Saldo awal/Master Kas tidak dihitung dalam arus kas.</div>
-          <section class="panel mb-3"><div class="panel-header"><h3>Pencarian Data Base Hutang-Piutang</h3><span class="chip"><i class="bi bi-search"></i> Cari dan bayar</span></div>
+          <section class="panel mb-3"><div class="panel-header"><h3>Data Hutang-Piutang Semua Tahun</h3><span class="chip"><i class="bi bi-search"></i> Cari dan bayar</span></div>
             <div class="row g-3 align-items-end">
-              <div class="col-md-9"><label class="form-label">Nama Orang/Perusahaan atau Nomor Faktur</label><input id="financeDatabaseSearch" list="financeDatabaseNames" class="form-control" value="${esc(financeDatabaseQuery)}" autocomplete="off" placeholder="Ketik nama supplier, perusahaan, pelanggan, atau nomor faktur"><datalist id="financeDatabaseNames">${financeRelationOptions().map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist></div>
+              <div class="col-md-9"><label class="form-label">Nama Orang/Perusahaan atau Nomor Faktur</label><input id="financeDatabaseSearch" list="financeDatabaseNames" class="form-control" value="${esc(financeDatabaseQuery)}" autocomplete="off" placeholder="Cari nama atau faktur; kosongkan untuk semua tagihan aktif"><datalist id="financeDatabaseNames">${financeRelationOptions().map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist></div>
               <div class="col-md-3 d-grid gap-2"><button id="clearFinanceDatabaseSearch" class="btn btn-outline-secondary" type="button"><i class="bi bi-x-circle"></i> Bersihkan</button><button id="bulkFinancePaymentBtn" class="btn btn-primary" type="button" disabled><i class="bi bi-check2-square"></i> Bayar Terpilih</button></div>
+              <div class="col-12"><label class="form-check-label"><input id="financeShowSettled" type="checkbox" class="form-check-input me-2" ${financeShowSettled ? "checked" : ""}>Tampilkan juga riwayat hutang/piutang lunas</label></div>
               <div class="col-12"><div id="financeBulkSelectionSummary" class="audit-box"><strong>Jumlah Total Terpilih:</strong> Rp 0</div></div>
             </div>
           </section>
@@ -5121,6 +5169,7 @@ const MDDRecovery176 = (() => {
           <section class="panel mt-3"><div class="panel-header"><h3>Laporan Transaksi Kas</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="cash"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${cashTable(visibleReportRows("financeView", "cashTx", state.cashTx))}</section>`;
         document.getElementById("addCashTxBtn").onclick = openCashTxModal;
         document.getElementById("clearFinanceCashReportBtn").onclick = () => clearCurrentViewReport("financeView");
+        document.getElementById("financeShowSettled").onchange = (event) => { financeShowSettled = event.target.checked; renderFinanceDatabaseSearch(); };
         document.getElementById("financeDatabaseSearch").oninput = (event) => { financeDatabaseQuery = event.target.value; renderFinanceDatabaseSearch(); };
         document.getElementById("clearFinanceDatabaseSearch").onclick = () => { financeDatabaseQuery = ""; financeProductQuery = ""; financeBulkSelection.clear(); document.getElementById("financeDatabaseSearch").value = ""; renderFinanceDatabaseSearch(); document.getElementById("financeDatabaseSearch").focus(); };
         document.getElementById("bulkFinancePaymentBtn").onclick = openBulkFinancePaymentModal;
@@ -5133,7 +5182,7 @@ const MDDRecovery176 = (() => {
         document.querySelectorAll("[data-edit-receivable]").forEach((btn) => btn.onclick = () => openReceivableInputModal(btn.dataset.editReceivable));
         document.querySelectorAll("[data-delete-receivable]").forEach((btn) => btn.onclick = () => deleteReceivableRecord(btn.dataset.deleteReceivable));
         bindTableExports();
-        if (financeDatabaseQuery) renderFinanceDatabaseSearch();
+        renderFinanceDatabaseSearch();
       }
       function financeRowProductData(row) {
         return (Array.isArray(row?.items) ? row.items : []).map((item) => {
@@ -5205,25 +5254,24 @@ const MDDRecovery176 = (() => {
         const receivableTarget = document.getElementById("financeReceivableSearchResults");
         if (!input || !debtTarget || !receivableTarget) return;
         const query = String(financeDatabaseQuery || input.value || "").trim().toLowerCase();
-        if (!query) {
-          debtTarget.innerHTML = "Ketik nama/perusahaan atau nomor faktur untuk menampilkan hutang aktif.";
-          receivableTarget.innerHTML = "Ketik nama/perusahaan atau nomor faktur untuk menampilkan piutang aktif.";
-          updateBulkFinancePaymentButton();
-          return;
-        }
         const debtMatches = state.purchases.filter((row) => {
+          if (!query) return toNumber(row.due) > 0 || (financeShowSettled && (String(row.id || "").startsWith("HUT-") || /hutang|dp/i.test(row.method || "")));
           const supplier = selectedSupplierData(row.supplierId);
           const relationMatch = financeTextMatches([row.invoiceNo, row.noFaktur, row.invoice, row.salesName, row.supplierName, row.supplier, row.relation, row.company, row.namaPerusahaan, row.whatsapp, supplier.name, supplier.company, supplier.phone], query);
           return relationMatch;
         }).map((row) => { const supplier = selectedSupplierData(row.supplierId); return { type: "Hutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.company || supplier.company || row.salesName || supplier.name || "-", address: row.address || row.supplierAddress || supplier.address || "-", whatsapp: row.whatsapp || row.phone || supplier.phone || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due, items: row.items }; });
         const receivableMatches = state.sales.filter((row) => {
+          if (!query) return toNumber(row.due) > 0 || (financeShowSettled && (String(row.id || "").startsWith("PIU-") || /piutang|dp/i.test(row.method || "")));
           const customer = state.customers.find((item) => item.id === row.customerId) || {};
           const relationMatch = financeTextMatches([row.invoiceNo, row.noFaktur, row.invoice, row.customerName, row.pelanggan, row.customer, row.relation, row.customerWhatsapp, customer.name, customer.phone, customer.address], query);
           return relationMatch;
         }).map((row) => { const customer = state.customers.find((item) => item.id === row.customerId) || {}; return { type: "Piutang", id: row.id, invoice: row.invoiceNo || row.id, name: row.customerName || customer.name || "-", address: row.customerAddress || row.address || customer.address || "-", whatsapp: row.customerWhatsapp || row.whatsapp || customer.phone || "-", date: row.date, dueDate: row.dueDate, total: row.total, remaining: row.due, items: row.items }; });
         const resultTable = (rows, type) => rows.length ? `<div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th><i class="bi bi-check2-square"></i></th><th>Nama/Perusahaan</th><th>Alamat</th><th>WhatsApp</th><th>No. Faktur</th><th>Rincian Produk/Barang</th><th>Tanggal</th><th>Jatuh Tempo</th><th class="text-end">Total Hutang/Piutang</th><th class="text-end">Sisa Pembayaran</th><th></th></tr></thead><tbody>${rows.map((row) => { const selectionKey = `${type}:${row.id}`; return `<tr><td><input class="form-check-input" type="checkbox" data-finance-bulk-check="${selectionKey}" ${financeBulkSelection.has(selectionKey) ? "checked" : ""} aria-label="Pilih ${esc(row.invoice)}"></td><td><strong>${esc(row.name)}</strong></td><td>${esc(row.address)}</td><td>${esc(row.whatsapp)}</td><td>${esc(row.invoice)}</td><td>${transactionItemDetails(row)}</td><td>${displayDate(row.date)}</td><td>${displayDate(row.dueDate)}</td><td class="text-end">${idr.format(row.total || 0)}</td><td class="text-end fw-bold">${idr.format(row.remaining || 0)}</td><td class="text-end"><button class="btn btn-sm btn-primary" data-finance-search-pay="${type}" data-finance-search-id="${row.id}" ${toNumber(row.remaining) <= 0 ? "disabled" : ""}><i class="bi bi-cash-coin"></i> ${toNumber(row.remaining) > 0 ? "Bayar" : "Lunas"}</button> <button type="button" class="btn btn-sm btn-outline-primary" data-finance-print="${type}" data-finance-print-id="${esc(row.id)}" aria-label="Print faktur ${esc(row.invoice)}"><i class="bi bi-printer"></i> Print</button></td></tr>`; }).join("")}</tbody></table></div>` : `<div class="text-center text-secondary py-3">Data ${type === "debt" ? "hutang" : "piutang"} yang sesuai tidak ditemukan.</div>`;
         debtTarget.innerHTML = resultTable(debtMatches, "debt");
-        receivableTarget.innerHTML = resultTable(receivableMatches, "receivable");
+        const pendingMatches = query ? (state.pendingSales || []).filter((row) =>
+          financeTextMatches([row.customerName, row.invoiceNo], query)) : [];
+        const pendingNotice = pendingMatches.length ? `<div class="alert alert-info mt-3"><strong>Invoice masih Pending:</strong> ${pendingMatches.map((row) => `${esc(row.invoiceNo || row.id)} · ${displayDate(row.date)} · ${idr.format(row.total || 0)}`).join("; ")}. Belum menjadi penjualan final/piutang. Periksa melalui Kasir → Invoice Pending.</div>` : "";
+        receivableTarget.innerHTML = resultTable(receivableMatches, "receivable") + pendingNotice;
         document.querySelectorAll("[data-finance-print]").forEach((button) => button.onclick = () => printFinanceInvoice(button.dataset.financePrint, button.dataset.financePrintId));
         document.querySelectorAll("[data-finance-search-pay]").forEach((button) => button.onclick = () => openPaymentModal(button.dataset.financeSearchPay, button.dataset.financeSearchId));
         document.querySelectorAll("[data-finance-bulk-check]").forEach((checkbox) => checkbox.onchange = () => { if (checkbox.checked) financeBulkSelection.add(checkbox.dataset.financeBulkCheck); else financeBulkSelection.delete(checkbox.dataset.financeBulkCheck); updateBulkFinancePaymentButton(); });

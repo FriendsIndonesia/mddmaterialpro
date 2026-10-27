@@ -860,7 +860,7 @@ const MDDReadCache = (() => {
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 189;
+      const APP_VERSION = 190;
 /* One audited pre-write stock rejection. Never a general conflict reset. */
 const MDDRecovery176 = (() => {
   const command = '4b56f78e-6945-4947-a7fe-4b78f0318d29';
@@ -1991,7 +1991,7 @@ const MDDRecovery176 = (() => {
         return true;
       }
 
-      function mergeSubsetFromBackend(remoteData) {
+      function mergeSubsetFromBackend(remoteData, options = {}) {
         if (!remoteData || typeof remoteData !== "object") return false;
         const pending = { ...buildSyncChanges(), settings: buildSyncSettings() };
         if (remoteData.deletionTombstones) {
@@ -2011,10 +2011,11 @@ const MDDRecovery176 = (() => {
           }
         });
         normalizeState(state);
+        if (options.financeAuthority) applyFinanceLedgerAuthority();
         if (!lastSyncedSnapshot) lastSyncedSnapshot = JSON.parse(JSON.stringify(state));
         else Object.keys(remoteData).forEach((key) => { lastSyncedSnapshot[key] = JSON.parse(JSON.stringify(state[key] || [])); });
         reapplyPendingChanges(pending);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        if (options.persist !== false) localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         return changedKeys.length > 0;
       }
 
@@ -2150,6 +2151,7 @@ const MDDRecovery176 = (() => {
         return fetched || normalizeProductionResponse(await requestGoogleWorkspaceJsonpAt(endpoint, action, params));
       }
       async function loadGoogleWorkspaceJsonp(action = "state") {
+        if (action === "finance") return refreshAuthoritativeFinanceLedger();
         const response = await requestGoogleWorkspaceJsonp(action);
         if (!response?.ok || !response?.data || String(response.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) return false;
         action === "state" ? mergeStateFromBackend(response.data) : mergeSubsetFromBackend(response.data);
@@ -2262,7 +2264,7 @@ const MDDRecovery176 = (() => {
         catch { return { debt: {}, receivable: {} }; }
       })();
       const financeInvoiceKey = (value) => String(value || "").trim().toLowerCase();
-      function captureFinanceLedgerAuthority(remoteData) {
+      function captureFinanceLedgerAuthority(remoteData, options = {}) {
         const next = { debt: {}, receivable: {}, savedAt: new Date().toISOString() };
         (remoteData?.purchases || []).forEach((row) => {
           const key = financeInvoiceKey(row.invoiceNo || row.id);
@@ -2288,7 +2290,7 @@ const MDDRecovery176 = (() => {
           };
         });
         financeLedgerAuthority = next;
-        localStorage.setItem(FINANCE_LEDGER_AUTHORITY_KEY, JSON.stringify(next));
+        if (options.persist !== false) localStorage.setItem(FINANCE_LEDGER_AUTHORITY_KEY, JSON.stringify(next));
       }
       // v171 Finance Identity Guard: invoice numbers are not globally unique in
       // legacy production data. Never let an invoice-only ledger projection from
@@ -2328,6 +2330,8 @@ const MDDRecovery176 = (() => {
         if (financeLedgerRefreshPromise) return financeLedgerRefreshPromise;
         const fail = (reason) => {
           refreshAuthoritativeFinanceLedger.lastError = reason;
+          moduleReadErrors.finance = true;
+          (syncModulesInBackground.verified || (syncModulesInBackground.verified = {})).finance = false;
           (hydrateAuthoritativeModule.errors || (hydrateAuthoritativeModule.errors = {})).finance = reason;
           return false;
         };
@@ -2345,13 +2349,24 @@ const MDDRecovery176 = (() => {
               if (new Set(rows.map((row) => String(row.id))).size !== rows.length) return fail("FINANCE_DUPLICATE_ID_" + module);
             }
             if (options.guardRead && !await v182ReadApplyAllowed()) return fail("FINANCE_READ_DEFERRED_" + (v182ReadApplyAllowed.lastReason || "LOCAL_BUSY"));
+            // Finance is a server-derived read snapshot, not a local write.
+            // Persist it in the independent IndexedDB read cache instead of
+            // growing the monolithic localStorage state/authority records.
+            const keys = ["sales", "purchases", "payments", "cashAccounts", "cashTx", "returns", "pendingSales", "pendingPurchases"];
+            if (keys.some((key) => !Array.isArray(payload.data[key]))) return fail("FINANCE_TABLES_INVALID");
+            const readData = Object.fromEntries(keys.map((key) => [key, payload.data[key]]));
+            phase = "CACHE";
+            await MDDReadCache.put(EXPECTED_SPREADSHEET_ID, "finance", [{ id: "finance", data: readData }],
+              String(payload.revision || payload.syncedAt || new Date().toISOString()));
+            // An edit/payment may start while IndexedDB commits. Never replace
+            // its local view using this background snapshot.
+            if (options.guardRead && !await v182ReadApplyAllowed()) return fail("FINANCE_READ_DEFERRED_" + (v182ReadApplyAllowed.lastReason || "LOCAL_BUSY"));
             phase = "AUTHORITY";
-            captureFinanceLedgerAuthority(payload.data);
+            captureFinanceLedgerAuthority(readData, { persist: false });
             phase = "MERGE";
-            mergeSubsetFromBackend(payload.data);
-            applyFinanceLedgerAuthority();
-            phase = "STORAGE";
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+            // Authority is applied before the remote baseline is captured;
+            // pending local commands are then replayed by the normal merger.
+            mergeSubsetFromBackend(readData, { persist: false, financeAuthority: true });
             const verified = syncModulesInBackground.verified || (syncModulesInBackground.verified = {});
             verified.finance = true;
             moduleReadErrors.finance = false;
@@ -2360,20 +2375,23 @@ const MDDRecovery176 = (() => {
             return true;
           } catch (error) {
             console.warn("FINANCE_LEDGER_REFRESH_FAILED", phase, error);
-            return fail(error?.name === "QuotaExceededError" ? "FINANCE_STORAGE_FULL" : "FINANCE_" + phase + "_FAILED");
+            return fail(phase === "CACHE" ? ((error?.name === "QuotaExceededError" || error?.message === "QuotaExceededError") ? "FINANCE_READ_CACHE_FULL" : "FINANCE_" + (error?.message || "CACHE_FAILED"))
+              : (error?.name === "QuotaExceededError" ? "FINANCE_STORAGE_FULL" : "FINANCE_" + phase + "_FAILED"));
           }
         })();
         try { return await financeLedgerRefreshPromise; }
-        finally { financeLedgerRefreshPromise = null; }
+        finally {
+          financeLedgerRefreshPromise = null;
+          try { v182ShowReadStatus(); await updateSyncIndicator(); } catch {}
+        }
       }
 
       async function loadGoogleWorkspaceState(action = "state") {
+        if (action === "finance") return refreshAuthoritativeFinanceLedger();
         if (!backendRuntimeEnabled() || !activeBackendEndpoint()) return false;
         const payload = await requestProductionTransport(action);
         if (!payload?.ok || !payload?.data || String(payload.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) return false;
-        if (action === "finance") captureFinanceLedgerAuthority(payload.data);
         action === "state" ? mergeStateFromBackend(payload.data) : mergeSubsetFromBackend(payload.data);
-        if (action === "finance") { applyFinanceLedgerAuthority(); localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
         if (action === "state") authoritativeSnapshotReady = true;
         return true;
       }

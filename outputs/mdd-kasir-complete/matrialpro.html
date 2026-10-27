@@ -860,7 +860,7 @@ const MDDReadCache = (() => {
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 191;
+      const APP_VERSION = 192;
 /* One audited pre-write stock rejection. Never a general conflict reset. */
 const MDDRecovery176 = (() => {
   const command = '4b56f78e-6945-4947-a7fe-4b78f0318d29';
@@ -1944,7 +1944,9 @@ const MDDRecovery176 = (() => {
         if (!pending.length && SYNC_ENVIRONMENT === "production" &&
             ["sales", "purchases", "payments", "cashTx", "returns", "finance"].some((module) =>
               moduleReadErrors[module] || syncModulesInBackground.verified?.[module] !== true)) {
-          return setBackendSyncBanner("warning", "ONLINE - DATA TRANSAKSI BELUM TERKONFIRMASI TERBARU • v" + APP_VERSION);
+          const labels = { sales: "Penjualan", purchases: "Pembelian", payments: "Pembayaran", cashTx: "Kas", returns: "Retur", finance: "Hutang/Piutang" };
+          const waiting = Object.keys(labels).filter((module) => moduleReadErrors[module] || syncModulesInBackground.verified?.[module] !== true);
+          return setBackendSyncBanner("warning", "ONLINE - MENUNGGU VERIFIKASI: " + waiting.map((module) => labels[module]).join(", ") + " • v" + APP_VERSION);
         }
         if (SYNC_ENVIRONMENT === "production" && dashboardLoadState === "DASHBOARD_STALE" && productionBootstrap?.summary) {
           if (isDashboardViewActive()) return setBackendSyncBanner("warning", "ONLINE - DATA TERAKHIR • memperbarui Dashboard di latar belakang");
@@ -1967,7 +1969,7 @@ const MDDRecovery176 = (() => {
         if (SYNC_ENVIRONMENT === "production" && !productsReadModelIsCurrent()) {
           return setBackendSyncBanner("warning", productsHydrationInFlight
             ? "ONLINE - MENYAMAKAN DATA PRODUK • mohon tunggu"
-            : "ONLINE - DATA PRODUK BELUM SAMA • memperbarui dari server");
+            : "ONLINE - DATA PRODUK BELUM TERKONFIRMASI" + (ensureProductsFirstPage.lastError ? " • " + ensureProductsFirstPage.lastError : " • memperbarui dari server"));
         }
         setBackendSyncBanner("success", "ONLINE - SYNCED");
       }
@@ -2137,7 +2139,7 @@ const MDDRecovery176 = (() => {
       }
       async function requestProductionTransport(action = "state", params = {}) {
         const endpoint = activeBackendEndpoint();
-        if (action === "module" || action === "finance") {
+        if (action === "module" || action === "finance" || action === "products") {
           // One server execution per page. Do not abort fetch and start the same
           // slow sheet read again through JSONP while the first execution runs.
           try {
@@ -2352,7 +2354,7 @@ const MDDRecovery176 = (() => {
             const payload = await requestProductionTransport("finance");
             if (!payload?.ok || !payload?.data) return fail(payload?.readError || "FINANCE_RESPONSE_INVALID");
             if (String(payload.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID) return fail("FINANCE_SCOPE_MISMATCH");
-            for (const module of ["sales", "purchases"]) {
+            for (const module of ["sales", "purchases", "payments", "cashTx", "returns", "cashAccounts", "pendingSales", "pendingPurchases"]) {
               const rows = payload.data[module];
               if (!Array.isArray(rows) || rows.some((row) => !row || !row.id)) return fail("FINANCE_ROWS_INVALID_" + module);
               if (new Set(rows.map((row) => String(row.id))).size !== rows.length) return fail("FINANCE_DUPLICATE_ID_" + module);
@@ -2377,8 +2379,15 @@ const MDDRecovery176 = (() => {
             // pending local commands are then replayed by the normal merger.
             mergeSubsetFromBackend(readData, { persist: false, financeAuthority: true });
             const verified = syncModulesInBackground.verified || (syncModulesInBackground.verified = {});
-            verified.finance = true;
-            moduleReadErrors.finance = false;
+            // action=finance returns complete, unpaginated tables from the
+            // dedicated server reader. These exact tables have just passed
+            // scope/shape/ID validation, cache commit and local-write guards.
+            // They supersede an earlier failed canonical module read.
+            for (const module of ["sales", "purchases", "payments", "cashTx", "returns", "cashAccounts", "pendingSales", "pendingPurchases", "finance"]) {
+              verified[module] = true;
+              moduleReadErrors[module] = false;
+              (hydrateAuthoritativeModule.errors || (hydrateAuthoritativeModule.errors = {}))[module] = "";
+            }
             refreshAuthoritativeFinanceLedger.lastError = "";
             (hydrateAuthoritativeModule.errors || (hydrateAuthoritativeModule.errors = {})).finance = "";
             return true;
@@ -2604,14 +2613,8 @@ const MDDRecovery176 = (() => {
       }
 
       function productsReadModelIsCurrent() {
-        // v165: Products uses one atomic full-snapshot endpoint. Do not compare
-        // against the paginated module/global revision because normal store
-        // writes can change that revision while a multi-page read is running.
-        if (ensureProductsFirstPage.verifiedRows === state.products && state.products?.length > 0) return true;
-        const cached = readCachedModuleRevisions().products || {};
-        return cached.mode === "authoritative-full-single-response-v165"
-          && Number(cached.count || 0) === (state.products || []).length
-          && Number(cached.count || 0) > 0;
+        // Persisted count alone is last-known-good, not proof of a fresh read.
+        return !ensureProductsFirstPage.lastError && ensureProductsFirstPage.verifiedRows === state.products && state.products?.length > 0;
       }
 
       async function requestModulePage(module, cursor = 0, limit = 300, updatedSince = "") {
@@ -2806,7 +2809,7 @@ const MDDRecovery176 = (() => {
           const response = await requestProductionTransport("products", { clientVersion: APP_VERSION });
           const rows = response?.data?.products;
           if (!response?.ok || String(response.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID || !Array.isArray(rows)) {
-            ensureProductsFirstPage.lastError = "PRODUCTS_RESPONSE_INVALID";
+            ensureProductsFirstPage.lastError = response?.readError || (!response?.ok ? "PRODUCTS_SERVER_RESPONSE_INVALID" : (String(response.spreadsheetId || "") !== EXPECTED_SPREADSHEET_ID ? "PRODUCTS_SCOPE_MISMATCH" : "PRODUCTS_ROWS_INVALID"));
             // Last-known-good is a fallback, never proof of current server data.
             try {
               const saved = await MDDReadCache.get(EXPECTED_SPREADSHEET_ID, "products");
@@ -2904,14 +2907,24 @@ const MDDRecovery176 = (() => {
         if (!authoritativeSnapshotReady || !navigator.onLine) return;
         if (moduleBackgroundRefreshPromise) return moduleBackgroundRefreshPromise;
         moduleBackgroundRefreshPromise = (async () => {
-          for (const module of ["sales", "purchases", "payments", "cashTx", "stockMoves", "returns", "customers", "suppliers", "cashAccounts", "categories", "discounts", "packages", "employees"]) {
+          // Load the critical read model first. One complete finance response
+          // already contains Sales, Purchases, Payments, CashTx and Returns,
+          // including legacy ledger rows. Do not download them all a second time.
+          try {
+            const loaded = await refreshAuthoritativeFinanceLedger({ guardRead: true });
+            if (loaded) renderSyncedState();
+          } catch (error) { console.warn("FINANCE_LEDGER_REFRESH_FAILED", error); }
+          v182ShowReadStatus();
+          await updateSyncIndicator();
+          // These optional masters must not delay finance readiness on mobile.
+          for (const module of ["stockMoves", "customers", "suppliers", "categories", "discounts", "packages", "employees"]) {
             const verified = syncModulesInBackground.verified || (syncModulesInBackground.verified = {});
             verified[module] = false;
             try {
               const ok = await hydrateAuthoritativeModule(module);
               moduleReadErrors[module] = !ok || Boolean(hydrateAuthoritativeModule.errors?.[module]);
               verified[module] = !moduleReadErrors[module];
-              if (ok) renderSyncedState(); // Existing renderer preserves active forms/cart input.
+              if (ok) renderSyncedState();
               else console.warn("MODULE_REFRESH_PENDING", module);
             } catch (error) {
               moduleReadErrors[module] = true;
@@ -2920,14 +2933,6 @@ const MDDRecovery176 = (() => {
             }
             await new Promise((resolve) => setTimeout(resolve, 0));
           }
-          const verified = syncModulesInBackground.verified || (syncModulesInBackground.verified = {});
-          verified.finance = false;
-          try {
-            const loaded = await refreshAuthoritativeFinanceLedger({ guardRead: true });
-            moduleReadErrors.finance = !loaded;
-            verified.finance = loaded;
-            if (loaded) renderSyncedState();
-          } catch (error) { moduleReadErrors.finance = true; console.warn("FINANCE_LEDGER_REFRESH_FAILED", error); }
           v182ShowReadStatus();
           try { await v166RepairKnownLegacyPaymentConflict(); }
           catch (error) { console.warn("LEGACY_PAYMENT_CHECK_FAILED", error); }
@@ -2935,6 +2940,20 @@ const MDDRecovery176 = (() => {
         })();
         try { return await moduleBackgroundRefreshPromise; }
         finally { moduleBackgroundRefreshPromise = null; }
+      }
+      async function retryUnverifiedReadModels() {
+        if (!session || !authoritativeSnapshotReady || !navigator.onLine || document.hidden) return;
+        if (!await v182ReadApplyAllowed()) return;
+        const tasks = [];
+        if (!productsReadModelIsCurrent()) tasks.push(ensureProductsFirstPage());
+        const verified = syncModulesInBackground.verified || {};
+        if (["sales", "purchases", "payments", "cashTx", "returns", "finance"].some((module) => moduleReadErrors[module] || verified[module] !== true)) {
+          tasks.push(refreshAuthoritativeFinanceLedger({ guardRead: true }).then((loaded) => {
+            if (loaded) renderSyncedState();
+          }));
+        }
+        await Promise.allSettled(tasks);
+        await updateSyncIndicator();
       }
       async function applyAuthoritativeChangesToCurrentRevision() {
         if (!lastChangeCursor || hasLocalSyncChanges()) return false;
@@ -3272,6 +3291,7 @@ const MDDRecovery176 = (() => {
           await updateSyncIndicator();
         } finally {
           isPulling = false;
+          retryUnverifiedReadModels().catch((error) => console.warn("READ_MODEL_RETRY_FAILED", error));
         }
       }
 

@@ -860,7 +860,7 @@ const MDDReadCache = (() => {
       const PENDING_SYNC_STORAGE_KEY = "mdd_pending_sync_v1";
       const SYNC_ENVIRONMENT = new URLSearchParams(location.search).get("environment") === "staging" ? "staging" : "production";
       const STAGING_ENDPOINT_KEY = "mdd_sync_v2_staging_endpoint";
-      const APP_VERSION = 190;
+      const APP_VERSION = 191;
 /* One audited pre-write stock rejection. Never a general conflict reset. */
 const MDDRecovery176 = (() => {
   const command = '4b56f78e-6945-4947-a7fe-4b78f0318d29';
@@ -2325,6 +2325,15 @@ const MDDRecovery176 = (() => {
         apply(state.purchases, financeLedgerAuthority.debt || {}, "debt");
         apply(state.sales, financeLedgerAuthority.receivable || {}, "receivable");
       }
+      // Serialize finance snapshots and module hydration across the network
+      // and apply phases. A finance menu read must not replace Sales while a
+      // canonical Sales snapshot is still validating its prior local contents.
+      let financeReadTurn = Promise.resolve();
+      function withFinanceReadTurn(task) {
+        const run = financeReadTurn.then(task, task);
+        financeReadTurn = run.then(() => undefined, () => undefined);
+        return run;
+      }
       let financeLedgerRefreshPromise = null;
       async function refreshAuthoritativeFinanceLedger(options = {}) {
         if (financeLedgerRefreshPromise) return financeLedgerRefreshPromise;
@@ -2335,7 +2344,7 @@ const MDDRecovery176 = (() => {
           (hydrateAuthoritativeModule.errors || (hydrateAuthoritativeModule.errors = {})).finance = reason;
           return false;
         };
-        financeLedgerRefreshPromise = (async () => {
+        financeLedgerRefreshPromise = withFinanceReadTurn(async () => {
           let phase = "READ";
           try {
             if (!backendRuntimeEnabled() || !activeBackendEndpoint() || !navigator.onLine) return fail("FINANCE_ENDPOINT_UNAVAILABLE");
@@ -2378,7 +2387,7 @@ const MDDRecovery176 = (() => {
             return fail(phase === "CACHE" ? ((error?.name === "QuotaExceededError" || error?.message === "QuotaExceededError") ? "FINANCE_READ_CACHE_FULL" : "FINANCE_" + (error?.message || "CACHE_FAILED"))
               : (error?.name === "QuotaExceededError" ? "FINANCE_STORAGE_FULL" : "FINANCE_" + phase + "_FAILED"));
           }
-        })();
+        });
         try { return await financeLedgerRefreshPromise; }
         finally {
           financeLedgerRefreshPromise = null;
@@ -2677,6 +2686,18 @@ const MDDRecovery176 = (() => {
       }
 
       async function hydrateAuthoritativeModule(module) {
+        return withFinanceReadTurn(async () => {
+          let loaded = await hydrateAuthoritativeModuleSnapshot(module);
+          // Retry only a completed read invalidated by another local refresh.
+          // Every safety check runs again; queued writes/forms still defer it.
+          if (!loaded && hydrateAuthoritativeModule.errors?.[module] === "LOCAL_DATA_CHANGED"
+              && await v182ReadApplyAllowed()) {
+            loaded = await hydrateAuthoritativeModuleSnapshot(module);
+          }
+          return loaded;
+        });
+      }
+      async function hydrateAuthoritativeModuleSnapshot(module) {
         const errors = hydrateAuthoritativeModule.errors || (hydrateAuthoritativeModule.errors = {});
         const fail = (reason) => { errors[module] = reason; return false; };
         errors[module] = "";
@@ -5173,6 +5194,10 @@ const MDDRecovery176 = (() => {
         else toast(`Pembelian ${purchase.invoiceNo || purchase.id} TERSIMPAN DI PERANGKAT • menunggu sinkronisasi server.`);
       }
 
+      function financeDailyCashRows(rows = state.cashTx) {
+        const day = today();
+        return (rows || []).filter((row) => transactionDateKey(businessDate(row.date)) === day);
+      }
       function renderFinance() {
         const debts = state.purchases.filter((p) => p.due > 0);
         const receivables = state.sales.filter((s) => s.due > 0);
@@ -5210,7 +5235,7 @@ const MDDRecovery176 = (() => {
               <div class="owner-report-item"><span>Sisa Petty Cash</span><strong>${idr.format(pettyCashBalance)}</strong></div>
             </div>
           </section>
-          <section class="panel mt-3"><div class="panel-header"><h3>Laporan Transaksi Kas</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="cash"><i class="bi bi-filetype-pdf"></i> PDF</button></div>${cashTable(visibleReportRows("financeView", "cashTx", state.cashTx))}</section>`;
+          <section class="panel mt-3"><div class="panel-header"><h3>Laporan Transaksi Kas Harian</h3><button class="btn btn-outline-secondary btn-sm" data-export-table="cash"><i class="bi bi-filetype-pdf"></i> PDF Semua Tanggal</button></div><p class="small text-secondary">Transaksi tanggal ${displayDate(today())}. Riwayat tanggal lain tersedia melalui menu Laporan.</p>${cashTable(visibleReportRows("financeView", "cashTx", financeDailyCashRows()))}</section>`;
         document.getElementById("addCashTxBtn").onclick = openCashTxModal;
         document.getElementById("clearFinanceCashReportBtn").onclick = () => clearCurrentViewReport("financeView");
         document.getElementById("financeShowSettled").onchange = (event) => { clearTimeout(financeSearchTimer); financeShowSettled = event.target.checked; financePages = { debt: 1, receivable: 1 }; renderFinanceDatabaseSearch(); };
